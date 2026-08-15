@@ -1,0 +1,19 @@
+{
+  "name": "super-brain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.8.1",
+  "scripts": {
+    "build": "pnpm --filter @_89/confidence-kernel build && pnpm --filter @_89/fold build && pnpm --filter @_89/fold-narrative build && pnpm --filter @_89/fold-trace build",
+    "test": "pnpm --filter @_89/confidence-kernel test && pnpm --filter @_89/fold test && pnpm --filter @_89/fold-narrative test && pnpm --filter @_89/fold-trace test",
+    "typecheck": "pnpm build && pnpm --filter @_89/confidence-kernel typecheck && pnpm --filter @_89/fold typecheck && pnpm --filter @_89/fold-narrative typecheck && pnpm --filter @_89/fold-trace typecheck",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

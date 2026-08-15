@@ -1,0 +1,634 @@
+# Mythopia — the Fellowship reference canon (design spec §17).
+#
+# The stress-test material as a complete worked example: seven characters, one
+# component-bundle entity (the One Ring as Position + ArcOwner + MoodEmitter),
+# twelve locations, six facts, three themes, five arcs with planned curves,
+# fifteen full-schema events (Bag End through the Breaking), and two
+# demonstration editions. Serves triple duty: documentation example,
+# build-phase test data, and onboarding content.
+#
+# Expected behavior encoded here (validated by the test suite):
+#   - Convergence finds the Breaking at Amon Hen (evt_015) as primary climax
+#     and the Bridge of Khazad-dûm (evt_011, C ≈ 0.37) as its twin peak.
+#   - Rivendell (evt_006) and Lothlórien (evt_012) emerge as dips.
+#   - Removing arc_gandalf_stand reproduces the Moria discovery: linter rule 1
+#     flags the bridge as the climax of an unmodeled arc.
+#   - The bridge's -0.72 mood impulse decays through Lothlórien's +0.5
+#     baseline — which is what Lothlórien is structurally for.
+
+mythos:
+  id: mth_fellowship
+  name: The Fellowship of the Ring
+  tagline: One fabula; many tellings.
+  params:
+    lambda: 0.035              # tonal metabolism: grief-literate, decays slowly
+    salience_window_days: 30
+    pace_window_days: 14
+    theme_window_days: 45
+    mood_baseline: 0.0
+    convergence_threshold: 0.15
+  themes: [thm_corrosion_of_power, thm_humility_of_service, thm_passing_of_wisdom]
+
+audiences:
+  - {id: aud_readers, name: The readers}
+  - {id: aud_bedtime_listeners, name: Bedtime listeners}
+
+characters:
+  - id: chr_frodo
+    name: Frodo Baggins
+    traits: {resolve: 0.7, gentleness: 0.8, self_deception: 0.2}
+    relationships:
+      - {to: chr_sam, kind: friend, note: closer than a servant}
+    initial_location: loc_bag_end
+  - id: chr_sam
+    name: Samwise Gamgee
+    traits: {loyalty: 0.95, humility: 0.9}
+    relationships:
+      - {to: chr_frodo, kind: devotion}
+    initial_location: loc_bag_end
+  - id: chr_merry
+    name: Meriadoc Brandybuck
+    traits: {cheer: 0.8, cunning: 0.6}
+    initial_location: loc_the_shire
+  - id: chr_pippin
+    name: Peregrin Took
+    traits: {cheer: 0.9, recklessness: 0.7}
+    initial_location: loc_the_shire
+  - id: chr_gandalf
+    name: Gandalf the Grey
+    traits: {wisdom: 0.95, wrath: 0.5}
+    initial_location: loc_bag_end
+  - id: chr_aragorn
+    name: Aragorn, son of Arathorn
+    traits: {duty: 0.85, doubt: 0.5}
+    initial_location: loc_bree
+  - id: chr_boromir
+    name: Boromir of Gondor
+    traits: {valor: 0.85, ambition: 0.6, self_deception: 0.7}
+    initial_location: loc_rivendell
+  # A group knower (§4): knowledge entries naming the Fellowship expand to members.
+  - id: chr_fellowship
+    name: The Fellowship
+    members: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_gandalf, chr_aragorn, chr_boromir]
+
+things:
+  # The §3 composition amendment demonstrated: not a character, not a location —
+  # an ID with the components it needs.
+  - id: thg_one_ring
+    name: The One Ring
+    components: [Position, ArcOwner, MoodEmitter]
+    mood_emission: -0.05        # standing malice wherever it lies
+    initial_location: loc_bag_end
+    visual:
+      palette: [gold, fire-red]
+      motifs: [a plain circle of gold, script that only heat reveals]
+
+locations:
+  - id: loc_middle_earth
+    name: Middle-earth
+    kind: world
+    rules:
+      - {id: rul_shadow_spreads, note: the Shadow's reach grows year by year}
+  - id: loc_the_shire
+    name: The Shire
+    kind: region
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_bree, kind: passage, traversal: {days: 5}}
+    rules:
+      - {id: rul_quiet_endures, note: news from outside arrives late and small}
+    atmosphere:
+      mood_baseline: 0.6
+      palette: [green, gold, hearth-brown]
+      motifs: [round doors, pipe smoke, party lanterns]
+  - id: loc_bag_end
+    name: Bag End
+    kind: structure
+    containment: {parent: loc_the_shire, mode: spatial}
+    atmosphere:
+      mood_baseline: 0.7
+      palette: [warm yellow, polished wood]
+      motifs: [a well-stocked pantry, maps in a study]
+  - id: loc_bree
+    name: Bree
+    kind: settlement
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_weathertop, kind: passage, traversal: {days: 7}}
+    atmosphere:
+      mood_baseline: 0.1
+      palette: [lamplit brown, rain-grey]
+      motifs: [common-room chatter, watchful strangers]
+  - id: loc_weathertop
+    name: Weathertop
+    kind: structure
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_rivendell, kind: passage, traversal: {days: 14}}
+    atmosphere:
+      mood_baseline: -0.3
+      palette: [cold starlight, broken stone]
+      motifs: [a ruined watchtower, fire against the dark]
+  - id: loc_rivendell
+    name: Rivendell
+    kind: settlement
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_caradhras, kind: passage, traversal: {days: 14}}
+    rules:
+      - {id: rul_sanctuary, note: evil does not pass the Ford}
+    atmosphere:
+      mood_baseline: 0.6
+      palette: [silver, autumn gold, waterfall white]
+      motifs: [bridges over falls, songs in the Hall of Fire]
+  - id: loc_caradhras
+    name: The Pass of Caradhras
+    kind: region
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_moria, kind: passage, traversal: {days: 2}}
+    atmosphere:
+      mood_baseline: -0.4
+      palette: [white-out, iron-grey]
+      motifs: [cruel snow, a mountain with a will]
+  - id: loc_moria
+    name: Moria
+    kind: structure
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_lothlorien, kind: passage, traversal: {days: 1}}
+    rules:
+      - {id: rul_no_light, note: no sun reaches the deep roads}
+    atmosphere:
+      mood_baseline: -0.6
+      palette: [black, dim mithril-silver]
+      motifs: [drums in the deep, doors out of memory]
+  - id: loc_moria_bridge
+    name: The Bridge of Khazad-dûm
+    kind: structure
+    containment: {parent: loc_moria, mode: spatial}
+    atmosphere:
+      mood_baseline: -0.7
+      palette: [firelight on black stone]
+      motifs: [a single narrow span, shadow and flame]
+  - id: loc_lothlorien
+    name: Lothlórien
+    kind: region
+    containment: {parent: loc_middle_earth, mode: spatial}
+    connections:
+      - {to: loc_amon_hen, kind: passage, traversal: {days: 9}, note: down the Great River}
+    rules:
+      - {id: rul_time_runs_slow}
+      - {id: rul_no_shadow_enters}
+      - {id: rul_shadow_spreads, note: held at bay — overrides the world's rule}
+    atmosphere:
+      mood_baseline: 0.5
+      palette: [gold, silver, twilight blue]
+      motifs: [mallorn leaves, soft vertical light]
+  - id: loc_amon_hen
+    name: Amon Hen
+    kind: structure
+    containment: {parent: loc_middle_earth, mode: spatial}
+    atmosphere:
+      mood_baseline: -0.2
+      palette: [river-grey, old stone]
+      motifs: [the Seat of Seeing, boats on the shore]
+  # A mindscape anchors mentally to a character and travels with them (§12).
+  - id: loc_frodo_dreamspace
+    name: The Eye in dream
+    kind: mindscape
+    containment: {parent: chr_frodo, mode: mental}
+    atmosphere:
+      mood_baseline: -0.7
+      palette: [red, black]
+      motifs: [a lidless eye, a wheel of fire]
+
+facts:
+  - {id: fct_ring_is_the_one, statement: Bilbo's ring is the One Ring of Sauron}
+  - {id: fct_aragorn_is_heir, statement: "Strider is Aragorn, heir of Isildur", subject: chr_aragorn}
+  # A fact hidden from its own subject — self-directed dramatic irony (§11).
+  - {id: fct_boromir_desires_ring, statement: Boromir desires the Ring for Gondor, subject: chr_boromir}
+  - {id: fct_gandalf_fell, statement: Gandalf fell at the Bridge of Khazad-dûm, subject: chr_gandalf}
+  - {id: fct_gandalf_survives, statement: Gandalf survived the fall, subject: chr_gandalf}
+  - {id: fct_frodo_intends_to_leave, statement: Frodo means to go on alone, subject: chr_frodo}
+
+themes:
+  # §13's example, promoted to live data.
+  - id: thm_corrosion_of_power
+    name: The corrosion of power
+    statement: What you wield reshapes you.
+    source: null
+    relations:
+      - {to: thm_humility_of_service, kind: opposes}
+    constraints:
+      - {targets: character, kind: bias,
+         subject: trait_distribution, value: {ambition: 0.3, self_deception: 0.2}}
+      - {targets: arc, kind: bias,
+         subject: curve_shape, value: false_peak_then_collapse}
+      - {targets: location, kind: bias,
+         subject: atmosphere.mood_baseline, value: -0.15}
+      - {targets: event, kind: require,
+         subject: consequence,
+         note: no use of the artifact resolves an arc without cost}
+    motifs:
+      visual: [tarnish, encroaching gold light, elongated shadows]
+      verbal: [precious, mine, deserve]
+      sonic: [low sustained drones]
+  - id: thm_humility_of_service
+    name: The humility of service
+    statement: The small hands turn the wheel of the world.
+    relations:
+      - {to: thm_corrosion_of_power, kind: opposes}
+    constraints:
+      - {targets: character, kind: bias,
+         subject: trait_distribution, value: {humility: 0.4, loyalty: 0.3}}
+      - {targets: arc, kind: bias, subject: curve_shape, value: quiet_rise}
+    motifs:
+      visual: [gardens, carried burdens, small lights in the dark]
+      verbal: [I made a promise, share the load]
+      sonic: [a single plain melody returning]
+  - id: thm_passing_of_wisdom
+    name: The passing of wisdom
+    statement: The old world must spend itself so the new one can begin.
+    relations:
+      - {to: thm_humility_of_service, kind: refines}
+    constraints:
+      - {targets: arc, kind: bias, subject: curve_shape, value: sacrifice_at_threshold}
+      - {targets: event, kind: bias, subject: valence, value: -0.1}
+    motifs:
+      visual: [white light behind a departing figure, torches handed on]
+      verbal: [fly you fools, the burden passes]
+      sonic: [a fading horn]
+
+arcs:
+  - id: arc_frodo_burden
+    kind: character
+    owner: chr_frodo
+    question: Will Frodo carry the Ring — and at what cost?
+    stakes_baseline: 0.5
+    planned_tension:
+      - ["3018-04-12", 0.25]
+      - ["3018-09-23", 0.35]
+      - ["3018-10-06", 0.80]
+      - ["3018-10-20", 0.60]
+      - ["3019-01-15", 0.90]
+      - ["3019-02-26", 1.00]
+    state: open
+    resolved_by: null
+    sequel_hook: true            # continues in The Two Towers
+    themes: [thm_humility_of_service, thm_corrosion_of_power]
+  - id: arc_fellowship_unity
+    kind: relationship
+    owner: chr_fellowship
+    question: Will the Fellowship hold together?
+    stakes_baseline: 0.4
+    planned_tension:
+      - ["3018-10-25", 0.15]
+      - ["3018-12-25", 0.25]
+      - ["3019-01-11", 0.40]
+      - ["3019-01-15", 0.80]
+      - ["3019-01-17", 0.55]
+      - ["3019-02-14", 0.60]
+      - ["3019-02-26", 0.90]
+    state: open
+    resolved_by: null
+  # ArcOwner on a thing: the Ring owns the temptation (§3, §17).
+  - id: arc_boromir_temptation
+    kind: relationship
+    owner: thg_one_ring
+    question: Will the Ring find a new bearer in Boromir?
+    stakes_baseline: 0.5
+    planned_tension:
+      - ["3018-10-25", 0.10]
+      - ["3019-01-15", 0.20]
+      - ["3019-02-14", 0.35]
+      - ["3019-02-26", 0.70]
+    state: open
+    resolved_by: null
+    themes: [thm_corrosion_of_power]
+  - id: arc_aragorn_claim
+    kind: character
+    owner: chr_aragorn
+    question: Will Aragorn accept the throne?
+    stakes_baseline: 0.4
+    planned_tension:
+      - ["3018-09-29", 0.10]
+      - ["3018-10-25", 0.30]
+      - ["3019-01-15", 0.55]
+      - ["3019-02-26", 0.75]
+    state: open
+    resolved_by: null
+    sequel_hook: true            # answered at the Field of Cormallen, not here
+  # The arc whose absence rule 1 discovered (§11 stress test, amendment 1).
+  - id: arc_gandalf_stand
+    kind: character
+    owner: chr_gandalf
+    question: Will Gandalf's stand buy the Fellowship's escape?
+    epitaphs:
+      - resolved_by: evt_011
+        summary: >-
+          The question opened in the dark of Moria, when the drums began and the Fellowship
+          understood that something older than orcs was coming. It was answered at the Bridge of
+          Khazad-dûm: Gandalf stood, the Balrog fell, and the Fellowship escaped into daylight —
+          at the cost of the one who bought it. What the answer left standing: a company without
+          its guide, and a grief that Lothlórien would spend itself softening.
+    stakes_baseline: 0.6
+    planned_tension:
+      - ["3019-01-11", 0.00]
+      - ["3019-01-14", 0.45]
+      - ["3019-01-15", 0.90]
+    state: open                  # runtime state is derived; this is the authored default
+    resolved_by: null
+    themes: [thm_passing_of_wisdom]
+
+events:
+  - id: evt_001
+    title: The Shadow of the Past
+    story_time: {world_date: "3018-04-12", granularity: scene}
+    location: loc_bag_end
+    participants: [chr_frodo, chr_gandalf, chr_sam]
+    magnitude: 0.6
+    valence: -0.4
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.25, note: the Ring is named for what it is}
+    stakes_deltas:
+      - {arc: arc_frodo_burden, delta: 0.20, note: the Shire itself is now in danger}
+    knowledge:
+      - {learners: [chr_frodo, chr_sam], fact: fct_ring_is_the_one}
+    themes: [thm_passing_of_wisdom, thm_corrosion_of_power]
+    causes: []
+
+  - id: evt_002
+    title: Frodo leaves Bag End
+    story_time: {world_date: "3018-09-23", granularity: scene}
+    location: loc_bag_end
+    participants: [chr_frodo, chr_sam, chr_pippin]
+    magnitude: 0.4
+    valence: -0.1
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.10}
+    themes: [thm_humility_of_service]
+    causes: [evt_001]
+
+  - id: evt_003
+    title: A Black Rider on the road
+    story_time: {world_date: "3018-09-24", granularity: scene}
+    location: loc_the_shire
+    participants: [chr_frodo, chr_sam, chr_pippin]
+    magnitude: 0.5
+    valence: -0.5
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.15, note: the hunt is real}
+    stakes_deltas:
+      - {arc: arc_frodo_burden, delta: 0.10}
+    themes: [thm_corrosion_of_power]
+    causes: [evt_002]
+
+  - id: evt_004
+    title: Strider at the Prancing Pony
+    story_time: {world_date: "3018-09-29", granularity: scene}
+    location: loc_bree
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_aragorn]
+    magnitude: 0.5
+    valence: -0.2
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.05}
+      - {arc: arc_aragorn_claim, delta: 0.10, note: the Ranger steps out of the shadows}
+    knowledge:
+      - {learners: [chr_frodo, chr_sam, chr_merry, chr_pippin], fact: fct_aragorn_is_heir}
+    causes: [evt_003]
+
+  - id: evt_005
+    title: A knife in the dark
+    story_time: {world_date: "3018-10-06", granularity: scene}
+    location: loc_weathertop
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_aragorn, thg_one_ring]
+    magnitude: 0.8
+    valence: -0.6
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.25, note: the wound will never fully heal}
+      - {arc: arc_aragorn_claim, delta: 0.05}
+    stakes_deltas:
+      - {arc: arc_frodo_burden, delta: 0.15}
+    themes: [thm_corrosion_of_power]
+    causes: [evt_004]
+
+  - id: evt_006
+    title: Flight to the Ford
+    story_time: {world_date: "3018-10-20", granularity: scene}
+    location: loc_rivendell
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_aragorn]
+    magnitude: 0.7
+    valence: -0.3
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: -0.20, note: respite, not resolution — the question still hangs}
+    causes: [evt_005]
+
+  - id: evt_007
+    title: The Council of Elrond
+    story_time: {world_date: "3018-10-25", granularity: scene}
+    location: loc_rivendell
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_gandalf, chr_aragorn, chr_boromir, thg_one_ring]
+    magnitude: 0.7
+    valence: 0.1
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.10, note: "\"I will take the Ring, though I do not know the way\""}
+      - {arc: arc_fellowship_unity, delta: 0.15}
+      - {arc: arc_boromir_temptation, delta: 0.10, note: "\"Why not use this Ring?\""}
+      - {arc: arc_aragorn_claim, delta: 0.15, note: the sword that was broken, shown}
+    stakes_deltas:
+      - {arc: arc_frodo_burden, delta: 0.05}
+    knowledge:
+      - {learners: [chr_fellowship], fact: fct_ring_is_the_one}
+      - {learners: [chr_fellowship], fact: fct_aragorn_is_heir}
+      # Self-directed irony: hidden from its own subject; some of the cast sees it.
+      - {learners: [chr_aragorn, chr_gandalf], hidden_from: [chr_boromir], fact: fct_boromir_desires_ring}
+    themes: [thm_corrosion_of_power, thm_humility_of_service]
+    causes: [evt_001, evt_005]
+
+  - id: evt_008
+    title: The Fellowship departs
+    story_time: {world_date: "3018-12-25", granularity: scene}
+    location: loc_rivendell
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_gandalf, chr_aragorn, chr_boromir]
+    magnitude: 0.5
+    valence: 0.2
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.05}
+      - {arc: arc_fellowship_unity, delta: 0.10, note: nine walkers set against nine riders}
+    stakes_deltas:
+      - {arc: arc_fellowship_unity, delta: 0.15}
+    themes: [thm_humility_of_service]
+    causes: [evt_007]
+
+  - id: evt_009
+    title: Defeat on Caradhras
+    story_time: {world_date: "3019-01-11", granularity: scene}
+    location: loc_caradhras
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_gandalf, chr_aragorn, chr_boromir]
+    magnitude: 0.6
+    valence: -0.4
+    arc_deltas:
+      - {arc: arc_fellowship_unity, delta: 0.15, note: the first road fails; tempers fray}
+      - {arc: arc_boromir_temptation, delta: 0.05}
+    themes: [thm_humility_of_service]
+    causes: [evt_008]
+
+  - id: evt_010
+    title: The long dark of Moria
+    story_time: {world_date: "3019-01-14", granularity: scene}
+    location: loc_moria
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_gandalf, chr_aragorn, chr_boromir]
+    magnitude: 0.6
+    valence: -0.5
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.05}
+      - {arc: arc_fellowship_unity, delta: 0.10}
+      - {arc: arc_gandalf_stand, delta: 0.40, note: drums in the deep}
+    stakes_deltas:
+      - {arc: arc_gandalf_stand, delta: 0.30, note: only he can hold what follows them}
+    themes: [thm_passing_of_wisdom]
+    causes: [evt_009]
+
+  - id: evt_011
+    title: Gandalf falls at Khazad-dûm
+    story_time: {world_date: "3019-01-15", granularity: scene}
+    location: loc_moria_bridge
+    participants: [chr_frodo, chr_sam, chr_merry, chr_pippin, chr_gandalf, chr_aragorn, chr_boromir, thg_one_ring]
+    magnitude: 0.9
+    valence: -0.8
+    arc_deltas:
+      - {arc: arc_fellowship_unity, delta: 0.30, note: leadership vacuum}
+      - {arc: arc_frodo_burden, delta: 0.10}
+      - {arc: arc_aragorn_claim, delta: 0.25, note: forced to lead}
+      - {arc: arc_gandalf_stand, delta: 0.50, note: "\"You cannot pass\""}
+    stakes_deltas:
+      - {arc: arc_frodo_burden, delta: 0.10, note: no guide remains}
+      - {arc: arc_fellowship_unity, delta: 0.15}
+    resolves: [arc_gandalf_stand]
+    reopens: []
+    knowledge:
+      - {learners: [chr_fellowship], fact: fct_gandalf_fell}
+      - {hidden_from: [chr_fellowship], fact: fct_gandalf_survives}
+    themes: [thm_passing_of_wisdom]
+    causes: [evt_010]
+
+  - id: evt_012
+    title: Lament in Lothlórien
+    story_time: {world_date: "3019-01-17", granularity: scene}
+    location: loc_lothlorien
+    # Frodo grieves apart — this event is invisible to the Frodo-POV edition.
+    participants: [chr_sam, chr_merry, chr_pippin, chr_aragorn, chr_boromir]
+    magnitude: 0.4
+    valence: 0.2
+    arc_deltas:
+      - {arc: arc_fellowship_unity, delta: -0.25, note: the wood holds them together a while}
+    themes: [thm_passing_of_wisdom, thm_humility_of_service]
+    causes: [evt_011]
+
+  - id: evt_013
+    title: The Mirror and the Eye
+    story_time: {world_date: "3019-02-14", granularity: scene}
+    location: loc_frodo_dreamspace
+    participants: [chr_frodo, thg_one_ring]
+    magnitude: 0.5
+    valence: -0.5
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.10, note: he has seen what seeks him}
+      - {arc: arc_boromir_temptation, delta: 0.15, note: the Ring's whisper grows}
+    stakes_deltas:
+      - {arc: arc_frodo_burden, delta: 0.10}
+    knowledge:
+      - {learners: [chr_frodo], fact: fct_boromir_desires_ring}
+    themes: [thm_corrosion_of_power]
+    causes: [evt_011]
+
+  - id: evt_014
+    title: Boromir and the Ring
+    story_time: {world_date: "3019-02-26", granularity: scene}
+    location: loc_amon_hen
+    participants: [chr_frodo, chr_boromir, thg_one_ring]
+    magnitude: 0.8
+    valence: -0.6
+    arc_deltas:
+      - {arc: arc_frodo_burden, delta: 0.05}
+      - {arc: arc_fellowship_unity, delta: 0.25, note: the company is broken from within}
+      - {arc: arc_boromir_temptation, delta: 0.35, note: he asks; he demands; he lunges}
+    stakes_deltas:
+      - {arc: arc_boromir_temptation, delta: 0.30}
+    resolves: [arc_boromir_temptation]
+    knowledge:
+      # The delusion breaks: the fact's own subject finally learns it.
+      - {learners: [chr_boromir], fact: fct_boromir_desires_ring}
+      - {learners: [chr_frodo], fact: fct_frodo_intends_to_leave}
+    themes: [thm_corrosion_of_power, thm_humility_of_service]
+    causes: [evt_007, evt_013]
+
+  - id: evt_015
+    title: The Breaking of the Fellowship
+    story_time: {world_date: "3019-02-26", granularity: scene}
+    location: loc_amon_hen
+    participants: [chr_frodo, chr_sam, chr_aragorn, thg_one_ring]
+    magnitude: 0.85
+    valence: -0.5
+    arc_deltas:
+      - {arc: arc_fellowship_unity, delta: 0.10}
+      - {arc: arc_aragorn_claim, delta: 0.20, note: he lets Frodo go, and chooses his own road}
+    stakes_deltas:
+      - {arc: arc_aragorn_claim, delta: 0.20}
+    resolves: [arc_fellowship_unity]
+    knowledge:
+      - {learners: [chr_sam], fact: fct_frodo_intends_to_leave}
+      - {hidden_from: [chr_merry, chr_pippin], fact: fct_frodo_intends_to_leave}
+    themes: [thm_humility_of_service]
+    causes: [evt_014, evt_011]
+
+editions:
+  # Register caps realizing the simplified-retelling case, including the
+  # compression fix for linter rule 10 (§14, §17): the bridge is not shown,
+  # but its beat covers it, so later effects keep a reachable explanation.
+  - id: edt_bedtime_fellowship
+    mythos: mth_fellowship
+    title: A Bedtime Fellowship
+    renderer: picture_book
+    audience:
+      knower: aud_bedtime_listeners
+      register: {reading_level: pre-K, valence_floor: -0.6, magnitude_cap: 0.85}
+    selection:
+      include:
+        - {arcs: [arc_frodo_burden, arc_fellowship_unity]}
+    sequence:
+      - {segment: seg_tale, order: chronological}
+    units:
+      kind: chapter
+      boundaries: auto_convergence
+    compressions:
+      - events: [evt_005]
+        beat:
+          title: A fright in the night
+          summary: A shadow reached for Frodo, and brave friends drove it away.
+      - events: [evt_010, evt_011]
+        beat:
+          title: The wizard says goodbye
+          summary: In a dark place, the old wizard stayed behind so his friends could reach the light.
+    schedule: null
+
+  # POV as a knowledge filter (§14): the same fabula, told from Frodo's side.
+  - id: edt_frodo_pov
+    mythos: mth_fellowship
+    title: Through Frodo’s Eyes
+    renderer: episode_outline
+    audience:
+      knower: aud_readers
+    pov: chr_frodo
+    sequence:
+      - {segment: seg_main, order: chronological}
+    units:
+      kind: episode
+      boundaries: auto_convergence
+      cut: resolution
+    reveals:
+      # The audience learns Boromir's desire at the Council; Boromir himself
+      # learns it at Amon Hen — self-directed irony held open for 4 months.
+      - {fact: fct_boromir_desires_ring, at: seg_main/evt_007}
+    schedule: null
