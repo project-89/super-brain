@@ -48,7 +48,7 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | --- | --- | --- | --- |
 | `@_89/fold` | Change Record schema, ordering, lifecycle, replay, projections | v0.6 spec, v0.7 amendments, Mythopia fold semantics | Implemented |
 | `@_89/confidence-kernel` | History scoring, drift, pooling, oracle, journals | confidence-kernel 0.2.0 | Imported |
-| `@_89/fold-storage` | JSONL journal, replay, checkpoints, strict reopen | pty-state-capture replay; Mythopia store fixtures | Planned |
+| `@_89/fold-storage` | JSONL journal, replay, checkpoints, strict reopen | pty-state-capture replay; Mythopia store fixtures | Implemented |
 | `@_89/fold-trace` | Trace projection, coverage, divergence, structural merge | decision-pathfinder; reasoning-tree | Projection contract implemented; extraction gated |
 | `@_89/fold-eval` | Verdict parsing, oracle execution, confidence aggregation | Parallax; confidence-kernel | Planned |
 | `@_89/fold-narrative` | Canon, character knowledge, arcs, curves, convergence | Mythopia | First parity slice implemented |
@@ -70,7 +70,7 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 | mythopia | `src/core/store.ts`: `CanonStore`, `WorldState`, `resolvedPeaks`, `foldToEvent`; `src/core/time.ts` | `packages/fold-narrative` and `packages/fold-storage` | Adapt domain state onto canonical `@_89/fold` records. Match the pinned Fellowship results and add same-time, bare-reopen, and late-joiner fixtures. Do not copy its derived time or visibility semantics into the core record contract. |
 | mythopia | `src/engines/query.ts`: `knows`, `arcJourney` | `packages/fold-narrative` | Adapt as pure projections. Prove conceal precedence and static-membership parity locally. |
 | mythopia | `src/engines/convergence.ts` and `src/engines/curves.ts` | `packages/fold-narrative` | Copy or adapt pure numerical functions after fixtures pin unrounded outputs, twin peaks, and convergence behavior. |
-| pty-state-capture | `src/replay.ts`: `replayRawJsonl`, `replayTurns`; journal behavior | `packages/fold-storage` | Adapt to Change Record JSONL and checkpoint semantics. Require byte-stable reopen and malformed-line policy tests. |
+| pty-state-capture | `src/replay.ts`: `replayRawJsonl`, `replayTurns`; `src/jsonl-writer.ts` journal behavior | `packages/fold-storage` | Reimplemented as versioned Change Record JSONL with streaming replay, serialized appends, byte-stable rewrite, strict recovery policy, and verified checkpoints. |
 | pty-state-capture | `src/normalize.ts`, `src/state-rules.ts`, capture types | `packages/fold-activity` | Adapt normalization and classification behind sensor-produced observations. Classifier results remain observations, not truth. |
 | pty-state-capture | `src/session-diff.ts`: `diffTranscripts`, `jaccardSimilarity` | `packages/fold-trace` test/tooling surface | Copy only if trace evaluation needs transcript comparison; no core dependency. |
 | tmux-manager | `src/tmux-manager.ts` transition re-emission table; `src/tmux-session.ts` stall timers; `StallClassification` | `packages/fold-activity`, `packages/fold-fleet` | Reimplement the event contract without tmux host coupling. Pin lifecycle, heartbeat, stall, prompt, tool, completion, and identity/scope fixtures. |
@@ -92,8 +92,8 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    tested workspace package.
 3. **Narrative parity:** build `@_89/fold-narrative` around local canonical
    records and port the Mythopia golden behavior. No runtime Mythopia adapter.
-4. **Durability:** extract JSONL replay into `@_89/fold-storage`, then add
-   checkpoint, strict reopen, and corrupted-input tests.
+4. **Durability:** JSONL replay, checkpoints, strict reopen, and corrupted-input
+   tests are implemented in `@_89/fold-storage`.
 5. **Judgment:** complete the reasoning-tree inventory, then implement the trace
    and eval primitives from reasoning-tree, decision-pathfinder, and Parallax.
 6. **Sensing and fleet:** implement activity normalization, lifecycle capture,

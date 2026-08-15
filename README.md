@@ -24,6 +24,10 @@ The first milestone is the risk-retirement gate from the reference document:
   apply-time knowledge, journeys, curves, resolution peaks, and convergence. Its
   first slice is pinned to the Mythopia Fellowship fixture without a production
   Mythopia adapter.
+- `@_89/fold-storage` provides versioned JSONL append/replay, strict reopen,
+  torn-tail recovery, atomic rewrites, and verified materialized-state
+  checkpoints. Its format is specified in
+  [`docs/storage/JSONL_FORMAT_v1.md`](./docs/storage/JSONL_FORMAT_v1.md).
 
 The target package graph, source ownership rules, and per-repository extraction
 map are recorded in

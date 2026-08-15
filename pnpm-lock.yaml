@@ -39,6 +39,15 @@ importers:
         specifier: ^2.8.1
         version: 2.9.0
 
+  packages/fold-storage:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../fold
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+
   packages/fold-trace:
     dependencies:
       '@_89/fold':

@@ -42,3 +42,9 @@ is byte-identical to Mythopia's tracked fixture at commit
 `c9fc2c68b8f76e6b2ec8f65901d2396496d0c40b`. It is private, test-only parity
 evidence from an `UNLICENSED` repository and is excluded from the package file
 set. Its provenance record is colocated with the fixture.
+
+`packages/fold-storage` reimplements the complete-line JSONL append and offline
+replay behavior inspected in pty-state-capture commit
+`29bbff378ac51dbfb0197b26022bb9aa383f0bb2`. No source file was copied. Its
+package-level provenance record lists the inspected files and the stricter local
+behavior added for Fold.
