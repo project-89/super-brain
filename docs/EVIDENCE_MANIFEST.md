@@ -75,3 +75,10 @@ the tmux-manager baseline above and Parallax commit
 `e3c98ebba4b3e29959325f2f974cee27c32a24a6`. Boot reconstruction and orphan
 timeout planning are local additions addressing gaps at those pinned commits.
 Neither package imports source code from the referenced worktrees.
+
+`packages/fold-drives` reimplements incremental drift, satiation, wear,
+structured pressure, intention replay, and surfacing eligibility inspected in
+Embers commit `1bbafe059809026447f361d0e9f4a0e44e161ee9`. Its exact threshold
+fixtures retain the source's stepwise floating-point behavior. Continuous state
+restores from explicit samples; sparse causal events are never treated as enough
+to synthesize elapsed ticks. No Embers source file was copied.

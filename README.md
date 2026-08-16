@@ -28,6 +28,9 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-fleet` reconstructs agent/session state from those records at boot,
   separates last-known status from lifecycle freshness, and plans timeout-gated
   orphan reconciliation without interpreting silence as offline.
+- `@_89/fold-drives` incrementally advances drive and wear state, records causal
+  discontinuities as canonical Fold events, and rebuilds surfaced, committed,
+  declined, acted, and ended intentions without performing host cognition.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,
