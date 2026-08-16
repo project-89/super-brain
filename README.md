@@ -22,6 +22,12 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-eval` implements the review verdict protocol, command oracle,
   fail-closed oracle configuration, explicit absent results, configurable
   confidence aggregation, and confidence-kernel history integration.
+- `@_89/fold-activity` normalizes terminal output, classifies bounded recent
+  state, preserves classifier provenance, and maps terminal manager signals to
+  canonical lifecycle and observation records with complete source identity.
+- `@_89/fold-fleet` reconstructs agent/session state from those records at boot,
+  separates last-known status from lifecycle freshness, and plans timeout-gated
+  orphan reconciliation without interpreting silence as offline.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

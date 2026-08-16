@@ -52,8 +52,8 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-trace` | Trace projection, coverage, divergence, structural merge | decision-pathfinder; reasoning-tree | Implemented |
 | `@_89/fold-eval` | Verdict parsing, oracle execution, confidence aggregation | Parallax; confidence-kernel | Implemented |
 | `@_89/fold-narrative` | Canon, character knowledge, arcs, curves, convergence | Mythopia | First parity slice implemented |
-| `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Planned |
-| `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Planned |
+| `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Terminal canonical slice implemented |
+| `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Replay and orphan core implemented |
 | `@_89/fold-epistemic` | Scoped memory and recall-time access enforcement | Raven | Gated on second-pass inventory |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Planned after source inventory |
 | `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Planned |
@@ -71,15 +71,15 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 | mythopia | `src/engines/query.ts`: `knows`, `arcJourney` | `packages/fold-narrative` | Adapt as pure projections. Prove conceal precedence and static-membership parity locally. |
 | mythopia | `src/engines/convergence.ts` and `src/engines/curves.ts` | `packages/fold-narrative` | Copy or adapt pure numerical functions after fixtures pin unrounded outputs, twin peaks, and convergence behavior. |
 | pty-state-capture | `src/replay.ts`: `replayRawJsonl`, `replayTurns`; `src/jsonl-writer.ts` journal behavior | `packages/fold-storage` | Reimplemented as versioned Change Record JSONL with streaming replay, serialized appends, byte-stable rewrite, strict recovery policy, and verified checkpoints. |
-| pty-state-capture | `src/normalize.ts`, `src/state-rules.ts`, capture types | `packages/fold-activity` | Adapt normalization and classification behind sensor-produced observations. Classifier results remain observations, not truth. |
+| pty-state-capture | `src/normalize.ts`, `src/state-rules.ts`, capture types | `packages/fold-activity` | Reimplemented normalization and bounded classification behind sensor-produced observations. Classifier results remain observed assertions with classifier method provenance. |
 | pty-state-capture | `src/session-diff.ts`: `diffTranscripts`, `jaccardSimilarity` | `packages/fold-trace` test/tooling surface | Copy only if trace evaluation needs transcript comparison; no core dependency. |
-| tmux-manager | `src/tmux-manager.ts` transition re-emission table; `src/tmux-session.ts` stall timers; `StallClassification` | `packages/fold-activity`, `packages/fold-fleet` | Reimplement the event contract without tmux host coupling. Pin lifecycle, heartbeat, stall, prompt, tool, completion, and identity/scope fixtures. |
-| hauntjs | Sensed-log discipline documented by the project | `packages/fold-activity` | Adopt as a contract only. There is no implementation to import. |
+| tmux-manager | `src/tmux-manager.ts` transition re-emission table; `src/tmux-session.ts` stall timers; `StallClassification` | `packages/fold-activity`, `packages/fold-fleet` | Event contract reimplemented without tmux host coupling. Local fixtures pin lifecycle, heartbeat, stall, prompt, tool, completion, classification, and identity/scope behavior. |
+| hauntjs | Sensed-log discipline documented by the project | `packages/fold-activity` | Adopted as a contract only: observation/belief separation, reversible compression, lifecycle coverage, and heartbeat semantics. No runtime implementation imported. |
 | decision-pathfinder | `src/recommendation/RecommendationEngine.ts`: `analyzeHistory`, `edgeOutcomes`; path interfaces | `packages/fold-trace`, `packages/fold-eval` | Adapt pure aggregation and first-divergent-edge behavior. Test deterministic tie-breaking and empty history. |
 | reasoning-tree | `src/compiler/trace-divergence.ts`: `normalizeArgs`, `branchKey`, `entropyOfCounts`, `analyzeTraceDivergence`; `structural-merge.ts` | `packages/fold-trace` | Reimplemented against package-owned tool-trace types. Pure parity fixtures cover normalization, divergence filters, prior outputs, support, caps, and merge order. Host compiler and model code are excluded. |
 | Parallax | `packages/control-plane/src/org-patterns/review-verdict.ts`; `workflow-executor.ts` verification funnel | `packages/fold-eval` | Extract the parser and oracle contract. Honor configured combine strategy; reject unknown oracle types as schema errors; represent known-but-absent results as neutral. |
 | Parallax | `packages/control-plane/src/org-patterns/decision-history.ts`: `scoreDecisionHistory` | `packages/fold-eval` tests | Retain as parity evidence for confidence-kernel rather than duplicating the scoring implementation. |
-| Parallax | connection, spawn, status, and orphan-recovery behavior | `packages/fold-fleet` | Reimplement against Fold lifecycle records; include boot reconstruction and orphan timeout tests. |
+| Parallax | connection, spawn, status, and orphan-recovery behavior | `packages/fold-fleet` | Reimplemented as a pure Fold-event projection with boot reconstruction, immutable identity, heartbeat freshness, and orphan timeout tests. Runtime actuation remains adapter work. |
 | narrative-canon | Five generator choke points in `image-generator.ts`, `gpt-image-generator.ts`, `video-generator.ts`, `seedance-generator.ts`, `music-generator.ts` | `packages/fold-activity` contract | Define generation-lineage records locally. Narrative Studio instrumentation remains in its own repository until the contract is proven. FABLE is a film fixture/agent name, not this codebase. |
 | Embers | `docs/design/v0.3/intention.md` incremental replay proof and current intention/metabolism implementation | `packages/fold-drives` | First retain the threshold-crossing fixture in `@_89/fold`; inventory current symbols before any code extraction. |
 | Raven | UUIDv7 ordering, workspace/space/creator scope, memory and access-control behavior | `packages/fold-epistemic`, `apps/brain` | Gated on the second-pass write-path, schema, and guard inventory. Reuse UI patterns only after core behavior is local. |
@@ -96,8 +96,10 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    tests are implemented in `@_89/fold-storage`.
 5. **Judgment:** reasoning-tree inventory, trace mining/merge, decision-path
    parity, and standalone eval/oracle primitives are implemented.
-6. **Sensing and fleet:** implement activity normalization, lifecycle capture,
-   identity, heartbeats, and boot-time reconstruction.
+6. **Sensing and fleet:** terminal normalization, canonical lifecycle and
+   observations, complete source identity, heartbeat freshness, boot
+   reconstruction, and orphan planning are implemented. Producer wiring and
+   runtime actuation remain host integrations.
 7. **Domain completion:** inventory and implement drives and epistemic behavior.
 8. **Delivery:** expose settled APIs through `@_89/fold-sdk`, then build the API
    and Raven-inspired view layer exclusively against local packages.

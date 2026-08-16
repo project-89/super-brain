@@ -60,3 +60,18 @@ inspected in Parallax commit `e3c98ebba4b3e29959325f2f974cee27c32a24a6`.
 It delegates history scoring to the imported confidence kernel, honors all local
 combine modes, fails closed on unknown configuration, and represents unavailable
 known oracles as explicit absence. No Parallax source file was copied.
+
+`packages/fold-activity` reimplements terminal normalization and classification
+behavior inspected in pty-state-capture commit
+`29bbff378ac51dbfb0197b26022bb9aa383f0bb2`, and the transition categories
+inspected in tmux-manager commit `d5fd340b3de33957e0ecb016b1f2738ded386267`.
+Its lifecycle/observation discipline is taken from Haunt's committed
+`docs/MEMORY-AND-FOLD.md` at pinned commit
+`4c675c63cbbf870b34fd9fed48b26f58e2b9eed1`; later local Haunt commits were not
+used as extraction input.
+
+`packages/fold-fleet` reimplements runtime identity and health projection from
+the tmux-manager baseline above and Parallax commit
+`e3c98ebba4b3e29959325f2f974cee27c32a24a6`. Boot reconstruction and orphan
+timeout planning are local additions addressing gaps at those pinned commits.
+Neither package imports source code from the referenced worktrees.
