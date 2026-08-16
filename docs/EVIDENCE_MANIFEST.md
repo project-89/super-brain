@@ -48,3 +48,15 @@ replay behavior inspected in pty-state-capture commit
 `29bbff378ac51dbfb0197b26022bb9aa383f0bb2`. No source file was copied. Its
 package-level provenance record lists the inspected files and the stricter local
 behavior added for Fold.
+
+`packages/fold-trace` reimplements the pure divergence and structural-merge
+mechanics inspected in reasoning-tree commit
+`e517359966b4310f0c0f00f1a4c94a2da4d6d66a`, and retains route/divergence
+parity fixtures from decision-pathfinder commit
+`5ceb7e36b128736bd336d5b0afce9ad4befa8152`. No source file was copied.
+
+`packages/fold-eval` reimplements the verdict and command-oracle mechanics
+inspected in Parallax commit `e3c98ebba4b3e29959325f2f974cee27c32a24a6`.
+It delegates history scoring to the imported confidence kernel, honors all local
+combine modes, fails closed on unknown configuration, and represents unavailable
+known oracles as explicit absence. No Parallax source file was copied.

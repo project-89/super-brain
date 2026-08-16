@@ -16,6 +16,21 @@ export interface TraceStep {
   readonly toolName?: string;
 }
 
+export interface ToolCallResult {
+  readonly output?: unknown;
+  readonly success?: boolean;
+  readonly durationMs?: number;
+  readonly [key: string]: unknown;
+}
+
+export interface ToolCall {
+  readonly name: string;
+  readonly args: Readonly<Record<string, unknown>>;
+  readonly result?: ToolCallResult;
+}
+
+export type ToolTrace = readonly ToolCall[];
+
 export interface RawTrajectory {
   readonly id: string;
   readonly taskId: string;

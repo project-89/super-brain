@@ -49,8 +49,8 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold` | Change Record schema, ordering, lifecycle, replay, projections | v0.6 spec, v0.7 amendments, Mythopia fold semantics | Implemented |
 | `@_89/confidence-kernel` | History scoring, drift, pooling, oracle, journals | confidence-kernel 0.2.0 | Imported |
 | `@_89/fold-storage` | JSONL journal, replay, checkpoints, strict reopen | pty-state-capture replay; Mythopia store fixtures | Implemented |
-| `@_89/fold-trace` | Trace projection, coverage, divergence, structural merge | decision-pathfinder; reasoning-tree | Projection contract implemented; extraction gated |
-| `@_89/fold-eval` | Verdict parsing, oracle execution, confidence aggregation | Parallax; confidence-kernel | Planned |
+| `@_89/fold-trace` | Trace projection, coverage, divergence, structural merge | decision-pathfinder; reasoning-tree | Implemented |
+| `@_89/fold-eval` | Verdict parsing, oracle execution, confidence aggregation | Parallax; confidence-kernel | Implemented |
 | `@_89/fold-narrative` | Canon, character knowledge, arcs, curves, convergence | Mythopia | First parity slice implemented |
 | `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Planned |
 | `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Planned |
@@ -76,7 +76,7 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 | tmux-manager | `src/tmux-manager.ts` transition re-emission table; `src/tmux-session.ts` stall timers; `StallClassification` | `packages/fold-activity`, `packages/fold-fleet` | Reimplement the event contract without tmux host coupling. Pin lifecycle, heartbeat, stall, prompt, tool, completion, and identity/scope fixtures. |
 | hauntjs | Sensed-log discipline documented by the project | `packages/fold-activity` | Adopt as a contract only. There is no implementation to import. |
 | decision-pathfinder | `src/recommendation/RecommendationEngine.ts`: `analyzeHistory`, `edgeOutcomes`; path interfaces | `packages/fold-trace`, `packages/fold-eval` | Adapt pure aggregation and first-divergent-edge behavior. Test deterministic tie-breaking and empty history. |
-| reasoning-tree | `src/compiler/trace-divergence.ts`: `normalizeArgs`, `branchKey`, `entropyOfCounts`, `analyzeTraceDivergence`; `structural-merge.ts` | `packages/fold-trace` | Gated. Complete the second-pass export and trajectory inventory before deciding what to copy. Existing projection fixtures are provisional structural evidence. |
+| reasoning-tree | `src/compiler/trace-divergence.ts`: `normalizeArgs`, `branchKey`, `entropyOfCounts`, `analyzeTraceDivergence`; `structural-merge.ts` | `packages/fold-trace` | Reimplemented against package-owned tool-trace types. Pure parity fixtures cover normalization, divergence filters, prior outputs, support, caps, and merge order. Host compiler and model code are excluded. |
 | Parallax | `packages/control-plane/src/org-patterns/review-verdict.ts`; `workflow-executor.ts` verification funnel | `packages/fold-eval` | Extract the parser and oracle contract. Honor configured combine strategy; reject unknown oracle types as schema errors; represent known-but-absent results as neutral. |
 | Parallax | `packages/control-plane/src/org-patterns/decision-history.ts`: `scoreDecisionHistory` | `packages/fold-eval` tests | Retain as parity evidence for confidence-kernel rather than duplicating the scoring implementation. |
 | Parallax | connection, spawn, status, and orphan-recovery behavior | `packages/fold-fleet` | Reimplement against Fold lifecycle records; include boot reconstruction and orphan timeout tests. |
@@ -94,8 +94,8 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    records and port the Mythopia golden behavior. No runtime Mythopia adapter.
 4. **Durability:** JSONL replay, checkpoints, strict reopen, and corrupted-input
    tests are implemented in `@_89/fold-storage`.
-5. **Judgment:** complete the reasoning-tree inventory, then implement the trace
-   and eval primitives from reasoning-tree, decision-pathfinder, and Parallax.
+5. **Judgment:** reasoning-tree inventory, trace mining/merge, decision-path
+   parity, and standalone eval/oracle primitives are implemented.
 6. **Sensing and fleet:** implement activity normalization, lifecycle capture,
    identity, heartbeats, and boot-time reconstruction.
 7. **Domain completion:** inventory and implement drives and epistemic behavior.

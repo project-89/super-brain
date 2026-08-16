@@ -1,7 +1,7 @@
 {
-  "name": "@_89/fold-trace",
+  "name": "@_89/fold-eval",
   "version": "0.0.0",
-  "description": "Cross-model trajectory projection and divergence primitives",
+  "description": "Standalone verdict parsing and verification oracle execution for Fold",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -22,6 +22,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@_89/fold": "workspace:*"
+    "@_89/confidence-kernel": "workspace:*"
   }
 }

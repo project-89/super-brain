@@ -16,8 +16,12 @@ The first milestone is the risk-retirement gate from the reference document:
   inclusive fork cursors, provenance/capture metadata, and sensor lifecycle
   freshness.
 - `@_89/fold-trace` implements the projection feasibility contract, coverage,
-  mapped-edge aggregation, and first-divergent-edge analysis. Its current
-  two-model experiment is a structural fixture, not empirical model evidence.
+  mapped-edge aggregation, first-divergent-edge analysis, tool-call divergence
+  mining, and support-based structural merge. Its current two-model experiment
+  is a structural fixture, not empirical model evidence.
+- `@_89/fold-eval` implements the review verdict protocol, command oracle,
+  fail-closed oracle configuration, explicit absent results, configurable
+  confidence aggregation, and confidence-kernel history integration.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

@@ -29,6 +29,12 @@ importers:
         specifier: ^3.25.0
         version: 3.25.76
 
+  packages/fold-eval:
+    dependencies:
+      '@_89/confidence-kernel':
+        specifier: workspace:*
+        version: link:../confidence-kernel
+
   packages/fold-narrative:
     dependencies:
       '@_89/fold':
