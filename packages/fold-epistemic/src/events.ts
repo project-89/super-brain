@@ -116,6 +116,9 @@ function validateContext(context: EpistemicEventContext): void {
 
 function validateMemoryScope(context: EpistemicEventContext, spaceId: string | undefined): void {
   validateContext(context);
+  if (context.capture.scope.creator !== context.access.principalId) {
+    throw new MemoryEventError("capture.scope.creator must match personal memory creator");
+  }
   if (context.capture.scope.space !== spaceId) {
     throw new MemoryEventError("capture.scope.space must match memory spaceId");
   }
@@ -390,10 +393,7 @@ function validateEnvelope(
   if (event.capture.scope.space !== spaceId) {
     throw new MemoryEventError(`event ${event.id} space does not match capture scope`);
   }
-  if (
-    event.capture.scope.creator !== undefined &&
-    event.capture.scope.creator !== actorId
-  ) {
+  if (event.capture.scope.creator !== actorId) {
     throw new MemoryEventError(`event ${event.id} principal does not match capture scope`);
   }
   if (event.capture.identity?.principal !== actorId) {

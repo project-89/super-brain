@@ -89,3 +89,8 @@ schema, lifecycle, and access behavior inspected in Raven commit
 SQL was copied. The two untracked Raven files were excluded. Local recall
 reapplies workspace, creator, and current space access after external semantic
 ranking, correcting a missing creator check in the pinned semantic path.
+
+`packages/fold-sdk` is local delivery code over repository-owned Fold and
+epistemic contracts. It uses no external source material. Its JSONL integration
+test exercises the local `FoldJournal` through a structural store port; the SDK
+production bundle has no filesystem storage dependency.

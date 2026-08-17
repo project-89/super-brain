@@ -93,6 +93,21 @@ describe("personal memory evidence", () => {
         { id: MEMORY_A, spaceId: "space-b", source: "conversation" },
       ),
     ).toThrow(/capture.scope.space/);
+
+    const withoutCreator = context();
+    expect(() =>
+      makeMemoryRecordedEvent(
+        {
+          ...withoutCreator,
+          capture: {
+            ...withoutCreator.capture,
+            scope: { workspace: "workspace-1" },
+          },
+        },
+        stamp("creator-required", 1),
+        { id: MEMORY_A, source: "conversation" },
+      ),
+    ).toThrow(/personal memory creator/);
   });
 
   it("validates identifiers and bounded memory fields", () => {

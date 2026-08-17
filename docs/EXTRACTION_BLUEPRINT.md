@@ -56,7 +56,7 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Replay and orphan core implemented |
 | `@_89/fold-epistemic` | Scoped personal memory and recall-time access enforcement | Raven | Recall-enforced personal memory core implemented |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
-| `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Planned |
+| `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log and personal-memory core implemented |
 | `apps/api`, `apps/brain` | Service and work-focused view layer | Local SDK; Raven Docs UI patterns where useful | Planned |
 
 ## Source-to-Target Map
@@ -103,8 +103,10 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 7. **Domain completion:** drive, wear, intention, personal memory, tombstone,
    and recall-time access cores are implemented. Raven vector search and UI stay
    host concerns rather than core dependencies.
-8. **Delivery:** expose settled APIs through `@_89/fold-sdk`, then build the API
-   and Raven-inspired view layer exclusively against local packages.
+8. **Delivery:** the first `@_89/fold-sdk` slice exposes scoped journal,
+   projection, and personal-memory APIs. Build the API and Raven-inspired view
+   layer exclusively against that local boundary; add other domain facades only
+   when their product workflows require them.
 
 ## Drive Parity Status
 
@@ -141,6 +143,27 @@ The detailed source and exclusion map is in
 
 The detailed source, license, finding, and exclusion map is in
 `docs/inventory/EPISTEMIC_SOURCES.md`.
+
+## SDK Delivery Status
+
+The first `@_89/fold-sdk` slice establishes the service-facing boundary:
+
+1. A minimal asynchronous store port is satisfied directly by the local
+   `FoldJournal` and keeps filesystem concerns out of the SDK bundle.
+2. Appends validate canonical events, capture scope, duplicate IDs, and
+   same-time producer ordering before writing.
+3. Reads enforce current workspace, creator, and space access before returning
+   records or building Fold state; raw personal-memory projections are not part
+   of the public API.
+4. Cursors are explicit inclusive `(t, eventId)` values. Canon/draft inclusion
+   is never implicit, and malformed read configuration fails closed.
+5. Personal-memory mutation and recall delegate to `fold-epistemic`, including
+   tombstones, revocation, indistinguishable absent/denied mutations, and
+   semantic candidate reauthorization.
+
+One SDK instance serializes its read-check-append operations. Cross-process
+transactionality, authentication, membership resolution, vector ranking,
+service transport, and UI are the next application-layer concerns.
 
 ## Narrative Parity Status
 

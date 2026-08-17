@@ -34,6 +34,9 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-epistemic` records, revises, forgets, and recalls personal memory
   with mandatory workspace and creator identity, current space access, durable
   tombstones, and post-ranking authorization for external semantic candidates.
+- `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
+  capture-scope enforcement, canonical ordering, access-filtered projection,
+  and a personal-memory facade that does not expose raw memory state.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,
