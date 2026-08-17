@@ -54,7 +54,7 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-narrative` | Canon, character knowledge, arcs, curves, convergence | Mythopia | First parity slice implemented |
 | `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Terminal canonical slice implemented |
 | `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Replay and orphan core implemented |
-| `@_89/fold-epistemic` | Scoped memory and recall-time access enforcement | Raven | Gated on second-pass inventory |
+| `@_89/fold-epistemic` | Scoped personal memory and recall-time access enforcement | Raven | Recall-enforced personal memory core implemented |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
 | `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Planned |
 | `apps/api`, `apps/brain` | Service and work-focused view layer | Local SDK; Raven Docs UI patterns where useful | Planned |
@@ -82,7 +82,7 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 | Parallax | connection, spawn, status, and orphan-recovery behavior | `packages/fold-fleet` | Reimplemented as a pure Fold-event projection with boot reconstruction, immutable identity, heartbeat freshness, and orphan timeout tests. Runtime actuation remains adapter work. |
 | narrative-canon | Five generator choke points in `image-generator.ts`, `gpt-image-generator.ts`, `video-generator.ts`, `seedance-generator.ts`, `music-generator.ts` | `packages/fold-activity` contract | Define generation-lineage records locally. Narrative Studio instrumentation remains in its own repository until the contract is proven. FABLE is a film fixture/agent name, not this codebase. |
 | Embers | `docs/design/v0.3/intention.md`; drive, wear, causal-log, pressure, and intention symbols | `packages/fold-drives` | Reimplemented as immutable incremental state plus canonical samples and discrete records. Exact threshold, clamp-order, wear, intention, urgency, and eligibility fixtures pass locally. Practices, capabilities, prose, and host cognition are excluded. |
-| Raven | UUIDv7 ordering, workspace/space/creator scope, memory and access-control behavior | `packages/fold-epistemic`, `apps/brain` | Gated on the second-pass write-path, schema, and guard inventory. Reuse UI patterns only after core behavior is local. |
+| Raven | UUIDv7 ordering, workspace/space/creator scope, memory lifecycle and access-control behavior | `packages/fold-epistemic`, `apps/brain` | Clean-room core implemented after pinned schema, write-path, vector-recall, and guard inventory. Local tests correct missing post-ranking creator and explicit space checks. UI patterns remain a later view-layer input. |
 
 ## Implementation Order
 
@@ -100,9 +100,9 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    observations, complete source identity, heartbeat freshness, boot
    reconstruction, and orphan planning are implemented. Producer wiring and
    runtime actuation remain host integrations.
-7. **Domain completion:** the drive, wear, and intention core is implemented.
-   Raven memory and recall-time access enforcement are the remaining domain
-   inventory and implementation milestone.
+7. **Domain completion:** drive, wear, intention, personal memory, tombstone,
+   and recall-time access cores are implemented. Raven vector search and UI stay
+   host concerns rather than core dependencies.
 8. **Delivery:** expose settled APIs through `@_89/fold-sdk`, then build the API
    and Raven-inspired view layer exclusively against local packages.
 
@@ -122,6 +122,25 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 
 The detailed source and exclusion map is in
 `docs/inventory/DRIVES_SOURCES.md`.
+
+## Epistemic Parity Status
+
+`@_89/fold-epistemic` owns personal memory state and the authorization point:
+
+1. UUIDv7 memories, revisions, and forget records carry explicit workspace,
+   optional space, creator, event capture, and authored provenance.
+2. Replay is deterministic and fails closed on duplicates, stale or post-forget
+   mutations, scope mismatch, and principal spoofing.
+3. Creator privacy is mandatory even for workspace administrators; current
+   space membership is checked on write and on every recall.
+4. Metadata recall and externally ranked semantic candidates share the same
+   post-ranking access enforcement, closing the gap found in Raven's pinned
+   semantic branch.
+5. Persistence, embeddings, vector ranking, memberships, clocks, UUID
+   generation, transports, and UI remain delivery-layer responsibilities.
+
+The detailed source, license, finding, and exclusion map is in
+`docs/inventory/EPISTEMIC_SOURCES.md`.
 
 ## Narrative Parity Status
 

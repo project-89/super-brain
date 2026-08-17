@@ -31,6 +31,9 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-drives` incrementally advances drive and wear state, records causal
   discontinuities as canonical Fold events, and rebuilds surfaced, committed,
   declined, acted, and ended intentions without performing host cognition.
+- `@_89/fold-epistemic` records, revises, forgets, and recalls personal memory
+  with mandatory workspace and creator identity, current space access, durable
+  tombstones, and post-ranking authorization for external semantic candidates.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

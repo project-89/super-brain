@@ -82,3 +82,10 @@ Embers commit `1bbafe059809026447f361d0e9f4a0e44e161ee9`. Its exact threshold
 fixtures retain the source's stepwise floating-point behavior. Continuous state
 restores from explicit samples; sparse causal events are never treated as enough
 to synthesize elapsed ticks. No Embers source file was copied.
+
+`packages/fold-epistemic` is a clean-room implementation of the personal-memory
+schema, lifecycle, and access behavior inspected in Raven commit
+`817d7541868cc7947b004b4f59c48da8145f2419`. Raven is AGPL-3.0, so no source or
+SQL was copied. The two untracked Raven files were excluded. Local recall
+reapplies workspace, creator, and current space access after external semantic
+ranking, correcting a missing creator check in the pinned semantic path.

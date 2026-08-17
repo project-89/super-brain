@@ -41,6 +41,12 @@ importers:
         specifier: workspace:*
         version: link:../fold
 
+  packages/fold-epistemic:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../fold
+
   packages/fold-eval:
     dependencies:
       '@_89/confidence-kernel':
