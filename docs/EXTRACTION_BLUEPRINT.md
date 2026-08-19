@@ -57,7 +57,8 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-epistemic` | Scoped personal memory and recall-time access enforcement | Raven | Recall-enforced personal memory core implemented |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
 | `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log and personal-memory core implemented |
-| `apps/api`, `apps/brain` | Service and work-focused view layer | Local SDK; Raven Docs UI patterns where useful | Planned |
+| `apps/api` | Authenticated service over the local SDK | Local packages only | HTTP event, projection, and memory core implemented |
+| `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Planned |
 
 ## Source-to-Target Map
 
@@ -104,9 +105,10 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    and recall-time access cores are implemented. Raven vector search and UI stay
    host concerns rather than core dependencies.
 8. **Delivery:** the first `@_89/fold-sdk` slice exposes scoped journal,
-   projection, and personal-memory APIs. Build the API and Raven-inspired view
-   layer exclusively against that local boundary; add other domain facades only
-   when their product workflows require them.
+   projection, and personal-memory APIs. `apps/api` now serves that boundary with
+   authenticated authors, fresh membership, and durable per-workspace journals.
+   Build the Raven-inspired view layer against this API; add other domain
+   facades only when product workflows require them.
 
 ## Drive Parity Status
 
@@ -161,9 +163,30 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
    tombstones, revocation, indistinguishable absent/denied mutations, and
    semantic candidate reauthorization.
 
-One SDK instance serializes its read-check-append operations. Cross-process
-transactionality, authentication, membership resolution, vector ranking,
-service transport, and UI are the next application-layer concerns.
+One SDK instance serializes its read-check-append operations. Authentication,
+membership resolution, and HTTP transport now live in `apps/api`;
+cross-process transactionality, vector ranking, and UI remain follow-on work.
+
+## API Delivery Status
+
+`apps/api` supplies the first application boundary without importing Raven:
+
+1. Static bearer credentials bind a principal and exact Fold author; only token
+   digests remain in process and invalid configuration fails at startup.
+2. Workspace and space membership is resolved for every request rather than
+   cached into stored records or inferred after capture.
+3. Generic event append, access-filtered listing, and materialized projection
+   are exposed with canonical/draft and explicit cursor controls.
+4. Personal-memory record, revise, forget, lookup, metadata recall, and semantic
+   candidate recall use server-derived creator and capture identity.
+5. Workspace IDs become opaque hashed filenames. A singleton SDK serializes each
+   workspace and complete-line journal appends are fsynced.
+6. HTTP integration tests cover authentication, author spoofing, tenant and
+   creator privacy, revocation, conflicts, validation, body limits, projection,
+   memory lifecycle, and durable reopen.
+
+Cross-process locking, external identity providers, rate limiting, deployment
+TLS/CORS, vector ranking, and `apps/brain` remain explicit follow-on work.
 
 ## Narrative Parity Status
 

@@ -37,6 +37,10 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
   capture-scope enforcement, canonical ordering, access-filtered projection,
   and a personal-memory facade that does not expose raw memory state.
+- `@_89/super-brain-api` serves those SDK operations over authenticated HTTP,
+  derives authorship and personal-memory capture identity from credentials,
+  resolves membership on every request, and persists one fsynced journal per
+  workspace.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

@@ -94,3 +94,8 @@ ranking, correcting a missing creator check in the pinned semantic path.
 epistemic contracts. It uses no external source material. Its JSONL integration
 test exercises the local `FoldJournal` through a structural store port; the SDK
 production bundle has no filesystem storage dependency.
+
+`apps/api` is local application code over `fold-sdk` and `fold-storage`. It uses
+no Raven server or other external implementation. Authentication, per-request
+membership resolution, author binding, opaque workspace journal paths, fsynced
+append, HTTP schemas, and error responses are owned and tested here.

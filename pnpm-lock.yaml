@@ -21,6 +21,24 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
+  apps/api:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../../packages/fold
+      '@_89/fold-epistemic':
+        specifier: workspace:*
+        version: link:../../packages/fold-epistemic
+      '@_89/fold-sdk':
+        specifier: workspace:*
+        version: link:../../packages/fold-sdk
+      '@_89/fold-storage':
+        specifier: workspace:*
+        version: link:../../packages/fold-storage
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+
   packages/confidence-kernel: {}
 
   packages/fold:

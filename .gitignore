@@ -3,4 +3,4 @@ dist/
 coverage/
 *.tsbuildinfo
 .DS_Store
-
+.data/
