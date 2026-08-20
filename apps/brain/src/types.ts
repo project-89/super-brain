@@ -85,10 +85,25 @@ export interface RecalledMemory {
   readonly score?: number;
 }
 
+export interface SerializedFoldNode {
+  readonly id: string;
+  readonly nodeKind?: string;
+  readonly exists: boolean;
+  readonly properties: Readonly<Record<string, JsonValue>>;
+}
+
+export interface SerializedFoldEdge {
+  readonly id: string;
+  readonly subject: string;
+  readonly object: string;
+  readonly edgeType: string;
+  readonly payload?: JsonValue;
+}
+
 export interface SerializedFoldState {
   readonly values: readonly [string, JsonValue][];
-  readonly nodes: readonly [string, { readonly kind: string; readonly data: Readonly<Record<string, JsonValue>> }][];
-  readonly edges: readonly [string, Readonly<Record<string, JsonValue>>][];
+  readonly nodes: readonly [string, SerializedFoldNode][];
+  readonly edges: readonly [string, SerializedFoldEdge][];
   readonly redirects: readonly [string, string][];
   readonly diagnostics: readonly Readonly<Record<string, JsonValue>>[];
   readonly appliedEvents: readonly FoldEvent[];
@@ -104,6 +119,7 @@ export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
   readonly memories: readonly RecalledMemory[];
   readonly projection: ProjectionResponse;
+  readonly workingProjection: ProjectionResponse;
   readonly loadedAt: number;
 }
 

@@ -1143,6 +1143,13 @@ textarea::placeholder {
   margin-bottom: 14px;
 }
 
+.state-toolbar__controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
 .segmented-control {
   display: inline-flex;
   max-width: 100%;
@@ -1173,6 +1180,17 @@ textarea::placeholder {
   color: var(--text);
   background: var(--surface);
   box-shadow: 0 1px 3px rgba(31, 44, 39, 0.1);
+}
+
+.segmented-control button[aria-pressed="true"] {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(31, 44, 39, 0.1);
+}
+
+.segmented-control--mode button {
+  min-width: 68px;
+  justify-content: center;
 }
 
 .segmented-control button svg { width: 14px; height: 14px; }
@@ -1222,6 +1240,7 @@ textarea::placeholder {
 .state-list > button > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .state-list strong { overflow: hidden; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .state-list small { color: var(--text-muted); font-size: 9px; }
+.state-list__id { overflow: hidden; color: var(--text-subtle); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 
 .json-inspector {
   min-width: 0;
@@ -1232,6 +1251,14 @@ textarea::placeholder {
 .json-inspector header {
   padding-bottom: 15px;
   border-bottom: 1px solid var(--line);
+}
+
+.json-inspector__id {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 9px;
+  overflow-wrap: anywhere;
 }
 
 .json-inspector pre {
@@ -1386,6 +1413,7 @@ textarea::placeholder {
   .detail-pane, .event-inspector, .json-inspector { min-height: 380px; padding: 18px; }
   .table-wrap--events { border-right: 0; }
   .state-toolbar { align-items: stretch; flex-direction: column; }
+  .state-toolbar__controls { align-items: stretch; flex-direction: column; }
   .segmented-control { width: 100%; }
   .segmented-control button { flex: 1 0 auto; }
   .state-toolbar .search-field { width: 100%; }

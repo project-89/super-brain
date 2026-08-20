@@ -29,14 +29,15 @@ export function useSnapshot(connection: ConnectionSettings) {
       }));
       try {
         const client = new FoldApiClient(connection);
-        const [events, memories, projection] = await Promise.all([
+        const [events, memories, projection, workingProjection] = await Promise.all([
           client.listEvents({ includeDrafts: true }),
           client.recallMemories({ scope: { kind: "all" }, limit: 100 }),
+          client.projection(),
           client.projection(true),
         ]);
         if (request !== requestNumber.current) return;
         setState({
-          snapshot: { events, memories, projection, loadedAt: Date.now() },
+          snapshot: { events, memories, projection, workingProjection, loadedAt: Date.now() },
           loading: false,
           refreshing: false,
         });

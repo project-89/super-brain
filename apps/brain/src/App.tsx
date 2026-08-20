@@ -139,7 +139,14 @@ export default function App() {
       );
     }
     if (page === "events") return <EventsPage entries={snapshot.events} />;
-    if (page === "state") return <StatePage state={snapshot.projection.state} />;
+    if (page === "state") {
+      return (
+        <StatePage
+          canonicalState={snapshot.projection.state}
+          workingState={snapshot.workingProjection.state}
+        />
+      );
+    }
     return <OverviewPage snapshot={snapshot} navigate={navigate} />;
   };
 
