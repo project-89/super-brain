@@ -58,7 +58,7 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
 | `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log and personal-memory core implemented |
 | `apps/api` | Authenticated service over the local SDK | Local packages only | HTTP event, projection, and memory core implemented |
-| `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Planned |
+| `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | First operational slice implemented |
 
 ## Source-to-Target Map
 
@@ -83,7 +83,7 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 | Parallax | connection, spawn, status, and orphan-recovery behavior | `packages/fold-fleet` | Reimplemented as a pure Fold-event projection with boot reconstruction, immutable identity, heartbeat freshness, and orphan timeout tests. Runtime actuation remains adapter work. |
 | narrative-canon | Five generator choke points in `image-generator.ts`, `gpt-image-generator.ts`, `video-generator.ts`, `seedance-generator.ts`, `music-generator.ts` | `packages/fold-activity` contract | Define generation-lineage records locally. Narrative Studio instrumentation remains in its own repository until the contract is proven. FABLE is a film fixture/agent name, not this codebase. |
 | Embers | `docs/design/v0.3/intention.md`; drive, wear, causal-log, pressure, and intention symbols | `packages/fold-drives` | Reimplemented as immutable incremental state plus canonical samples and discrete records. Exact threshold, clamp-order, wear, intention, urgency, and eligibility fixtures pass locally. Practices, capabilities, prose, and host cognition are excluded. |
-| Raven | UUIDv7 ordering, workspace/space/creator scope, memory lifecycle and access-control behavior | `packages/fold-epistemic`, `apps/brain` | Clean-room core implemented after pinned schema, write-path, vector-recall, and guard inventory. Local tests correct missing post-ranking creator and explicit space checks. UI patterns remain a later view-layer input. |
+| Raven | UUIDv7 ordering, workspace/space/creator scope, memory lifecycle and access-control behavior | `packages/fold-epistemic`, `apps/brain` | Clean-room core implemented after pinned schema, write-path, vector-recall, and guard inventory. Local tests correct missing post-ranking creator and explicit space checks. The client adapts committed shell, compact filter, list/detail, and metadata interaction evidence without importing Raven code. |
 
 ## Implementation Order
 
@@ -107,7 +107,8 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 8. **Delivery:** the first `@_89/fold-sdk` slice exposes scoped journal,
    projection, and personal-memory APIs. `apps/api` now serves that boundary with
    authenticated authors, fresh membership, and durable per-workspace journals.
-   Build the Raven-inspired view layer against this API; add other domain
+   The first repository-owned view layer now covers overview, personal-memory,
+   event, and projected-state workflows against this API. Add other domain
    facades only when product workflows require them.
 
 ## Drive Parity Status
@@ -186,7 +187,24 @@ cross-process transactionality, vector ranking, and UI remain follow-on work.
    memory lifecycle, and durable reopen.
 
 Cross-process locking, external identity providers, rate limiting, deployment
-TLS/CORS, vector ranking, and `apps/brain` remain explicit follow-on work.
+TLS/CORS, and vector ranking remain explicit follow-on work.
+
+## Brain Delivery Status
+
+`apps/brain` supplies the first operational client without importing Raven:
+
+1. A persistent responsive shell exposes overview, memory, events, and state.
+2. Personal memory supports accessible search, source/scope filtering, record,
+   revision, and explicit forget with server-derived creator identity.
+3. Event and projection inspectors expose canonical/draft status, changes,
+   nodes, edges, component values, and diagnostics without bypassing the API.
+4. The bearer token is session-scoped; workspace and API URL preferences may be
+   retained locally. Authentication and access failures remain visible.
+5. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
+   event ordering, URL encoding, auth headers, memory payloads, and error maps.
+
+Semantic ranking, graph layout, event authoring, identity-provider login, and
+deployment-specific secret delivery remain follow-on product work.
 
 ## Narrative Parity Status
 

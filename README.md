@@ -41,6 +41,9 @@ The first milestone is the risk-retirement gate from the reference document:
   derives authorship and personal-memory capture identity from credentials,
   resolves membership on every request, and persists one fsynced journal per
   workspace.
+- `@_89/super-brain` is the responsive operator client for workspace activity,
+  private personal-memory lifecycle, canonical/draft event inspection, and
+  materialized Fold state. It talks only to the local HTTP API.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,
@@ -68,6 +71,9 @@ This repository does not modify the referenced repositories in
 pnpm install
 pnpm verify
 ```
+
+Local client setup and proxy configuration are documented in
+[`apps/brain/README.md`](./apps/brain/README.md).
 
 The repository remains private. New Fold packages are `UNLICENSED` until package
 ownership and release terms are settled; the imported confidence kernel retains
