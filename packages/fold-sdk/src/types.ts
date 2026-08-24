@@ -9,6 +9,11 @@ import type {
   ForgottenMemory,
   PersonalMemory,
 } from "@_89/fold-epistemic";
+import type {
+  TrajectoryRunRecord,
+  TrajectoryTaskReport,
+  TrajectoryTreeRecord,
+} from "@_89/fold-trajectory";
 
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
@@ -60,3 +65,24 @@ export interface MemoryForgetResult {
   readonly event: FoldEvent;
   readonly forgotten: ForgottenMemory;
 }
+
+export interface TrajectoryTreeMutationResult {
+  readonly event: FoldEvent;
+  readonly record: TrajectoryTreeRecord;
+}
+
+export interface TrajectoryMutationResult {
+  readonly event: FoldEvent;
+  readonly record: TrajectoryRunRecord;
+}
+
+export interface TrajectoryTaskSummary {
+  readonly taskId: string;
+  readonly tree: TrajectoryTreeRecord["tree"];
+  readonly trajectoryCount: number;
+  readonly successCount: number;
+  readonly failureCount: number;
+  readonly lastRecordedAt: number;
+}
+
+export type { TrajectoryTaskReport };

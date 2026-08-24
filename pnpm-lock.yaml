@@ -35,6 +35,9 @@ importers:
       '@_89/fold-storage':
         specifier: workspace:*
         version: link:../../packages/fold-storage
+      '@_89/fold-trajectory':
+        specifier: workspace:*
+        version: link:../../packages/fold-trajectory
       zod:
         specifier: ^3.25.0
         version: 3.25.76
@@ -129,6 +132,9 @@ importers:
       '@_89/fold-epistemic':
         specifier: workspace:*
         version: link:../fold-epistemic
+      '@_89/fold-trajectory':
+        specifier: workspace:*
+        version: link:../fold-trajectory
     devDependencies:
       '@_89/fold-storage':
         specifier: workspace:*
@@ -148,6 +154,24 @@ importers:
       '@_89/fold':
         specifier: workspace:*
         version: link:../fold
+
+  packages/fold-trajectory:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../fold
+      '@_89/fold-epistemic':
+        specifier: workspace:*
+        version: link:../fold-epistemic
+      '@_89/fold-eval':
+        specifier: workspace:*
+        version: link:../fold-eval
+      '@_89/fold-trace':
+        specifier: workspace:*
+        version: link:../fold-trace
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
 
 packages:
 

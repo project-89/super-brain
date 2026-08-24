@@ -95,6 +95,11 @@ epistemic contracts. It uses no external source material. Its JSONL integration
 test exercises the local `FoldJournal` through a structural store port; the SDK
 production bundle has no filesystem storage dependency.
 
+`packages/fold-trajectory` is local delivery code over the repository-owned
+`fold-trace`, `fold-eval`, and Fold event contracts. It adds scoped event
+lifecycle and replay but no new external parity claim. Its checked-in model
+examples are structural fixtures, not empirical model evidence.
+
 `apps/api` is local application code over `fold-sdk` and `fold-storage`. It uses
 no Raven server or other external implementation. Authentication, per-request
 membership resolution, author binding, opaque workspace journal paths, fsynced

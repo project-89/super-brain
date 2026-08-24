@@ -25,6 +25,7 @@
     "@_89/fold-epistemic": "workspace:*",
     "@_89/fold-sdk": "workspace:*",
     "@_89/fold-storage": "workspace:*",
+    "@_89/fold-trajectory": "workspace:*",
     "zod": "^3.25.0"
   }
 }

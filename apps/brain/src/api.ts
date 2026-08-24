@@ -7,6 +7,11 @@ import type {
   PersonalMemory,
   ProjectionResponse,
   RecalledMemory,
+  SharedDecisionTree,
+  TrajectoryImportBundle,
+  TrajectoryInput,
+  TrajectoryTaskReport,
+  TrajectoryTaskSummary,
 } from "./types";
 
 interface ApiErrorBody {
@@ -79,6 +84,59 @@ export class FoldApiClient {
   async projection(includeDrafts = false): Promise<ProjectionResponse> {
     const query = includeDrafts ? "?include=canon%2Bdraft" : "";
     return this.request<ProjectionResponse>(`${this.workspacePath("projection")}${query}`);
+  }
+
+  async listTrajectoryTasks(): Promise<readonly TrajectoryTaskSummary[]> {
+    const response = await this.request<{ readonly tasks: readonly TrajectoryTaskSummary[] }>(
+      this.workspacePath("trajectory-tasks"),
+    );
+    return response.tasks;
+  }
+
+  async trajectoryReport(taskId: string): Promise<TrajectoryTaskReport> {
+    const response = await this.request<{ readonly report: TrajectoryTaskReport }>(
+      `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}`,
+    );
+    return response.report;
+  }
+
+  async recordTrajectoryTree(tree: SharedDecisionTree, spaceId?: string): Promise<void> {
+    await this.request(this.workspacePath("trajectory-tasks"), {
+      method: "POST",
+      body: JSON.stringify({
+        stamp: nextEventStamp(),
+        ...(spaceId === undefined ? {} : { spaceId }),
+        tree,
+      }),
+    });
+  }
+
+  async recordTrajectory(input: TrajectoryInput, spaceId?: string): Promise<void> {
+    await this.request(this.workspacePath("trajectories"), {
+      method: "POST",
+      body: JSON.stringify({
+        stamp: nextEventStamp(),
+        ...(spaceId === undefined ? {} : { spaceId }),
+        input,
+      }),
+    });
+  }
+
+  async importTrajectoryBundle(
+    bundle: TrajectoryImportBundle,
+    existingTasks: readonly TrajectoryTaskSummary[],
+  ): Promise<number> {
+    const existing = existingTasks.find(({ taskId }) => taskId === bundle.tree.taskId);
+    if (existing !== undefined && JSON.stringify(existing.tree) !== JSON.stringify(bundle.tree)) {
+      throw new FoldApiError(409, "trajectory_tree_mismatch", `Task ${bundle.tree.taskId} already has a different shared tree`);
+    }
+    if (existing === undefined) {
+      await this.recordTrajectoryTree(bundle.tree, bundle.spaceId);
+    }
+    for (const trajectory of bundle.trajectories) {
+      await this.recordTrajectory(trajectory, bundle.spaceId);
+    }
+    return bundle.trajectories.length;
   }
 
   async recallMemories(options: {

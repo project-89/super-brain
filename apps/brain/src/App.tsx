@@ -8,6 +8,7 @@ import {
   Settings,
   Sun,
   Trash2,
+  Waypoints,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -15,21 +16,24 @@ import { useEffect, useMemo, useState } from "react";
 import { FoldApiClient } from "./api";
 import { initialConnection, saveConnection } from "./connection";
 import { useSnapshot } from "./use-snapshot";
-import type { ConnectionSettings, MemoryDraft, PersonalMemory } from "./types";
+import type { ConnectionSettings, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
 import { ConnectionDialog } from "./components/ConnectionDialog";
 import { MemoryDialog } from "./components/MemoryDialog";
 import { Modal } from "./components/Modal";
+import { TrajectoryImportDialog } from "./components/TrajectoryImportDialog";
 import { EventsPage } from "./pages/EventsPage";
 import { MemoryPage } from "./pages/MemoryPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { StatePage } from "./pages/StatePage";
+import { TrajectoriesPage } from "./pages/TrajectoriesPage";
 
-type Page = "overview" | "memory" | "events" | "state";
+type Page = "overview" | "memory" | "trajectories" | "events" | "state";
 type Theme = "light" | "dark";
 
 const PAGES: readonly { readonly id: Page; readonly label: string; readonly icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "memory", label: "Memory", icon: BrainCircuit },
+  { id: "trajectories", label: "Trajectories", icon: Waypoints },
   { id: "events", label: "Events", icon: History },
   { id: "state", label: "State", icon: Boxes },
 ];
@@ -53,6 +57,7 @@ export default function App() {
   const [memoryDialog, setMemoryDialog] = useState<{ readonly open: boolean; readonly memory?: PersonalMemory }>({ open: false });
   const [forgetMemory, setForgetMemory] = useState<PersonalMemory>();
   const [forgetReason, setForgetReason] = useState("no longer needed");
+  const [trajectoryImportOpen, setTrajectoryImportOpen] = useState(false);
   const [mutationPending, setMutationPending] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [mutationError, setMutationError] = useState<string>();
@@ -123,6 +128,19 @@ export default function App() {
     }
   };
 
+  const importTrajectories = async (bundle: TrajectoryImportBundle) => {
+    setMutationPending(true);
+    setMutationError(undefined);
+    try {
+      const count = await api.importTrajectoryBundle(bundle, snapshot?.trajectoryTasks ?? []);
+      setTrajectoryImportOpen(false);
+      setNotice(`${count} ${count === 1 ? "trajectory" : "trajectories"} imported`);
+      await refresh(true);
+    } finally {
+      setMutationPending(false);
+    }
+  };
+
   const renderPage = () => {
     if (snapshot === undefined) return null;
     if (page === "memory") {
@@ -139,6 +157,9 @@ export default function App() {
       );
     }
     if (page === "events") return <EventsPage entries={snapshot.events} />;
+    if (page === "trajectories") {
+      return <TrajectoriesPage tasks={snapshot.trajectoryTasks} api={api} onImport={() => setTrajectoryImportOpen(true)} />;
+    }
     if (page === "state") {
       return (
         <StatePage
@@ -217,6 +238,7 @@ export default function App() {
 
       <ConnectionDialog connection={connection} open={settingsOpen} required={disconnected} onClose={() => setSettingsOpen(false)} onSave={saveSettings} />
       <MemoryDialog memory={memoryDialog.memory} open={memoryDialog.open} pending={mutationPending} onClose={() => setMemoryDialog({ open: false })} onSave={saveMemory} />
+      <TrajectoryImportDialog open={trajectoryImportOpen} pending={mutationPending} onClose={() => setTrajectoryImportOpen(false)} onImport={importTrajectories} />
       <Modal open={forgetMemory !== undefined} title="Forget memory" onClose={() => setForgetMemory(undefined)}>
         <div className="form-stack">
           <p className="confirm-copy">This removes <strong>{forgetMemory?.summary || "this memory"}</strong> from recall and records a durable tombstone.</p>

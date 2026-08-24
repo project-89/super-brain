@@ -22,12 +22,21 @@ import type {
 } from "@_89/fold-epistemic";
 import {
   FoldSdkAccessError,
+  FoldSdkConflictError,
   FoldSdkError,
   PersonalMemoryUnavailableError,
+  TrajectoryTaskUnavailableError,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type TrajectoryTaskReport,
 } from "@_89/fold-sdk";
 import { JournalError } from "@_89/fold-storage";
+import {
+  sharedDecisionTreeSchema,
+  trajectoryInputSchema,
+  type TrajectoryEventContext,
+  type TrajectoryInput,
+} from "@_89/fold-trajectory";
 import { z, ZodError } from "zod";
 
 import type {
@@ -125,6 +134,22 @@ const memoryForgetSchema = z
   })
   .strict();
 
+const trajectoryTreeRecordSchema = z
+  .object({
+    stamp: stampSchema,
+    spaceId: z.string().min(1).optional(),
+    tree: sharedDecisionTreeSchema,
+  })
+  .strict();
+
+const trajectoryRecordSchema = z
+  .object({
+    stamp: stampSchema,
+    spaceId: z.string().min(1).optional(),
+    input: trajectoryInputSchema,
+  })
+  .strict();
+
 export class ApiHttpError extends Error {
   override readonly name = "ApiHttpError";
 
@@ -175,8 +200,14 @@ function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof PersonalMemoryUnavailableError) {
     return new ApiHttpError(404, "memory_unavailable", "Personal memory is unavailable");
   }
+  if (error instanceof TrajectoryTaskUnavailableError) {
+    return new ApiHttpError(404, "trajectory_task_unavailable", "Trajectory task is unavailable");
+  }
   if (error instanceof FoldSdkAccessError) {
     return new ApiHttpError(403, "access_denied", "Capture scope access denied");
+  }
+  if (error instanceof FoldSdkConflictError) {
+    return new ApiHttpError(409, "fold_conflict", error.message);
   }
   if (error instanceof EventOrderError || error instanceof FoldValidationError) {
     return new ApiHttpError(409, "fold_conflict", error.message);
@@ -187,7 +218,14 @@ function asHttpError(error: unknown): ApiHttpError {
   if (
     error instanceof FoldSdkError ||
     error instanceof TypeError ||
-    (error instanceof Error && (error.name === "MemoryEventError" || error.name === "EpistemicAccessError"))
+    (error instanceof Error && [
+      "EpistemicAccessError",
+      "MemoryEventError",
+      "ProjectionValidationError",
+      "TraceValidationError",
+      "TrajectoryEventError",
+      "TrajectoryProjectionError",
+    ].includes(error.name))
   ) {
     return new ApiHttpError(400, "invalid_request", error.message);
   }
@@ -328,6 +366,10 @@ function parsedMemoryPatch(input: z.infer<typeof memoryPatchSchema>): MemoryRevi
   };
 }
 
+function parsedTrajectoryInput(input: unknown): TrajectoryInput {
+  return trajectoryInputSchema.parse(input) as unknown as TrajectoryInput;
+}
+
 function recallFromUrl(url: URL): RecallRequest {
   const scopeKind = url.searchParams.get("scope");
   const spaceId = url.searchParams.get("spaceId");
@@ -368,6 +410,34 @@ function memoryContext(
         creator: access.principalId,
       },
       identity: { principal: access.principalId, workspace: access.workspaceId },
+    },
+  };
+}
+
+function trajectoryContext(
+  subject: AuthenticatedSubject,
+  access: FoldSdkAccessContext,
+  spaceId: string | undefined,
+): TrajectoryEventContext {
+  return {
+    access,
+    author: subject.author,
+    capture: {
+      scope: {
+        workspace: access.workspaceId,
+        ...(spaceId === undefined ? {} : { space: spaceId }),
+      },
+      identity: { principal: access.principalId, workspace: access.workspaceId },
+    },
+  };
+}
+
+function serializeTrajectoryReport(report: TrajectoryTaskReport) {
+  return {
+    ...report,
+    analysis: {
+      ...report.analysis,
+      edgeOutcomes: [...report.analysis.edgeOutcomes.values()],
     },
   };
 }
@@ -445,6 +515,44 @@ async function handleRequest(
       entries: projected.entries,
       state: JSON.parse(serializeFoldState(projected.state)),
     });
+    return;
+  }
+
+  if (resource === "trajectory-tasks" && resourceId === undefined) {
+    if (method === "GET") {
+      sendJson(response, 200, { tasks: await sdk.trajectoryTasks(access) });
+      return;
+    }
+    if (method === "POST") {
+      const body = trajectoryTreeRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
+      const result = await sdk.recordTrajectoryTree(
+        trajectoryContext(subject, access, body.spaceId),
+        body.stamp,
+        body.tree,
+      );
+      sendJson(response, 201, result);
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+
+  if (resource === "trajectory-tasks" && resourceId !== undefined && segments.length === 5) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const report = await sdk.trajectoryReport(access, resourceId);
+    if (report === undefined) throw new TrajectoryTaskUnavailableError(resourceId);
+    sendJson(response, 200, { report: serializeTrajectoryReport(report) });
+    return;
+  }
+
+  if (resource === "trajectories" && resourceId === undefined) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = trajectoryRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const result = await sdk.recordTrajectory(
+      trajectoryContext(subject, access, body.spaceId),
+      body.stamp,
+      parsedTrajectoryInput(body.input),
+    );
+    sendJson(response, 201, result);
     return;
   }
 

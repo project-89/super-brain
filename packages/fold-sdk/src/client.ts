@@ -25,6 +25,18 @@ import {
   type RecalledMemory,
   type PersonalMemory,
 } from "@_89/fold-epistemic";
+import {
+  analyzeTrajectoryTask,
+  makeTrajectoryRecordedEvent,
+  makeTrajectoryTreeRecordedEvent,
+  rebuildTrajectories,
+  trajectoryLogRecordsFromEvent,
+  type TrajectoryEventContext,
+  type TrajectoryEventStamp,
+  type TrajectoryInput,
+  type TrajectoryState,
+  type TrajectoryTreeRecord,
+} from "@_89/fold-trajectory";
 
 import { assertCanAppendEvent, authorizeEventAccess } from "./access.js";
 import type {
@@ -36,6 +48,10 @@ import type {
   FoldSdkStore,
   MemoryForgetResult,
   MemoryMutationResult,
+  TrajectoryMutationResult,
+  TrajectoryTaskReport,
+  TrajectoryTaskSummary,
+  TrajectoryTreeMutationResult,
 } from "./types.js";
 
 const MEMORY_EVENT_KINDS = new Set([
@@ -43,9 +59,26 @@ const MEMORY_EVENT_KINDS = new Set([
   "memory.revised",
   "memory.forgotten",
 ]);
+const TRAJECTORY_EVENT_KINDS = new Set([
+  "trajectory.tree-recorded",
+  "trajectory.recorded",
+]);
+const MEMORY_RECORD_TYPE_BY_KIND = {
+  "memory.recorded": "recorded",
+  "memory.revised": "revised",
+  "memory.forgotten": "forgotten",
+} as const;
+const TRAJECTORY_RECORD_TYPE_BY_KIND = {
+  "trajectory.tree-recorded": "tree",
+  "trajectory.recorded": "trajectory",
+} as const;
 
 export class FoldSdkError extends Error {
-  override readonly name = "FoldSdkError";
+  override readonly name: string = "FoldSdkError";
+}
+
+export class FoldSdkConflictError extends FoldSdkError {
+  override readonly name = "FoldSdkConflictError";
 }
 
 export class PersonalMemoryUnavailableError extends Error {
@@ -53,6 +86,14 @@ export class PersonalMemoryUnavailableError extends Error {
 
   constructor(readonly memoryId: string) {
     super(`personal memory is unavailable: ${memoryId}`);
+  }
+}
+
+export class TrajectoryTaskUnavailableError extends Error {
+  override readonly name = "TrajectoryTaskUnavailableError";
+
+  constructor(readonly taskId: string) {
+    super(`trajectory task is unavailable: ${taskId}`);
   }
 }
 
@@ -67,6 +108,34 @@ function validateMemoryEnvelope(event: FoldEvent): void {
   const isMemoryEvent = MEMORY_EVENT_KINDS.has(event.kind);
   if (isMemoryEvent && (records.length !== 1 || event.changes.length !== 1)) {
     throw new FoldSdkError(`memory event ${event.id} must contain exactly one memory record`);
+  }
+  if (!isMemoryEvent && records.length > 0) {
+    throw new FoldSdkError(`memory record ${event.id} requires a memory event kind`);
+  }
+  if (isMemoryEvent) {
+    const expected = MEMORY_RECORD_TYPE_BY_KIND[event.kind as keyof typeof MEMORY_RECORD_TYPE_BY_KIND];
+    if (records[0]?.recordType !== expected) {
+      throw new FoldSdkError(`memory event ${event.id} contains the wrong record type`);
+    }
+  }
+}
+
+function validateTrajectoryEnvelope(event: FoldEvent): void {
+  const records = trajectoryLogRecordsFromEvent(event);
+  const isTrajectoryEvent = TRAJECTORY_EVENT_KINDS.has(event.kind);
+  if (isTrajectoryEvent && (records.length !== 1 || event.changes.length !== 1)) {
+    throw new FoldSdkError(`trajectory event ${event.id} must contain exactly one trajectory record`);
+  }
+  if (!isTrajectoryEvent && records.length > 0) {
+    throw new FoldSdkError(`trajectory record ${event.id} requires a trajectory event kind`);
+  }
+  if (isTrajectoryEvent) {
+    const expected = TRAJECTORY_RECORD_TYPE_BY_KIND[
+      event.kind as keyof typeof TRAJECTORY_RECORD_TYPE_BY_KIND
+    ];
+    if (records[0]?.recordType !== expected) {
+      throw new FoldSdkError(`trajectory event ${event.id} contains the wrong record type`);
+    }
   }
 }
 
@@ -116,6 +185,7 @@ export class FoldSdk {
       validateStatus(entry.status);
       const event = parseEvent(entry.event);
       validateMemoryEnvelope(event);
+      validateTrajectoryEnvelope(event);
       return { event, status: entry.status };
     });
     validateProducerOrder(entries.map((entry) => entry.event));
@@ -130,6 +200,7 @@ export class FoldSdk {
     validateStatus(status);
     const parsed = parseEvent(event);
     validateMemoryEnvelope(parsed);
+    validateTrajectoryEnvelope(parsed);
     assertCanAppendEvent(parsed, access);
     const entries = await this.readStoredEntries();
     validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
@@ -194,6 +265,90 @@ export class FoldSdk {
     const entries = await this.entriesForAccess(access, { include: "canon" });
     const events = entries.map((entry) => entry.event);
     return { events, projection: rebuildMemories(events) };
+  }
+
+  private async trajectoryProjection(
+    access: FoldSdkAccessContext,
+  ): Promise<{ readonly events: readonly FoldEvent[]; readonly state: TrajectoryState }> {
+    const entries = await this.entriesForAccess(access, { include: "canon" });
+    const events = entries.map((entry) => entry.event);
+    return { events, state: rebuildTrajectories(events) };
+  }
+
+  recordTrajectoryTree(
+    context: TrajectoryEventContext,
+    stamp: TrajectoryEventStamp,
+    tree: TrajectoryTreeRecord["tree"],
+  ): Promise<TrajectoryTreeMutationResult> {
+    return this.enqueue(async () => {
+      const current = await this.trajectoryProjection(context.access);
+      if (current.state.trees.has(tree.taskId)) {
+        throw new FoldSdkConflictError(`trajectory tree already exists for task ${tree.taskId}`);
+      }
+      const event = makeTrajectoryTreeRecordedEvent(context, stamp, tree);
+      await this.appendInternal(context.access, event, "canon");
+      const record = trajectoryLogRecordsFromEvent(event)[0];
+      if (record?.recordType !== "tree") {
+        throw new FoldSdkError(`trajectory tree event ${event.id} did not contain a tree record`);
+      }
+      return { event, record };
+    });
+  }
+
+  recordTrajectory(
+    context: TrajectoryEventContext,
+    stamp: TrajectoryEventStamp,
+    input: TrajectoryInput,
+  ): Promise<TrajectoryMutationResult> {
+    return this.enqueue(async () => {
+      const current = await this.trajectoryProjection(context.access);
+      const tree = current.state.trees.get(input.taskId)?.tree;
+      if (tree === undefined) throw new TrajectoryTaskUnavailableError(input.taskId);
+      if (current.state.trajectories.has(input.id)) {
+        throw new FoldSdkConflictError(`trajectory already exists: ${input.id}`);
+      }
+      const event = makeTrajectoryRecordedEvent(context, stamp, tree, input);
+      await this.appendInternal(context.access, event, "canon");
+      const record = trajectoryLogRecordsFromEvent(event)[0];
+      if (record?.recordType !== "trajectory") {
+        throw new FoldSdkError(`trajectory event ${event.id} did not contain a trajectory record`);
+      }
+      return { event, record };
+    });
+  }
+
+  trajectoryTasks(access: FoldSdkAccessContext): Promise<readonly TrajectoryTaskSummary[]> {
+    return this.enqueue(async () => {
+      const { state } = await this.trajectoryProjection(access);
+      return [...state.trees.values()]
+        .map((treeRecord): TrajectoryTaskSummary => {
+          const records = [...state.trajectories.values()].filter(
+            (record) => record.trajectory.taskId === treeRecord.tree.taskId,
+          );
+          return {
+            taskId: treeRecord.tree.taskId,
+            tree: treeRecord.tree,
+            trajectoryCount: records.length,
+            successCount: records.filter((record) => record.trajectory.outcome === "success").length,
+            failureCount: records.filter((record) => record.trajectory.outcome === "failure").length,
+            lastRecordedAt: records.reduce(
+              (latest, record) => Math.max(latest, record.recordedAt),
+              treeRecord.recordedAt,
+            ),
+          };
+        })
+        .sort((left, right) => right.lastRecordedAt - left.lastRecordedAt || left.taskId.localeCompare(right.taskId));
+    });
+  }
+
+  trajectoryReport(
+    access: FoldSdkAccessContext,
+    taskId: string,
+  ): Promise<TrajectoryTaskReport | undefined> {
+    return this.enqueue(async () => {
+      const { state } = await this.trajectoryProjection(access);
+      return analyzeTrajectoryTask(state, taskId);
+    });
   }
 
   recordMemory(

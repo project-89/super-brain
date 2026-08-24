@@ -4,8 +4,15 @@ Work-focused browser client for the authenticated Fold API. It provides:
 
 - workspace activity and projection totals;
 - private personal-memory record, filter, revision, and forget workflows;
+- shared trajectory task import, coverage, route, divergence, review, and
+  per-step projection inspection;
 - canonical and draft event inspection;
 - materialized node, edge, component-value, and diagnostic inspection.
+
+Trajectory imports are JSON bundles with a `tree`, optional `spaceId`, and a
+non-empty `trajectories` array. Every run must reference the tree's `taskId` and
+must include explicit `mapped`, `ambiguous`, or `unmapped` assignments for its
+steps. The API owns final schema and scope validation.
 
 The client imports no Raven code. Raven's committed shell, compact filtering,
 list/detail, and memory metadata interactions were used only as product evidence.

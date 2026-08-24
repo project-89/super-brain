@@ -10,6 +10,62 @@ import {
   startApi,
 } from "./helpers.js";
 
+const trajectoryTree = {
+  taskId: "refresh-regression",
+  rootNodeId: "observe",
+  nodes: [
+    { id: "observe", kind: "observation", label: "Observe 401" },
+    { id: "expiry", kind: "decision", label: "Diagnose expiry" },
+    { id: "network", kind: "decision", label: "Diagnose network" },
+    { id: "patch", kind: "action", label: "Patch refresh" },
+    { id: "retry", kind: "action", label: "Add retry" },
+    { id: "pass", kind: "outcome", label: "Tests pass" },
+    { id: "fail", kind: "outcome", label: "Tests fail" },
+  ],
+  edges: [
+    { id: "e-expiry", sourceId: "observe", targetId: "expiry", label: "expiry" },
+    { id: "e-network", sourceId: "observe", targetId: "network", label: "network" },
+    { id: "e-patch", sourceId: "expiry", targetId: "patch", label: "patch" },
+    { id: "e-retry", sourceId: "network", targetId: "retry", label: "retry" },
+    { id: "e-pass", sourceId: "patch", targetId: "pass", label: "pass" },
+    { id: "e-fail", sourceId: "retry", targetId: "fail", label: "fail" },
+  ],
+};
+
+function trajectoryInput(
+  id: string,
+  modelId: string,
+  outcome: "success" | "failure",
+  nodeIds: readonly string[],
+) {
+  const steps = nodeIds.map((nodeId, index) => ({
+    id: `${id}-step-${index + 1}`,
+    stepNumber: index + 1,
+    role: index === nodeIds.length - 1 ? "model_output" : "decision",
+    content: `Step at ${nodeId}`,
+  }));
+  return {
+    id,
+    taskId: trajectoryTree.taskId,
+    model: { id: modelId },
+    outcome,
+    steps,
+    assignments: Object.fromEntries(
+      steps.map((step, index) => [
+        step.id,
+        {
+          kind: "mapped",
+          nodeId: nodeIds[index],
+          method: { kind: "manual", id: "test-review" },
+        },
+      ]),
+    ),
+    reviewText: outcome === "success"
+      ? "VERDICT: approve\nCONFIDENCE: 0.9"
+      : "VERDICT: reject\nCONFIDENCE: 0.2",
+  };
+}
+
 describe("Fold HTTP API", () => {
   it("serves public health and fails closed on authentication and membership", async () => {
     const api = await startApi();
@@ -255,6 +311,122 @@ describe("Fold HTTP API", () => {
       });
       expect(raw.body.entries).toEqual([]);
       expect(recalled.body.memories).toEqual([]);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("records scoped trajectory evidence and returns JSON-safe analysis", async () => {
+    const api = await startApi();
+    try {
+      const tree = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/trajectory-tasks", {
+        method: "POST",
+        token: "token-a",
+        body: {
+          stamp: { id: "trajectory-tree-event", t: 200, worldDate: "2026-08-19" },
+          spaceId: "space-a",
+          tree: trajectoryTree,
+        },
+      });
+      expect(tree).toMatchObject({
+        status: 201,
+        body: {
+          event: {
+            author: { kind: "human", id: "user-a" },
+            capture: {
+              scope: { workspace: "workspace-1", space: "space-a" },
+              identity: { principal: "user-a", workspace: "workspace-1" },
+            },
+          },
+          record: { recordType: "tree", actorId: "user-a" },
+        },
+      });
+
+      for (const [index, input] of [
+        trajectoryInput("run-a", "model-a", "success", ["observe", "expiry", "patch", "pass"]),
+        trajectoryInput("run-b", "model-b", "failure", ["observe", "network", "retry", "fail"]),
+      ].entries()) {
+        const recorded = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/trajectories", {
+          method: "POST",
+          token: "token-a",
+          body: {
+            stamp: { id: `trajectory-run-event-${index}`, t: 201 + index, worldDate: "2026-08-19" },
+            spaceId: "space-a",
+            input,
+          },
+        });
+        expect(recorded.status).toBe(201);
+      }
+
+      const tasks = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/trajectory-tasks",
+        { token: "token-a" },
+      );
+      expect(tasks.body.tasks).toEqual([
+        expect.objectContaining({
+          taskId: "refresh-regression",
+          trajectoryCount: 2,
+          successCount: 1,
+          failureCount: 1,
+        }),
+      ]);
+
+      const report = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/trajectory-tasks/refresh-regression",
+        { token: "token-a" },
+      );
+      expect(report).toMatchObject({
+        status: 200,
+        body: {
+          report: {
+            analysis: {
+              traceCount: 2,
+              routeEligibleTraceCount: 2,
+              coverage: { total: 8, mapped: 8, mappedRatio: 1 },
+            },
+            divergences: [
+              { trajectoryId: "run-a", divergence: { kind: "aligned" } },
+              { trajectoryId: "run-b", divergence: { kind: "divergent" } },
+            ],
+          },
+        },
+      });
+      expect(Array.isArray(report.body.report.analysis.edgeOutcomes)).toBe(true);
+      expect(report.body.report.analysis.edgeOutcomes).toHaveLength(6);
+
+      const duplicate = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/trajectory-tasks",
+        {
+          method: "POST",
+          token: "token-a",
+          body: {
+            stamp: { id: "duplicate-tree", t: 203, worldDate: "2026-08-19" },
+            spaceId: "space-a",
+            tree: trajectoryTree,
+          },
+        },
+      );
+      expect(duplicate).toMatchObject({ status: 409, body: { error: { code: "fold_conflict" } } });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("does not reveal unavailable trajectory tasks", async () => {
+    const api = await startApi();
+    try {
+      const missing = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/trajectory-tasks/missing-task",
+        { token: "token-a" },
+      );
+      expect(missing).toMatchObject({
+        status: 404,
+        body: { error: { code: "trajectory_task_unavailable" } },
+      });
     } finally {
       await api.close();
     }

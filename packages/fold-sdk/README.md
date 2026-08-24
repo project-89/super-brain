@@ -16,6 +16,9 @@ another implementation. The SDK owns these delivery rules:
 - expose personal memory through record, revise, forget, lookup, and recall
   methods without returning its raw projection;
 - reauthorize externally ranked memory candidates before returning them.
+- record scoped shared decision trees and trajectories, then return task
+  summaries and projection-gap-safe analysis without exposing an unfiltered
+  trajectory projection.
 
 Workspace roles do not override creator-scoped privacy. Space access is supplied
 freshly on every call, so revocation removes scoped records from both raw event

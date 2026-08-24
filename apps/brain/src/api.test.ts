@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { FoldApiClient } from "./api";
+import type { TrajectoryImportBundle, TrajectoryTaskSummary } from "./types";
 
 const client = new FoldApiClient({
   baseUrl: "/api",
@@ -14,6 +15,33 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+const trajectoryBundle: TrajectoryImportBundle = {
+  spaceId: "space-a",
+  tree: {
+    taskId: "task/one",
+    rootNodeId: "start",
+    nodes: [
+      { id: "start", kind: "observation", label: "Start" },
+      { id: "done", kind: "outcome", label: "Done" },
+    ],
+    edges: [{ id: "finish", sourceId: "start", targetId: "done", label: "finish" }],
+  },
+  trajectories: [{
+    id: "run-a",
+    taskId: "task/one",
+    model: { id: "model-a" },
+    outcome: "success",
+    steps: [
+      { id: "step-a", stepNumber: 1, role: "decision", content: "Start" },
+      { id: "step-b", stepNumber: 2, role: "model_output", content: "Done" },
+    ],
+    assignments: {
+      "step-a": { kind: "mapped", nodeId: "start", method: { kind: "manual", id: "review" } },
+      "step-b": { kind: "mapped", nodeId: "done", method: { kind: "manual", id: "review" } },
+    },
+  }],
+};
 
 describe("Fold API client", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -64,6 +92,52 @@ describe("Fold API client", () => {
     });
     expect(body).not.toHaveProperty("input.creatorId");
     expect(body).not.toHaveProperty("input.workspaceId");
+  });
+
+  it("loads reports with encoded task ids and imports server-scoped bundles", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ report: { taskId: "task/one" } }))
+      .mockResolvedValueOnce(jsonResponse({}, 201))
+      .mockResolvedValueOnce(jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client.trajectoryReport("task/one")).resolves.toMatchObject({ taskId: "task/one" });
+    await expect(client.importTrajectoryBundle(trajectoryBundle, [])).resolves.toBe(1);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/workspaces/workspace%2Fone/trajectory-tasks/task%2Fone",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "/api/v1/workspaces/workspace%2Fone/trajectory-tasks",
+    );
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "/api/v1/workspaces/workspace%2Fone/trajectories",
+    );
+    const treeBody = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body));
+    const runBody = JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body));
+    expect(treeBody).toMatchObject({ spaceId: "space-a", tree: { taskId: "task/one" } });
+    expect(runBody).toMatchObject({ spaceId: "space-a", input: { id: "run-a" } });
+    expect(treeBody).not.toHaveProperty("capture");
+    expect(runBody).not.toHaveProperty("capture");
+  });
+
+  it("rejects a conflicting local task tree before writing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const existing: TrajectoryTaskSummary = {
+      taskId: trajectoryBundle.tree.taskId,
+      tree: { ...trajectoryBundle.tree, rootNodeId: "done" },
+      trajectoryCount: 0,
+      successCount: 0,
+      failureCount: 0,
+      lastRecordedAt: 1,
+    };
+
+    await expect(client.importTrajectoryBundle(trajectoryBundle, [existing])).rejects.toMatchObject({
+      status: 409,
+      code: "trajectory_tree_mismatch",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("maps stable API errors and network failures", async () => {

@@ -19,6 +19,9 @@ The first milestone is the risk-retirement gate from the reference document:
   mapped-edge aggregation, first-divergent-edge analysis, tool-call divergence
   mining, and support-based structural merge. Its current two-model experiment
   is a structural fixture, not empirical model evidence.
+- `@_89/fold-trajectory` records shared decision trees and projected runs as
+  scoped canonical Fold events, then rebuilds task coverage, observed routes,
+  first divergence, and review-oracle results without hiding projection gaps.
 - `@_89/fold-eval` implements the review verdict protocol, command oracle,
   fail-closed oracle configuration, explicit absent results, configurable
   confidence aggregation, and confidence-kernel history integration.
@@ -36,14 +39,15 @@ The first milestone is the risk-retirement gate from the reference document:
   tombstones, and post-ranking authorization for external semantic candidates.
 - `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
   capture-scope enforcement, canonical ordering, access-filtered projection,
-  and a personal-memory facade that does not expose raw memory state.
+  personal-memory lifecycle, and trajectory task/report facades.
 - `@_89/super-brain-api` serves those SDK operations over authenticated HTTP,
   derives authorship and personal-memory capture identity from credentials,
   resolves membership on every request, and persists one fsynced journal per
   workspace.
 - `@_89/super-brain` is the responsive operator client for workspace activity,
-  private personal-memory lifecycle, canonical/draft event inspection, and
-  materialized Fold state. It talks only to the local HTTP API.
+  private personal-memory lifecycle, trajectory import and analysis,
+  canonical/draft event inspection, and materialized Fold state. It talks only
+  to the local HTTP API.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

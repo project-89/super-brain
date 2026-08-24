@@ -1,7 +1,7 @@
 {
-  "name": "@_89/fold-sdk",
+  "name": "@_89/fold-trajectory",
   "version": "0.0.0",
-  "description": "Scoped producer and consumer APIs over canonical Fold records",
+  "description": "Fold-backed trajectory capture, projection analysis, and review evaluation",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -23,10 +23,9 @@
   },
   "dependencies": {
     "@_89/fold": "workspace:*",
+    "@_89/fold-eval": "workspace:*",
+    "@_89/fold-trace": "workspace:*",
     "@_89/fold-epistemic": "workspace:*",
-    "@_89/fold-trajectory": "workspace:*"
-  },
-  "devDependencies": {
-    "@_89/fold-storage": "workspace:*"
+    "zod": "^3.25.0"
   }
 }

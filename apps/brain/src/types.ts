@@ -118,6 +118,7 @@ export interface ProjectionResponse {
 export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
   readonly memories: readonly RecalledMemory[];
+  readonly trajectoryTasks: readonly TrajectoryTaskSummary[];
   readonly projection: ProjectionResponse;
   readonly workingProjection: ProjectionResponse;
   readonly loadedAt: number;
@@ -134,4 +135,185 @@ export interface MemoryDraft {
   readonly content: JsonValue;
   readonly tags: readonly string[];
   readonly spaceId?: string;
+}
+
+export type TrajectoryOutcome = "success" | "failure";
+export type TrajectoryStepRole =
+  | "model_thought"
+  | "tool_call"
+  | "tool_call_response"
+  | "decision"
+  | "model_output";
+
+export interface TrajectoryStep {
+  readonly id: string;
+  readonly stepNumber: number;
+  readonly role: TrajectoryStepRole;
+  readonly content: string;
+  readonly toolName?: string;
+}
+
+export interface SharedTrajectoryNode {
+  readonly id: string;
+  readonly kind: "decision" | "action" | "observation" | "outcome";
+  readonly label: string;
+}
+
+export interface SharedTrajectoryEdge {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly targetId: string;
+  readonly label: string;
+}
+
+export interface SharedDecisionTree {
+  readonly taskId: string;
+  readonly rootNodeId: string;
+  readonly nodes: readonly SharedTrajectoryNode[];
+  readonly edges: readonly SharedTrajectoryEdge[];
+}
+
+export interface ProjectionMethod {
+  readonly kind: "manual" | "rule" | "model";
+  readonly id: string;
+  readonly confidence?: number;
+}
+
+export type ProjectionAssignment =
+  | { readonly kind: "mapped"; readonly nodeId: string; readonly method: ProjectionMethod }
+  | {
+      readonly kind: "ambiguous";
+      readonly candidates: readonly [string, string, ...string[]];
+      readonly reason: string;
+      readonly method: ProjectionMethod;
+    }
+  | {
+      readonly kind: "unmapped";
+      readonly reason: string;
+      readonly method: ProjectionMethod;
+    };
+
+export interface TrajectoryInput {
+  readonly id: string;
+  readonly taskId: string;
+  readonly model: { readonly id: string; readonly version?: string };
+  readonly outcome: TrajectoryOutcome;
+  readonly steps: readonly TrajectoryStep[];
+  readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
+  readonly reviewText?: string;
+}
+
+export interface TrajectoryTaskSummary {
+  readonly taskId: string;
+  readonly tree: SharedDecisionTree;
+  readonly trajectoryCount: number;
+  readonly successCount: number;
+  readonly failureCount: number;
+  readonly lastRecordedAt: number;
+}
+
+export interface TrajectoryRunRecord {
+  readonly recordType: "trajectory";
+  readonly actorId: string;
+  readonly workspaceId: string;
+  readonly spaceId?: string;
+  readonly recordedAt: number;
+  readonly trajectory: Omit<TrajectoryInput, "assignments" | "reviewText"> & {
+    readonly capture: FoldEvent["capture"];
+  };
+  readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
+  readonly reviewText?: string;
+}
+
+export interface ProjectedTrajectory {
+  readonly id: string;
+  readonly taskId: string;
+  readonly model: TrajectoryInput["model"];
+  readonly outcome: TrajectoryOutcome;
+  readonly capture: FoldEvent["capture"];
+  readonly steps: readonly {
+    readonly raw: TrajectoryStep;
+    readonly projection: ProjectionAssignment;
+  }[];
+}
+
+export interface EdgeOutcome {
+  readonly edgeId: string;
+  readonly sourceId: string;
+  readonly targetId: string;
+  readonly traversals: number;
+  readonly successes: number;
+  readonly failures: number;
+  readonly successRate: number;
+}
+
+export interface RouteOutcome {
+  readonly nodeIds: readonly string[];
+  readonly samples: number;
+  readonly successes: number;
+  readonly failures: number;
+  readonly successRate: number;
+}
+
+export type TrajectoryDivergence =
+  | { readonly kind: "aligned"; readonly comparedEdges: number }
+  | {
+      readonly kind: "divergent";
+      readonly edgeIndex: number;
+      readonly expectedEdge: SharedTrajectoryEdge;
+      readonly actualEdge: SharedTrajectoryEdge;
+      readonly expectedOutcome?: EdgeOutcome;
+      readonly actualOutcome?: EdgeOutcome;
+    }
+  | {
+      readonly kind: "indeterminate";
+      readonly comparedEdges: number;
+      readonly reason: "projection-gap" | "trace-ended" | "no-consensus" | "different-start-node";
+      readonly stepId?: string;
+    };
+
+export interface TrajectoryTaskReport {
+  readonly taskId: string;
+  readonly tree: SharedDecisionTree;
+  readonly records: readonly TrajectoryRunRecord[];
+  readonly projected: readonly ProjectedTrajectory[];
+  readonly analysis: {
+    readonly traceCount: number;
+    readonly routeEligibleTraceCount: number;
+    readonly incompleteTraceCount: number;
+    readonly coverage: {
+      readonly total: number;
+      readonly mapped: number;
+      readonly ambiguous: number;
+      readonly unmapped: number;
+      readonly mappedRatio: number;
+    };
+    readonly routes: readonly RouteOutcome[];
+    readonly mostSuccessfulPath: readonly string[];
+    readonly edgeOutcomes: readonly EdgeOutcome[];
+  };
+  readonly divergences: readonly {
+    readonly trajectoryId: string;
+    readonly divergence: TrajectoryDivergence;
+  }[];
+  readonly evaluations: readonly {
+    readonly trajectoryId: string;
+    readonly review: {
+      readonly confidence?: number;
+      readonly verdict?: "approve" | "revise" | "reject";
+      readonly detail: string;
+    };
+    readonly oracle: {
+      readonly confidence: number;
+      readonly combine: string;
+      readonly executions: readonly unknown[];
+      readonly detail?: string;
+    };
+  }[];
+}
+
+export interface TrajectoryImportBundle {
+  readonly spaceId?: string;
+  readonly tree: SharedDecisionTree;
+  readonly trajectories: readonly TrajectoryInput[];
 }

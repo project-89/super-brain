@@ -1,8 +1,8 @@
 # Super Brain API
 
-Authenticated HTTP delivery for scoped Fold events, projections, and personal
-memory. The service uses `@_89/fold-sdk` exclusively for record and recall
-behavior.
+Authenticated HTTP delivery for scoped Fold events, projections, personal
+memory, and trajectory evidence. The service uses `@_89/fold-sdk` exclusively
+for record, recall, and trajectory behavior.
 
 ## Configuration
 
@@ -54,6 +54,9 @@ FOLD_API_CREDENTIALS_JSON='{"local-secret":{"principalId":"local","workspaces":{
 | `GET`, `POST` | `/v1/workspaces/:workspace/memories` | Metadata recall or personal-memory creation |
 | `POST` | `/v1/workspaces/:workspace/memories/recall` | Recall with optional semantic candidates |
 | `GET`, `PATCH`, `DELETE` | `/v1/workspaces/:workspace/memories/:id` | Lookup, revision, or explicit forgetting |
+| `GET`, `POST` | `/v1/workspaces/:workspace/trajectory-tasks` | Task summaries or shared-tree creation |
+| `GET` | `/v1/workspaces/:workspace/trajectory-tasks/:taskId` | Projection, route, divergence, and review report |
+| `POST` | `/v1/workspaces/:workspace/trajectories` | Record a projected model run |
 
 Event reads accept `include=canon|canon+draft`, paired `cursorT` and
 `cursorEventId`, and repeated `kind` filters. Memory reads accept
@@ -62,9 +65,10 @@ Event reads accept `include=canon|canon+draft`, paired `cursorT` and
 
 Event append authors must exactly match the author bound to the credential.
 Memory authorship, creator scope, principal identity, and workspace are derived
-by the server and cannot be supplied by the request. Space membership is
-resolved on every request, so revocation applies immediately to raw records,
-projection, and recall.
+by the server and cannot be supplied by the request. Trajectory authorship and
+workspace/optional-space scope are derived the same way, but omit creator scope
+because task evidence is collaborative. Space membership is resolved on every
+request, so revocation applies immediately to raw records and every projection.
 
 Each workspace uses an opaque SHA-256 journal filename and one serialized SDK
 instance. Appends use complete-line JSONL with `sync: true`. This is an
