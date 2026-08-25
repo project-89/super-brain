@@ -12,6 +12,12 @@ function portFromEnvironment(value: string | undefined): number {
   return port;
 }
 
+function booleanFromEnvironment(name: string, value: string | undefined): boolean {
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new TypeError(`${name} must be true or false`);
+}
+
 async function main(): Promise<void> {
   const credentials = process.env.FOLD_API_CREDENTIALS_JSON;
   if (credentials === undefined || credentials.trim().length === 0) {
@@ -26,6 +32,10 @@ async function main(): Promise<void> {
     authenticator: directory,
     memberships: directory,
     sdks: registry,
+    enableSimulation: booleanFromEnvironment(
+      "FOLD_API_ENABLE_SIMULATION",
+      process.env.FOLD_API_ENABLE_SIMULATION,
+    ),
     reportError: (error) => console.error(error),
   });
 

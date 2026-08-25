@@ -7,6 +7,10 @@ validates immutable source identity, and derives one snapshot per terminal
 session. No in-memory map is authoritative; the same log rebuilds the same fleet
 state after restart.
 
+Only validated terminal activity node kinds enter this projection. Lifecycle
+records from other Fold sensors are ignored rather than rejected or interpreted
+as terminal sessions.
+
 Freshness and operational state stay separate:
 
 - current `online` or `heartbeat` coverage makes the last known session status

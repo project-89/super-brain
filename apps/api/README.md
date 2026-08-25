@@ -33,6 +33,8 @@ Optional environment:
 - `FOLD_API_HOST`, default `127.0.0.1`;
 - `FOLD_API_PORT`, default `3000`;
 - `FOLD_DATA_DIR`, default `.data/fold` under the working directory.
+- `FOLD_API_ENABLE_SIMULATION`, default `false`; when `true`, workspace owners
+  and admins may append local simulated terminal signals.
 
 Build and run with:
 
@@ -57,6 +59,8 @@ FOLD_API_CREDENTIALS_JSON='{"local-secret":{"principalId":"local","workspaces":{
 | `GET`, `POST` | `/v1/workspaces/:workspace/trajectory-tasks` | Task summaries or shared-tree creation |
 | `GET` | `/v1/workspaces/:workspace/trajectory-tasks/:taskId` | Projection, route, divergence, and review report |
 | `POST` | `/v1/workspaces/:workspace/trajectories` | Record a projected model run |
+| `GET` | `/v1/workspaces/:workspace/fleet` | Rebuilt sessions, freshness, and recovery plans |
+| `POST` | `/v1/workspaces/:workspace/activity-signals` | Owner/admin local simulation signal when explicitly enabled |
 
 Event reads accept `include=canon|canon+draft`, paired `cursorT` and
 `cursorEventId`, and repeated `kind` filters. Memory reads accept
@@ -77,5 +81,6 @@ one data directory requires a store with cross-process locking or compare-and-
 append semantics.
 
 TLS termination, credential rotation, external identity providers, distributed
-transactions, vector ranking, rate limits, and CORS policy remain deployment
-concerns rather than implicit behavior in this local service.
+transactions, authenticated external sensor ingestion, recovery actuation,
+vector ranking, rate limits, and CORS policy remain deployment concerns rather
+than implicit behavior in this local service.

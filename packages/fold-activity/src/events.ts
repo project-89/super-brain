@@ -1,4 +1,4 @@
-import { parseEvent, type FoldEvent, type JsonValue } from "@_89/fold";
+import { parseEvent, type Change, type FoldEvent, type JsonValue } from "@_89/fold";
 
 import { digestTerminalOutput } from "./normalize.js";
 import type {
@@ -13,6 +13,139 @@ export const ACTIVITY_CLASSIFICATION_NODE_KIND = "x.fold.activity-classification
 export const SENSOR_LIFECYCLE_NODE_KIND = "x.fold.sensor-lifecycle";
 
 const REQUIRED_IDENTITIES = ["agent", "task", "repo", "branch", "session"] as const;
+const ACTIVITY_EVENT_NODE_KIND = {
+  lifecycle: SENSOR_LIFECYCLE_NODE_KIND,
+  "terminal.observation": ACTIVITY_OBSERVATION_NODE_KIND,
+  "terminal.classification": ACTIVITY_CLASSIFICATION_NODE_KIND,
+} as const;
+const ACTIVITY_NODE_KINDS: ReadonlySet<string> = new Set(Object.values(ACTIVITY_EVENT_NODE_KIND));
+const OBSERVATION_KINDS: ReadonlySet<string> = new Set([
+  "status_changed",
+  "login_required",
+  "auth_required",
+  "blocking_prompt",
+  "stall_detected",
+  "tool_running",
+  "task_complete",
+  "output",
+]);
+const TERMINAL_STATES: ReadonlySet<string> = new Set([
+  "unknown",
+  "busy_streaming",
+  "awaiting_input",
+  "awaiting_auth",
+  "awaiting_approval",
+  "ready_for_input",
+  "completed",
+]);
+type CreateChange = Extract<Change, { readonly verb: "create" }>;
+
+function isActivityCreateChange(change: Change): change is CreateChange {
+  return change.verb === "create" && ACTIVITY_NODE_KINDS.has(change.nodeKind);
+}
+
+export class ActivityEventError extends Error {
+  override readonly name = "ActivityEventError";
+}
+
+function payloadString(
+  payload: Readonly<Record<string, JsonValue>>,
+  field: string,
+  eventId: string,
+): string {
+  const value = payload[field];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ActivityEventError(`activity event ${eventId} requires ${field}`);
+  }
+  return value;
+}
+
+export function validateActivityEventEnvelope(event: FoldEvent): void {
+  const activityChanges = event.changes.filter(isActivityCreateChange);
+  const declaresActivityKind =
+    event.kind === "terminal.observation" ||
+    event.kind === "terminal.classification" ||
+    (event.kind === "lifecycle" && activityChanges.length > 0);
+  if (!declaresActivityKind && activityChanges.length === 0) return;
+  const expectedNodeKind = ACTIVITY_EVENT_NODE_KIND[
+    event.kind as keyof typeof ACTIVITY_EVENT_NODE_KIND
+  ];
+  const isActivityEvent = expectedNodeKind !== undefined;
+  if (!isActivityEvent) {
+    throw new ActivityEventError(`activity record ${event.id} requires an activity event kind`);
+  }
+  if (
+    event.author.kind !== "sensor" ||
+    event.changes.length !== 1 ||
+    activityChanges.length !== 1 ||
+    activityChanges[0]?.nodeKind !== expectedNodeKind
+  ) {
+    throw new ActivityEventError(
+      `activity event ${event.id} requires one matching sensor-authored record`,
+    );
+  }
+  const identity = event.capture.identity;
+  for (const key of REQUIRED_IDENTITIES) {
+    if (identity?.[key]?.trim().length === 0 || identity?.[key] === undefined) {
+      throw new ActivityEventError(`activity event ${event.id} requires capture identity ${key}`);
+    }
+  }
+  const payload = activityChanges[0].after;
+  const sensor = payloadString(payload, "sensor", event.id);
+  const sessionId = payloadString(payload, "sessionId", event.id);
+  const observedAt = payloadString(payload, "observedAt", event.id);
+  if (sensor !== event.author.id) {
+    throw new ActivityEventError(`activity event ${event.id} sensor does not match author`);
+  }
+  if (sessionId !== identity?.session) {
+    throw new ActivityEventError(`activity event ${event.id} session does not match capture identity`);
+  }
+  if (!Number.isFinite(Date.parse(observedAt))) {
+    throw new ActivityEventError(`activity event ${event.id} observedAt must be an ISO timestamp`);
+  }
+  const provenance = activityChanges[0].provenance;
+  if (provenance?.basis !== "observed") {
+    throw new ActivityEventError(`activity event ${event.id} requires observed provenance`);
+  }
+  if (event.kind === "lifecycle") {
+    if (
+      event.lifecycle === undefined ||
+      event.lifecycle.sensor !== sensor ||
+      event.lifecycle.observedAt !== observedAt ||
+      payload.phase !== event.lifecycle.phase ||
+      payload.heartbeatWindowMs !== event.lifecycle.heartbeatWindowMs
+    ) {
+      throw new ActivityEventError(`activity event ${event.id} lifecycle metadata does not match its record`);
+    }
+    if (provenance.method?.kind !== "sensor" || provenance.method.id !== sensor) {
+      throw new ActivityEventError(`activity event ${event.id} requires matching sensor provenance`);
+    }
+  } else if (event.lifecycle !== undefined) {
+    throw new ActivityEventError(`activity event ${event.id} must not include lifecycle metadata`);
+  } else if (event.kind === "terminal.observation") {
+    if (!OBSERVATION_KINDS.has(payloadString(payload, "observation", event.id))) {
+      throw new ActivityEventError(`activity event ${event.id} contains an unknown observation`);
+    }
+    if (provenance.method?.kind !== "sensor" || provenance.method.id !== sensor) {
+      throw new ActivityEventError(`activity event ${event.id} requires matching sensor provenance`);
+    }
+  } else {
+    if (!TERMINAL_STATES.has(payloadString(payload, "state", event.id))) {
+      throw new ActivityEventError(`activity event ${event.id} contains an unknown terminal state`);
+    }
+    const classifierId = provenance.method?.id;
+    if (
+      provenance.method?.kind !== "classifier" ||
+      typeof classifierId !== "string" ||
+      classifierId.trim().length === 0 ||
+      provenance.confidence === undefined ||
+      provenance.confidence < 0 ||
+      provenance.confidence > 1
+    ) {
+      throw new ActivityEventError(`activity event ${event.id} requires classifier provenance`);
+    }
+  }
+}
 
 function validateContext(context: TerminalSensorContext): void {
   if (!/^urn:sensor:[^\s]+$/.test(context.sensor)) {
@@ -65,7 +198,7 @@ export function makeSensorLifecycleEvent(
     heartbeatWindowMs: context.heartbeatWindowMs,
     ...(detail === undefined ? {} : { detail }),
   };
-  return parseEvent({
+  const event = parseEvent({
     ...baseEvent(context, stamp),
     kind: "lifecycle",
     title: `Terminal sensor ${phase}`,
@@ -89,6 +222,8 @@ export function makeSensorLifecycleEvent(
       },
     ],
   });
+  validateActivityEventEnvelope(event);
+  return event;
 }
 
 export function makeTerminalObservationEvent(
@@ -114,7 +249,7 @@ export function makeTerminalObservationEvent(
           },
         }),
   };
-  return parseEvent({
+  const event = parseEvent({
     ...baseEvent(context, stamp),
     kind: "terminal.observation",
     title: `Terminal ${observation.kind.replaceAll("_", " ")}`,
@@ -131,6 +266,8 @@ export function makeTerminalObservationEvent(
       },
     ],
   });
+  validateActivityEventEnvelope(event);
+  return event;
 }
 
 export function makeTerminalClassificationEvent(
@@ -149,7 +286,7 @@ export function makeTerminalClassificationEvent(
     normalizedTail,
     ...(classification.ruleId === undefined ? {} : { ruleId: classification.ruleId }),
   };
-  return parseEvent({
+  const event = parseEvent({
     ...baseEvent(context, stamp),
     kind: "terminal.classification",
     title: `Terminal classified ${classification.state.replaceAll("_", " ")}`,
@@ -167,4 +304,6 @@ export function makeTerminalClassificationEvent(
       },
     ],
   });
+  validateActivityEventEnvelope(event);
+  return event;
 }

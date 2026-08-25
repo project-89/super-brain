@@ -14,6 +14,8 @@ import type {
   TrajectoryTaskReport,
   TrajectoryTreeRecord,
 } from "@_89/fold-trajectory";
+import type { FleetSessionSnapshot, OrphanRecoveryAction } from "@_89/fold-fleet";
+import type { TerminalSensorContext } from "@_89/fold-activity";
 
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
@@ -83,6 +85,20 @@ export interface TrajectoryTaskSummary {
   readonly successCount: number;
   readonly failureCount: number;
   readonly lastRecordedAt: number;
+}
+
+export interface ActivityMutationResult {
+  readonly event: FoldEvent;
+}
+
+export interface FoldSdkActivityContext extends TerminalSensorContext {
+  readonly access: FoldSdkAccessContext;
+}
+
+export interface FleetReadModel {
+  readonly rebuiltAt: string;
+  readonly sessions: readonly FleetSessionSnapshot[];
+  readonly recoveryActions: readonly OrphanRecoveryAction[];
 }
 
 export type { TrajectoryTaskReport };

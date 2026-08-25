@@ -140,6 +140,52 @@ describe("Fold API client", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("loads fleet state and emits a complete local simulation sequence", async () => {
+    const fleet = {
+      fleet: { rebuiltAt: "2026-08-20T12:00:00.000Z", sessions: [], recoveryActions: [] },
+      simulationEnabled: true,
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(fleet))
+      .mockResolvedValue(jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client.fleet()).resolves.toEqual(fleet);
+    const sessionId = await client.simulateFleetScenario({
+      scenario: "active",
+      agentId: "sim-agent",
+      taskId: "task-a",
+      repo: "super-brain",
+      branch: "main",
+      spaceId: "space-a",
+    });
+
+    expect(sessionId).toMatch(/^sim-[0-9a-f-]{36}$/);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/workspaces/workspace%2Fone/fleet");
+    const simulationCalls = fetchMock.mock.calls.slice(1) as [string, RequestInit][];
+    expect(simulationCalls.map(([url]) => url)).toEqual(
+      Array.from({ length: 5 }, () => "/api/v1/workspaces/workspace%2Fone/activity-signals"),
+    );
+    const bodies = simulationCalls.map(([, init]) => JSON.parse(String(init.body)));
+    expect(bodies.map(({ signal }) => signal.type)).toEqual([
+      "session_started",
+      "session_ready",
+      "heartbeat",
+      "tool_running",
+      "heartbeat",
+    ]);
+    expect(bodies.every((body) => body.identity.session === sessionId)).toBe(true);
+    expect(bodies[0]).toMatchObject({
+      spaceId: "space-a",
+      heartbeatWindowMs: 60_000,
+      identity: { agent: "sim-agent", task: "task-a", runtime: "simulation" },
+      stamp: { id: expect.any(String), t: expect.any(Number), observedAt: expect.any(String) },
+    });
+    expect(bodies[0]).not.toHaveProperty("sensor");
+    expect(bodies[0]).not.toHaveProperty("capture");
+  });
+
   it("maps stable API errors and network failures", async () => {
     vi.stubGlobal(
       "fetch",

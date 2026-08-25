@@ -66,6 +66,32 @@ function trajectoryInput(
   };
 }
 
+const fleetEpoch = Date.parse("2026-08-20T12:00:00.000Z");
+
+function activityBody(
+  sequence: number,
+  offsetMs: number,
+  signal: Readonly<Record<string, unknown>>,
+) {
+  return {
+    stamp: {
+      id: `fleet-event-${sequence}`,
+      t: fleetEpoch + offsetMs,
+      observedAt: new Date(fleetEpoch + offsetMs).toISOString(),
+    },
+    identity: {
+      agent: "sim-agent-a",
+      task: "api-fleet-test",
+      repo: "super-brain",
+      branch: "main",
+      session: "sim-session-a",
+      runtime: "simulation",
+    },
+    heartbeatWindowMs: 1_000,
+    signal,
+  };
+}
+
 describe("Fold HTTP API", () => {
   it("serves public health and fails closed on authentication and membership", async () => {
     const api = await startApi();
@@ -426,6 +452,104 @@ describe("Fold HTTP API", () => {
       expect(missing).toMatchObject({
         status: 404,
         body: { error: { code: "trajectory_task_unavailable" } },
+      });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("keeps local activity simulation disabled by default", async () => {
+    const api = await startApi();
+    try {
+      const response = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/activity-signals",
+        {
+          method: "POST",
+          token: "token-b",
+          body: activityBody(1, 0, { type: "session_started" }),
+        },
+      );
+      expect(response).toMatchObject({ status: 404, body: { error: { code: "not_found" } } });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("records owner-only simulated signals and rebuilds fleet state", async () => {
+    const api = await startApi({ enableSimulation: true });
+    try {
+      const denied = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/activity-signals",
+        {
+          method: "POST",
+          token: "token-a",
+          body: activityBody(1, 0, { type: "session_started" }),
+        },
+      );
+      expect(denied).toMatchObject({
+        status: 403,
+        body: { error: { code: "simulation_access_denied" } },
+      });
+
+      for (const [index, item] of [
+        { offset: 0, signal: { type: "session_started" } },
+        { offset: 400, signal: { type: "heartbeat" } },
+        { offset: 500, signal: { type: "tool_running", toolName: "vitest" } },
+      ].entries()) {
+        const recorded = await apiRequest(
+          api.baseUrl,
+          "/v1/workspaces/workspace-1/activity-signals",
+          {
+            method: "POST",
+            token: "token-b",
+            body: activityBody(index + 1, item.offset, item.signal),
+          },
+        );
+        expect(recorded.status).toBe(201);
+        if (index === 0) {
+          expect(recorded.body.event).toMatchObject({
+            author: { kind: "sensor", id: "urn:sensor:terminal:sim-session-a" },
+            capture: {
+              scope: { workspace: "workspace-1" },
+              identity: { principal: "user-b", workspace: "workspace-1" },
+            },
+          });
+        }
+      }
+
+      const fleet = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/fleet?nowMs=${fleetEpoch + 900}&orphanAfterMs=2000`,
+        { token: "token-b" },
+      );
+      expect(fleet).toMatchObject({
+        status: 200,
+        body: {
+          simulationEnabled: true,
+          fleet: {
+            sessions: [{
+              sessionId: "sim-session-a",
+              agentId: "sim-agent-a",
+              status: "busy",
+              availability: "available",
+              freshness: "current",
+              orphaned: false,
+            }],
+            recoveryActions: [],
+          },
+        },
+      });
+
+      const memberView = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/fleet?nowMs=${fleetEpoch + 900}`,
+        { token: "token-a" },
+      );
+      expect(memberView.body).toMatchObject({
+        simulationEnabled: false,
+        fleet: { sessions: [{ sessionId: "sim-session-a" }] },
       });
     } finally {
       await api.close();

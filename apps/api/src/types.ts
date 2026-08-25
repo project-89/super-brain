@@ -30,6 +30,7 @@ export interface ApiDependencies {
   readonly memberships: MembershipResolver;
   readonly sdks: FoldSdkRegistry;
   readonly maxBodyBytes?: number;
+  readonly enableSimulation?: boolean;
   readonly reportError?: (error: unknown) => void;
 }
 

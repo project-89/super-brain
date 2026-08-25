@@ -19,6 +19,8 @@ another implementation. The SDK owns these delivery rules:
 - record scoped shared decision trees and trajectories, then return task
   summaries and projection-gap-safe analysis without exposing an unfiltered
   trajectory projection.
+- append validated terminal-manager signals and rebuild JSON-safe fleet sessions
+  and orphan recovery plans from the caller's current canonical view.
 
 Workspace roles do not override creator-scoped privacy. Space access is supplied
 freshly on every call, so revocation removes scoped records from both raw event

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { parseEvent } from "@_89/fold";
 
 import {
   eventFromTerminalManagerSignal,
   makeSensorLifecycleEvent,
   makeTerminalClassificationEvent,
   makeTerminalObservationEvent,
+  validateActivityEventEnvelope,
   type TerminalSensorContext,
 } from "../src/index.js";
 
@@ -109,5 +111,29 @@ describe("canonical activity events", () => {
     expect(blocked.changes[0]).toMatchObject({
       after: { observation: "blocking_prompt", data: { autoResponded: false } },
     });
+  });
+
+  it("rejects generic or human-authored activity records", () => {
+    const event = makeTerminalObservationEvent(context, stamp, {
+      kind: "tool_running",
+      data: { toolName: "vitest" },
+    });
+    expect(() =>
+      validateActivityEventEnvelope(parseEvent({ ...event, kind: "generic.event" })),
+    ).toThrow(/requires an activity event kind/);
+    expect(() =>
+      validateActivityEventEnvelope(
+        parseEvent({ ...event, author: { kind: "human", id: context.sensor } }),
+      ),
+    ).toThrow(/sensor-authored/);
+
+    const change = event.changes[0]!;
+    if (change.verb !== "create") throw new TypeError("expected create change");
+    expect(() =>
+      validateActivityEventEnvelope(parseEvent({
+        ...event,
+        changes: [{ ...change, after: { ...change.after, observation: "invented_state" } }],
+      })),
+    ).toThrow(/unknown observation/);
   });
 });

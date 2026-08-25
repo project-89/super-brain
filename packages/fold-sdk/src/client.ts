@@ -37,15 +37,30 @@ import {
   type TrajectoryState,
   type TrajectoryTreeRecord,
 } from "@_89/fold-trajectory";
+import {
+  eventFromTerminalManagerSignal,
+  validateActivityEventEnvelope,
+  type ActivityEventStamp,
+  type TerminalManagerSignal,
+} from "@_89/fold-activity";
+import {
+  listFleetSessions,
+  planOrphanRecovery,
+  rebuildFleet,
+  type FleetProjectionOptions,
+} from "@_89/fold-fleet";
 
 import { assertCanAppendEvent, authorizeEventAccess } from "./access.js";
 import type {
   FoldSdkAccessContext,
+  FoldSdkActivityContext,
   FoldSdkListOptions,
   FoldSdkProjectOptions,
   FoldSdkProjection,
   FoldSdkReadOptions,
   FoldSdkStore,
+  ActivityMutationResult,
+  FleetReadModel,
   MemoryForgetResult,
   MemoryMutationResult,
   TrajectoryMutationResult,
@@ -186,6 +201,7 @@ export class FoldSdk {
       const event = parseEvent(entry.event);
       validateMemoryEnvelope(event);
       validateTrajectoryEnvelope(event);
+      validateActivityEventEnvelope(event);
       return { event, status: entry.status };
     });
     validateProducerOrder(entries.map((entry) => entry.event));
@@ -201,6 +217,7 @@ export class FoldSdk {
     const parsed = parseEvent(event);
     validateMemoryEnvelope(parsed);
     validateTrajectoryEnvelope(parsed);
+    validateActivityEventEnvelope(parsed);
     assertCanAppendEvent(parsed, access);
     const entries = await this.readStoredEntries();
     validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
@@ -348,6 +365,34 @@ export class FoldSdk {
     return this.enqueue(async () => {
       const { state } = await this.trajectoryProjection(access);
       return analyzeTrajectoryTask(state, taskId);
+    });
+  }
+
+  recordActivitySignal(
+    context: FoldSdkActivityContext,
+    stamp: ActivityEventStamp,
+    signal: TerminalManagerSignal,
+  ): Promise<ActivityMutationResult> {
+    return this.enqueue(async () => {
+      const event = eventFromTerminalManagerSignal(context, stamp, signal);
+      await this.appendInternal(context.access, event, "canon");
+      return { event };
+    });
+  }
+
+  fleetSnapshot(
+    access: FoldSdkAccessContext,
+    nowMs: number,
+    options: FleetProjectionOptions = {},
+  ): Promise<FleetReadModel> {
+    return this.enqueue(async () => {
+      const entries = await this.entriesForAccess(access, { include: "canon" });
+      const snapshot = rebuildFleet(entries.map((entry) => entry.event), nowMs, options);
+      return {
+        rebuiltAt: snapshot.rebuiltAt,
+        sessions: listFleetSessions(snapshot),
+        recoveryActions: planOrphanRecovery(snapshot),
+      };
     });
   }
 

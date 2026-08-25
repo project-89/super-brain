@@ -2,6 +2,8 @@ import { compareEventKeys, type FoldEvent, type JsonValue } from "@_89/fold";
 import {
   ACTIVITY_CLASSIFICATION_NODE_KIND,
   ACTIVITY_OBSERVATION_NODE_KIND,
+  SENSOR_LIFECYCLE_NODE_KIND,
+  validateActivityEventEnvelope,
 } from "@_89/fold-activity";
 
 import type {
@@ -144,6 +146,7 @@ function mapStatus(status: string): FleetSessionStatus | undefined {
 }
 
 function processLifecycle(sessions: Map<string, MutableFleetSession>, event: FoldEvent): void {
+  if (createPayload(event, SENSOR_LIFECYCLE_NODE_KIND) === undefined) return;
   const lifecycle = event.lifecycle;
   if (lifecycle === undefined) return;
   const session = sessionFor(sessions, event, lifecycle.sensor);
@@ -230,6 +233,13 @@ export function rebuildFleet(
   }
   const sessions = new Map<string, MutableFleetSession>();
   for (const event of [...events].sort(compareEventKeys)) {
+    try {
+      validateActivityEventEnvelope(event);
+    } catch (error) {
+      throw new FleetProjectionError(
+        error instanceof Error ? error.message : `event ${event.id} has an invalid activity envelope`,
+      );
+    }
     processLifecycle(sessions, event);
     processObservation(sessions, event);
     processClassification(sessions, event);

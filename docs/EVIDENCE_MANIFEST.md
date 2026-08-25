@@ -90,10 +90,11 @@ SQL was copied. The two untracked Raven files were excluded. Local recall
 reapplies workspace, creator, and current space access after external semantic
 ranking, correcting a missing creator check in the pinned semantic path.
 
-`packages/fold-sdk` is local delivery code over repository-owned Fold and
-epistemic contracts. It uses no external source material. Its JSONL integration
-test exercises the local `FoldJournal` through a structural store port; the SDK
-production bundle has no filesystem storage dependency.
+`packages/fold-sdk` is local delivery code over repository-owned Fold,
+epistemic, trajectory, activity, and fleet contracts. It uses no external source
+material. Its JSONL integration test exercises the local `FoldJournal` through a
+structural store port; the SDK production bundle has no filesystem storage
+dependency.
 
 `packages/fold-trajectory` is local delivery code over the repository-owned
 `fold-trace`, `fold-eval`, and Fold event contracts. It adds scoped event
@@ -103,4 +104,5 @@ examples are structural fixtures, not empirical model evidence.
 `apps/api` is local application code over `fold-sdk` and `fold-storage`. It uses
 no Raven server or other external implementation. Authentication, per-request
 membership resolution, author binding, opaque workspace journal paths, fsynced
-append, HTTP schemas, and error responses are owned and tested here.
+append, HTTP schemas, owner-gated local activity simulation, and error responses
+are owned and tested here.

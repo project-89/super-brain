@@ -34,7 +34,7 @@ The intended dependency direction is:
 @_89/fold-trace --> fold-eval
 @_89/fold-activity --> fold-fleet
 @_89/fold-trace + fold-eval + fold-epistemic --> fold-trajectory
-@_89/fold + fold-epistemic + fold-trajectory --> fold-sdk
+@_89/fold + fold-activity + fold-fleet + fold-epistemic + fold-trajectory --> fold-sdk
 @_89/fold-sdk + fold-storage --> apps/api --> apps/brain
 ```
 
@@ -50,12 +50,12 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-trace` | Trace projection, coverage, divergence, structural merge | decision-pathfinder; reasoning-tree | Implemented |
 | `@_89/fold-eval` | Verdict parsing, oracle execution, confidence aggregation | Parallax; confidence-kernel | Implemented |
 | `@_89/fold-narrative` | Canon, character knowledge, arcs, curves, convergence | Mythopia | First parity slice implemented |
-| `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Terminal canonical slice implemented |
-| `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Replay and orphan core implemented |
+| `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Terminal canonical and envelope-validation slice implemented |
+| `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Replay, orphan, SDK/API, and operator-view core implemented |
 | `@_89/fold-epistemic` | Scoped personal memory and recall-time access enforcement | Raven | Recall-enforced personal memory core implemented |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
 | `@_89/fold-trajectory` | Scoped tree/run lifecycle and task analysis | Local `fold-trace` and `fold-eval` contracts | Implemented; empirical runs pending |
-| `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log, memory, and trajectory core implemented |
+| `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log, memory, trajectory, activity, and fleet core implemented |
 | `apps/api` | Authenticated service over the local SDK | Local packages only | HTTP event, projection, memory, and trajectory core implemented |
 | `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Memory, event, state, and trajectory workflows implemented |
 
@@ -98,16 +98,17 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    parity, and standalone eval/oracle primitives are implemented.
 6. **Sensing and fleet:** terminal normalization, canonical lifecycle and
    observations, complete source identity, heartbeat freshness, boot
-   reconstruction, and orphan planning are implemented. Producer wiring and
-   runtime actuation remain host integrations.
+   reconstruction, orphan planning, scoped SDK/API delivery, local simulation,
+   and the operator view are implemented. Authenticated external sensor wiring
+   and runtime actuation remain host integrations.
 7. **Domain completion:** drive, wear, intention, personal memory, tombstone,
    and recall-time access cores are implemented. Raven vector search and UI stay
    host concerns rather than core dependencies.
 8. **Delivery:** `@_89/fold-sdk` exposes scoped journal, projection,
-   personal-memory, and trajectory APIs. `apps/api` serves that boundary with
+   personal-memory, trajectory, activity, and fleet APIs. `apps/api` serves that boundary with
    authenticated authors, fresh membership, and durable per-workspace journals.
    The repository-owned view layer covers overview, personal-memory,
-   trajectory-analysis, event, and projected-state workflows against this API.
+   trajectory-analysis, fleet, event, and projected-state workflows against this API.
    Add other domain facades only when product workflows require them.
 
 ## Drive Parity Status
@@ -165,6 +166,9 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
 6. Shared decision trees and trajectory runs delegate to `fold-trajectory`;
    task reports preserve mapped, ambiguous, and unmapped assignments and expose
    coverage, observed routes, first divergence, and review evaluation.
+7. Terminal signals pass through `fold-activity` envelope validation and fleet
+   reads rebuild authorized canonical records through `fold-fleet`, including
+   freshness and deterministic orphan recovery plans.
 
 One SDK instance serializes its read-check-append operations. Authentication,
 membership resolution, and HTTP transport now live in `apps/api`;
@@ -189,15 +193,19 @@ cross-process transactionality, vector ranking, and UI remain follow-on work.
 7. HTTP integration tests cover authentication, author spoofing, tenant and
    creator privacy, revocation, conflicts, validation, body limits, projection,
    memory lifecycle, and durable reopen.
+8. Fleet reads are always available. Local signal generation is disabled by
+   default and requires both an explicit environment flag and an owner/admin
+   role; sensor author and capture identity are server-derived.
 
-Cross-process locking, external identity providers, rate limiting, deployment
-TLS/CORS, and vector ranking remain explicit follow-on work.
+Cross-process locking, external identity providers, authenticated external
+sensor credentials, recovery actuation, rate limiting, deployment TLS/CORS, and
+vector ranking remain explicit follow-on work.
 
 ## Brain Delivery Status
 
 `apps/brain` supplies the first operational client without importing Raven:
 
-1. A persistent responsive shell exposes overview, memory, trajectories,
+1. A persistent responsive shell exposes overview, memory, trajectories, fleet,
    events, and state.
 2. Personal memory supports accessible search, source/scope filtering, record,
    revision, and explicit forget with server-derived creator identity.
@@ -206,9 +214,12 @@ TLS/CORS, and vector ranking remain explicit follow-on work.
 4. Trajectory tasks support JSON import, observed-path and coverage metrics,
    model-run selection, divergence/review status, and per-step assignment
    inspection through authenticated APIs.
-5. The bearer token is session-scoped; workspace and API URL preferences may be
+5. Fleet workflows expose availability, status, freshness, immutable identity,
+   canonical activity, and recovery plans; enabled operators can generate five
+   bounded local scenarios without direct event authorship.
+6. The bearer token is session-scoped; workspace and API URL preferences may be
    retained locally. Authentication and access failures remain visible.
-6. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
+7. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
 Real two-model capture, semantic ranking, general graph layout, event authoring,

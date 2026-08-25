@@ -6,6 +6,8 @@ Work-focused browser client for the authenticated Fold API. It provides:
 - private personal-memory record, filter, revision, and forget workflows;
 - shared trajectory task import, coverage, route, divergence, review, and
   per-step projection inspection;
+- replay-built fleet status, freshness, lifecycle, recovery-plan, and canonical
+  activity inspection, with scenario generation only when the API enables it;
 - canonical and draft event inspection;
 - materialized node, edge, component-value, and diagnostic inspection.
 

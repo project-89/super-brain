@@ -29,8 +29,10 @@ import {
   type FoldSdkAccessContext,
   type FoldSdkCursor,
   type TrajectoryTaskReport,
+  type FoldSdkActivityContext,
 } from "@_89/fold-sdk";
 import { JournalError } from "@_89/fold-storage";
+import type { TerminalManagerSignal } from "@_89/fold-activity";
 import {
   sharedDecisionTreeSchema,
   trajectoryInputSchema,
@@ -150,6 +152,66 @@ const trajectoryRecordSchema = z
   })
   .strict();
 
+const activityIdentitySchema = z
+  .object({
+    agent: z.string().min(1).max(200),
+    task: z.string().min(1).max(300),
+    repo: z.string().min(1).max(300),
+    branch: z.string().min(1).max(300),
+    session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
+    runtime: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+
+const activitySignalSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("session_started") }).strict(),
+  z.object({ type: z.literal("session_ready") }).strict(),
+  z.object({ type: z.literal("session_stopped"), reason: z.string().min(1).max(2_000).optional() }).strict(),
+  z.object({ type: z.literal("session_error"), error: z.string().min(1).max(2_000) }).strict(),
+  z.object({ type: z.literal("session_status_changed"), status: z.string().min(1).max(100) }).strict(),
+  z.object({
+    type: z.literal("login_required"),
+    instructions: z.string().max(5_000).optional(),
+    url: z.string().url().max(2_000).optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("auth_required"),
+    method: z.string().min(1).max(200),
+    instructions: z.string().max(5_000).optional(),
+    url: z.string().url().max(2_000).optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("blocking_prompt"),
+    promptType: z.string().min(1).max(200),
+    prompt: z.string().max(5_000).optional(),
+    autoResponded: z.boolean(),
+  }).strict(),
+  z.object({
+    type: z.literal("stall_detected"),
+    recentOutput: z.string().max(200_000),
+    stallDurationMs: z.number().finite().nonnegative(),
+  }).strict(),
+  z.object({ type: z.literal("task_complete"), output: z.string().max(200_000).optional() }).strict(),
+  z.object({ type: z.literal("tool_running"), toolName: z.string().min(1).max(300) }).strict(),
+  z.object({ type: z.literal("output"), output: z.string().max(200_000) }).strict(),
+  z.object({ type: z.literal("heartbeat") }).strict(),
+  z.object({ type: z.literal("sensor_degraded"), detail: z.string().max(2_000).optional() }).strict(),
+]);
+
+const activitySignalRecordSchema = z
+  .object({
+    stamp: z.object({
+      id: z.string().min(1),
+      t: z.number().finite().nonnegative(),
+      observedAt: z.string().datetime({ offset: true }),
+    }).strict(),
+    spaceId: z.string().min(1).optional(),
+    identity: activityIdentitySchema,
+    heartbeatWindowMs: z.number().int().min(250).max(3_600_000),
+    signal: activitySignalSchema,
+  })
+  .strict();
+
 export class ApiHttpError extends Error {
   override readonly name = "ApiHttpError";
 
@@ -225,6 +287,8 @@ function asHttpError(error: unknown): ApiHttpError {
       "TraceValidationError",
       "TrajectoryEventError",
       "TrajectoryProjectionError",
+      "ActivityEventError",
+      "FleetProjectionError",
     ].includes(error.name))
   ) {
     return new ApiHttpError(400, "invalid_request", error.message);
@@ -432,6 +496,40 @@ function trajectoryContext(
   };
 }
 
+function activityContext(
+  access: FoldSdkAccessContext,
+  body: z.infer<typeof activitySignalRecordSchema>,
+): FoldSdkActivityContext {
+  const sensor = `urn:sensor:terminal:${body.identity.session}`;
+  return {
+    access,
+    sensor,
+    sessionId: body.identity.session,
+    heartbeatWindowMs: body.heartbeatWindowMs,
+    capture: {
+      scope: {
+        workspace: access.workspaceId,
+        ...(body.spaceId === undefined ? {} : { space: body.spaceId }),
+      },
+      identity: {
+        principal: access.principalId,
+        workspace: access.workspaceId,
+        agent: body.identity.agent,
+        task: body.identity.task,
+        repo: body.identity.repo,
+        branch: body.identity.branch,
+        session: body.identity.session,
+        ...(body.identity.runtime === undefined ? {} : { runtime: body.identity.runtime }),
+      },
+    },
+  };
+}
+
+function canSimulate(access: FoldSdkAccessContext, dependencies: ApiDependencies): boolean {
+  return dependencies.enableSimulation === true &&
+    (access.workspaceRole === "owner" || access.workspaceRole === "admin");
+}
+
 function serializeTrajectoryReport(report: TrajectoryTaskReport) {
   return {
     ...report,
@@ -534,6 +632,38 @@ async function handleRequest(
       return;
     }
     throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+
+  if (resource === "fleet" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const nowMs = finiteQueryNumber(url, "nowMs") ?? Date.now();
+    const orphanAfterMs = finiteQueryNumber(url, "orphanAfterMs");
+    const fleet = await sdk.fleetSnapshot(access, nowMs, {
+      ...(orphanAfterMs === undefined ? {} : { orphanAfterMs }),
+    });
+    sendJson(response, 200, {
+      fleet,
+      simulationEnabled: canSimulate(access, dependencies),
+    });
+    return;
+  }
+
+  if (resource === "activity-signals" && resourceId === undefined) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (dependencies.enableSimulation !== true) {
+      throw new ApiHttpError(404, "not_found", "Route not found");
+    }
+    if (!canSimulate(access, dependencies)) {
+      throw new ApiHttpError(403, "simulation_access_denied", "Fleet simulation access denied");
+    }
+    const body = activitySignalRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const result = await sdk.recordActivitySignal(
+      activityContext(access, body),
+      body.stamp,
+      body.signal as unknown as TerminalManagerSignal,
+    );
+    sendJson(response, 201, result);
+    return;
   }
 
   if (resource === "trajectory-tasks" && resourceId !== undefined && segments.length === 5) {

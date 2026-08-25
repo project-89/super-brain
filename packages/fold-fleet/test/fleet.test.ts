@@ -7,7 +7,7 @@ import {
   type TerminalManagerSignal,
   type TerminalSensorContext,
 } from "@_89/fold-activity";
-import type { FoldEvent } from "@_89/fold";
+import { parseEvent, type FoldEvent } from "@_89/fold";
 
 import {
   FleetProjectionError,
@@ -215,5 +215,30 @@ describe("fleet identity validation", () => {
 
   it("rejects invalid orphan timeouts", () => {
     expect(() => rebuildFleet([], epoch, { orphanAfterMs: 0 })).toThrow(/orphanAfterMs/);
+  });
+
+  it("rejects activity records carried by a generic event", () => {
+    const activity = signal(1, 0, { type: "session_started" });
+    const spoofed = parseEvent({ ...activity, kind: "generic.event", lifecycle: undefined });
+    expect(() => rebuildFleet([spoofed], epoch)).toThrow(FleetProjectionError);
+  });
+
+  it("ignores lifecycle records owned by non-terminal sensors", () => {
+    const terminal = signal(1, 0, { type: "session_started" });
+    const unrelated = parseEvent({
+      ...terminal,
+      author: { kind: "sensor", id: "urn:sensor:temperature:room-a" },
+      lifecycle: { ...terminal.lifecycle!, sensor: "urn:sensor:temperature:room-a" },
+      capture: {
+        scope: { workspace: "super-brain" },
+        identity: { room: "room-a" },
+      },
+      changes: [{
+        ...terminal.changes[0],
+        subject: "urn:fold:lifecycle:temperature",
+        nodeKind: "x.fold.temperature-sensor-lifecycle",
+      }],
+    });
+    expect(listFleetSessions(rebuildFleet([unrelated], epoch))).toEqual([]);
   });
 });

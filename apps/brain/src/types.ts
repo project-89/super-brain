@@ -119,6 +119,7 @@ export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
   readonly memories: readonly RecalledMemory[];
   readonly trajectoryTasks: readonly TrajectoryTaskSummary[];
+  readonly fleet: FleetResponse;
   readonly projection: ProjectionResponse;
   readonly workingProjection: ProjectionResponse;
   readonly loadedAt: number;
@@ -316,4 +317,66 @@ export interface TrajectoryImportBundle {
   readonly spaceId?: string;
   readonly tree: SharedDecisionTree;
   readonly trajectories: readonly TrajectoryInput[];
+}
+
+export type FleetSessionStatus =
+  | "pending"
+  | "starting"
+  | "authenticating"
+  | "ready"
+  | "busy"
+  | "blocked"
+  | "stopping"
+  | "stopped"
+  | "error"
+  | "unknown";
+
+export interface FleetSession {
+  readonly sessionId: string;
+  readonly agentId: string;
+  readonly taskId: string;
+  readonly repo: string;
+  readonly branch: string;
+  readonly runtime?: string;
+  readonly sensor: string;
+  readonly status: FleetSessionStatus;
+  readonly lastKnownStatus: FleetSessionStatus;
+  readonly availability: "available" | "degraded" | "unavailable" | "unknown";
+  readonly freshness: "current" | "stale" | "unknown";
+  readonly orphaned: boolean;
+  readonly lastSeenAt?: string;
+  readonly lastObservedAt?: string;
+  readonly heartbeatWindowMs?: number;
+  readonly lastLifecyclePhase?: "online" | "heartbeat" | "degraded" | "offline";
+  readonly lastDeclaredLifecyclePhase?: "online" | "degraded" | "offline";
+}
+
+export interface OrphanRecoveryAction {
+  readonly kind: "reconcile_orphan";
+  readonly sessionId: string;
+  readonly sensor: string;
+  readonly detectedAt: string;
+  readonly lastSeenAt: string;
+  readonly lastKnownStatus: FleetSessionStatus;
+  readonly reason: string;
+}
+
+export interface FleetResponse {
+  readonly fleet: {
+    readonly rebuiltAt: string;
+    readonly sessions: readonly FleetSession[];
+    readonly recoveryActions: readonly OrphanRecoveryAction[];
+  };
+  readonly simulationEnabled: boolean;
+}
+
+export type FleetSimulationScenario = "active" | "blocked" | "degraded" | "orphaned" | "stopped";
+
+export interface FleetSimulationDraft {
+  readonly scenario: FleetSimulationScenario;
+  readonly agentId: string;
+  readonly taskId: string;
+  readonly repo: string;
+  readonly branch: string;
+  readonly spaceId?: string;
 }

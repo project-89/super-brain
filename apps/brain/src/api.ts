@@ -2,6 +2,8 @@ import { nextEventStamp, uuidV7 } from "./ids";
 import type {
   ConnectionSettings,
   FoldLogEntry,
+  FleetResponse,
+  FleetSimulationDraft,
   MemoryDraft,
   MemoryScope,
   PersonalMemory,
@@ -13,6 +15,16 @@ import type {
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
 } from "./types";
+
+type SimulatedActivitySignal =
+  | { readonly type: "session_started" }
+  | { readonly type: "session_ready" }
+  | { readonly type: "heartbeat" }
+  | { readonly type: "tool_running"; readonly toolName: string }
+  | { readonly type: "blocking_prompt"; readonly promptType: string; readonly prompt: string; readonly autoResponded: boolean }
+  | { readonly type: "sensor_degraded"; readonly detail: string }
+  | { readonly type: "session_status_changed"; readonly status: string }
+  | { readonly type: "session_stopped"; readonly reason: string };
 
 interface ApiErrorBody {
   readonly error?: {
@@ -98,6 +110,80 @@ export class FoldApiClient {
       `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}`,
     );
     return response.report;
+  }
+
+  async fleet(): Promise<FleetResponse> {
+    return this.request<FleetResponse>(this.workspacePath("fleet"));
+  }
+
+  private async recordSimulatedActivitySignal(
+    draft: FleetSimulationDraft,
+    sessionId: string,
+    observedAt: number,
+    signal: SimulatedActivitySignal,
+  ): Promise<void> {
+    const stamp = nextEventStamp();
+    await this.request(this.workspacePath("activity-signals"), {
+      method: "POST",
+      body: JSON.stringify({
+        stamp: { id: stamp.id, t: stamp.t, observedAt: new Date(observedAt).toISOString() },
+        ...(draft.spaceId === undefined ? {} : { spaceId: draft.spaceId }),
+        identity: {
+          agent: draft.agentId,
+          task: draft.taskId,
+          repo: draft.repo,
+          branch: draft.branch,
+          session: sessionId,
+          runtime: "simulation",
+        },
+        heartbeatWindowMs: 60_000,
+        signal,
+      }),
+    });
+  }
+
+  async simulateFleetScenario(draft: FleetSimulationDraft): Promise<string> {
+    const now = Date.now();
+    const sessionId = `sim-${uuidV7(now)}`;
+    let signals: readonly { readonly at: number; readonly signal: SimulatedActivitySignal }[];
+    if (draft.scenario === "active") {
+      signals = [
+        { at: now - 4_000, signal: { type: "session_started" } },
+        { at: now - 3_500, signal: { type: "session_ready" } },
+        { at: now - 3_000, signal: { type: "heartbeat" } },
+        { at: now - 1_000, signal: { type: "tool_running", toolName: "workspace-task" } },
+        { at: now - 200, signal: { type: "heartbeat" } },
+      ];
+    } else if (draft.scenario === "blocked") {
+      signals = [
+        { at: now - 4_000, signal: { type: "session_started" } },
+        { at: now - 3_000, signal: { type: "session_ready" } },
+        { at: now - 1_000, signal: { type: "blocking_prompt", promptType: "approval", prompt: "Approve operation", autoResponded: false } },
+        { at: now - 200, signal: { type: "heartbeat" } },
+      ];
+    } else if (draft.scenario === "degraded") {
+      signals = [
+        { at: now - 4_000, signal: { type: "session_started" } },
+        { at: now - 2_000, signal: { type: "session_ready" } },
+        { at: now - 200, signal: { type: "sensor_degraded", detail: "simulated capture lag" } },
+      ];
+    } else if (draft.scenario === "orphaned") {
+      signals = [
+        { at: now - 125_000, signal: { type: "session_started" } },
+        { at: now - 120_000, signal: { type: "heartbeat" } },
+        { at: now - 119_000, signal: { type: "session_status_changed", status: "busy" } },
+      ];
+    } else {
+      signals = [
+        { at: now - 4_000, signal: { type: "session_started" } },
+        { at: now - 2_000, signal: { type: "session_ready" } },
+        { at: now - 200, signal: { type: "session_stopped", reason: "simulated normal exit" } },
+      ];
+    }
+    for (const item of signals) {
+      await this.recordSimulatedActivitySignal(draft, sessionId, item.at, item.signal);
+    }
+    return sessionId;
   }
 
   async recordTrajectoryTree(tree: SharedDecisionTree, spaceId?: string): Promise<void> {
