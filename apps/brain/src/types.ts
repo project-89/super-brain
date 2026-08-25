@@ -85,6 +85,15 @@ export interface RecalledMemory {
   readonly score?: number;
 }
 
+export interface RankedMemoryRecallResult {
+  readonly memories: readonly RecalledMemory[];
+  readonly ranking: {
+    readonly id: string;
+    readonly kind: "lexical" | "semantic";
+    readonly corpusSize: number;
+  };
+}
+
 export interface SerializedFoldNode {
   readonly id: string;
   readonly nodeKind?: string;

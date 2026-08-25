@@ -28,6 +28,7 @@ import {
   TrajectoryTaskUnavailableError,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type RankedMemoryRecallRequest,
   type TrajectoryTaskReport,
   type FoldSdkActivityContext,
 } from "@_89/fold-sdk";
@@ -45,6 +46,7 @@ import type {
   ApiDependencies,
   AuthenticatedSubject,
 } from "./types.js";
+import { LocalLexicalMemoryRanker } from "./recall.js";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 
@@ -109,6 +111,11 @@ const recallRequestSchema = z
       )
       .optional(),
   })
+  .strict();
+
+const rankedRecallRequestSchema = recallRequestSchema
+  .omit({ candidates: true })
+  .extend({ query: z.string().trim().min(1).max(500) })
   .strict();
 
 const causedByField = { causedBy: z.array(z.string().min(1)).optional() };
@@ -410,6 +417,10 @@ function parsedRecallRequest(input: unknown): RecallRequest {
   };
 }
 
+function parsedRankedRecallRequest(input: unknown): RankedMemoryRecallRequest {
+  return rankedRecallRequestSchema.parse(input) as RankedMemoryRecallRequest;
+}
+
 function parsedMemoryInput(input: z.infer<typeof memoryInputSchema>): MemoryInput {
   return {
     id: input.id,
@@ -690,6 +701,14 @@ async function handleRequest(
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const recall = parsedRecallRequest(await readJsonBody(request, maxBodyBytes));
     sendJson(response, 200, { memories: await sdk.recallMemories(access, recall) });
+    return;
+  }
+
+  if (resource === "memories" && resourceId === "search") {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const recall = parsedRankedRecallRequest(await readJsonBody(request, maxBodyBytes));
+    const ranker = dependencies.memoryRanker ?? new LocalLexicalMemoryRanker();
+    sendJson(response, 200, await sdk.rankMemories(access, recall, ranker));
     return;
   }
 

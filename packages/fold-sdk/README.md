@@ -15,7 +15,8 @@ another implementation. The SDK owns these delivery rules:
 - project only the records currently visible to the caller;
 - expose personal memory through record, revise, forget, lookup, and recall
   methods without returning its raw projection;
-- reauthorize externally ranked memory candidates before returning them.
+- expose only authorized, minimized memory documents to a host ranker and
+  reauthorize its candidates before returning them;
 - record scoped shared decision trees and trajectories, then return task
   summaries and projection-gap-safe analysis without exposing an unfiltered
   trajectory projection.
@@ -32,6 +33,6 @@ must provide equivalent transactional single-writer behavior in its store; the
 minimal store port does not pretend to implement distributed locking.
 
 The package performs no network, model, process, or database I/O. HTTP
-authentication, membership resolution, vector ranking, IDs, clocks, and service
+authentication, membership resolution, ranker implementation, IDs, clocks, and service
 transactions remain host responsibilities. See [`PROVENANCE.md`](./PROVENANCE.md)
 for the ownership boundary.

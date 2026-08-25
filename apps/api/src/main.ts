@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import { StaticIdentityDirectory } from "./auth.js";
 import { JournalSdkRegistry } from "./registry.js";
+import { LocalLexicalMemoryRanker } from "./recall.js";
 import { createApiServer } from "./server.js";
 
 function portFromEnvironment(value: string | undefined): number {
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
     authenticator: directory,
     memberships: directory,
     sdks: registry,
+    memoryRanker: new LocalLexicalMemoryRanker(),
     enableSimulation: booleanFromEnvironment(
       "FOLD_API_ENABLE_SIMULATION",
       process.env.FOLD_API_ENABLE_SIMULATION,

@@ -3,7 +3,8 @@
 Work-focused browser client for the authenticated Fold API. It provides:
 
 - workspace activity and projection totals;
-- private personal-memory record, filter, revision, and forget workflows;
+- private personal-memory record, local filter, provider-ranked recall,
+  revision, and forget workflows;
 - shared trajectory task import, coverage, route, divergence, review, and
   per-step projection inspection;
 - replay-built fleet status, freshness, lifecycle, recovery-plan, and canonical
@@ -18,6 +19,9 @@ steps. The API owns final schema and scope validation.
 
 The client imports no Raven code. Raven's committed shell, compact filtering,
 list/detail, and memory metadata interactions were used only as product evidence.
+Ranked results show the server-reported provider kind, identifier, scanned
+corpus size, and normalized score so lexical and semantic retrieval remain
+operationally distinguishable.
 
 ## Development
 

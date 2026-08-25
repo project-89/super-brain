@@ -2,6 +2,7 @@ import type { Author } from "@_89/fold";
 import type {
   FoldSdk,
   FoldSdkAccessContext,
+  MemoryRanker,
 } from "@_89/fold-sdk";
 
 export interface AuthenticatedSubject {
@@ -31,6 +32,7 @@ export interface ApiDependencies {
   readonly sdks: FoldSdkRegistry;
   readonly maxBodyBytes?: number;
   readonly enableSimulation?: boolean;
+  readonly memoryRanker?: MemoryRanker;
   readonly reportError?: (error: unknown) => void;
 }
 

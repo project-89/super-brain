@@ -55,6 +55,7 @@ FOLD_API_CREDENTIALS_JSON='{"local-secret":{"principalId":"local","workspaces":{
 | `GET` | `/v1/workspaces/:workspace/projection` | Access-filtered materialized Fold state |
 | `GET`, `POST` | `/v1/workspaces/:workspace/memories` | Metadata recall or personal-memory creation |
 | `POST` | `/v1/workspaces/:workspace/memories/recall` | Recall with optional semantic candidates |
+| `POST` | `/v1/workspaces/:workspace/memories/search` | Server-ranked recall over an authorized corpus |
 | `GET`, `PATCH`, `DELETE` | `/v1/workspaces/:workspace/memories/:id` | Lookup, revision, or explicit forgetting |
 | `GET`, `POST` | `/v1/workspaces/:workspace/trajectory-tasks` | Task summaries or shared-tree creation |
 | `GET` | `/v1/workspaces/:workspace/trajectory-tasks/:taskId` | Projection, route, divergence, and review report |
@@ -74,6 +75,13 @@ workspace/optional-space scope are derived the same way, but omit creator scope
 because task evidence is collaborative. Space membership is resolved on every
 request, so revocation applies immediately to raw records and every projection.
 
+Ranked recall defaults to the deterministic `local-bm25-v1` lexical provider.
+`ApiDependencies.memoryRanker` is the host port for an embedding or vector
+provider. The SDK gives that provider at most 100 already-authorized, minimized
+documents and reapplies current access to every returned candidate. Responses
+identify the provider as `lexical` or `semantic`; the local provider is never
+presented as semantic retrieval.
+
 Each workspace uses an opaque SHA-256 journal filename and one serialized SDK
 instance. Appends use complete-line JSONL with `sync: true`. This is an
 in-process transaction boundary; deploying multiple service processes against
@@ -82,5 +90,5 @@ append semantics.
 
 TLS termination, credential rotation, external identity providers, distributed
 transactions, authenticated external sensor ingestion, recovery actuation,
-vector ranking, rate limits, and CORS policy remain deployment concerns rather
+production vector infrastructure, rate limits, and CORS policy remain deployment concerns rather
 than implicit behavior in this local service.

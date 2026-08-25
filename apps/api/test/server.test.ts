@@ -1,4 +1,5 @@
 import type { MembershipResolver } from "../src/index.js";
+import type { MemoryRanker } from "@_89/fold-sdk";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -31,6 +32,8 @@ const trajectoryTree = {
     { id: "e-fail", sourceId: "retry", targetId: "fail", label: "fail" },
   ],
 };
+
+const MEMORY_B = "01890f47-7c00-7000-8000-000000000002";
 
 function trajectoryInput(
   id: string,
@@ -291,6 +294,54 @@ describe("Fold HTTP API", () => {
       expect(memory).toMatchObject({
         status: 404,
         body: { error: { code: "memory_unavailable", message: "Personal memory is unavailable" } },
+      });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("ranks an authorized corpus and filters malicious provider candidates", async () => {
+    const seen: string[] = [];
+    const memoryRanker: MemoryRanker = {
+      descriptor: { id: "host-semantic-test", kind: "semantic" },
+      async rank({ documents }) {
+        seen.push(...documents.map(({ memoryId }) => memoryId));
+        return [
+          { memoryId: MEMORY_B, score: 0.99 },
+          { memoryId: MEMORY_A, score: 0.8 },
+        ];
+      },
+    };
+    const api = await startApi({ memoryRanker });
+    try {
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", {
+        method: "POST",
+        token: "token-a",
+        body: memoryRecordBody({
+          input: { id: MEMORY_A, source: "conversation", summary: "Refresh token" },
+        }),
+      });
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", {
+        method: "POST",
+        token: "token-b",
+        body: {
+          stamp: { id: "event-b", t: 101, worldDate: "2026-08-17" },
+          input: { id: MEMORY_B, source: "conversation", summary: "Owner private" },
+        },
+      });
+
+      const response = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/memories/search",
+        { method: "POST", token: "token-a", body: { query: "refresh token", limit: 10 } },
+      );
+      expect(seen).toEqual([MEMORY_A]);
+      expect(response).toMatchObject({
+        status: 200,
+        body: {
+          memories: [{ memory: { id: MEMORY_A }, score: 0.8 }],
+          ranking: { id: "host-semantic-test", kind: "semantic", corpusSize: 1 },
+        },
       });
     } finally {
       await api.close();

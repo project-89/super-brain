@@ -12,6 +12,8 @@ import {
   makeMemoryRecordedEvent,
   makeMemoryRevisedEvent,
   memoryLogRecordsFromEvent,
+  DEFAULT_RECALL_LIMIT,
+  MAX_RECALL_LIMIT,
   rebuildMemories,
   recallMemories as recallProjectedMemories,
   recallMemoryById as recallProjectedMemoryById,
@@ -63,6 +65,9 @@ import type {
   FleetReadModel,
   MemoryForgetResult,
   MemoryMutationResult,
+  MemoryRanker,
+  RankedMemoryRecallRequest,
+  RankedMemoryRecallResult,
   TrajectoryMutationResult,
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
@@ -460,6 +465,59 @@ export class FoldSdk {
     return this.enqueue(async () => {
       const { projection } = await this.memoryProjection(access);
       return recallProjectedMemories(projection, access, request);
+    });
+  }
+
+  rankMemories(
+    access: FoldSdkAccessContext,
+    request: RankedMemoryRecallRequest,
+    ranker: MemoryRanker,
+  ): Promise<RankedMemoryRecallResult> {
+    return this.enqueue(async () => {
+      const query = request.query.trim();
+      if (query.length === 0 || query.length > 500) {
+        throw new FoldSdkError("memory ranking query must contain 1 to 500 characters");
+      }
+      if (ranker.descriptor.id.trim().length === 0) {
+        throw new FoldSdkError("memory ranker id must not be empty");
+      }
+
+      const { query: _query, limit, ...filters } = request;
+      const requestedLimit = limit ?? DEFAULT_RECALL_LIMIT;
+      if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_RECALL_LIMIT) {
+        throw new FoldSdkError(`memory ranking limit must be an integer within [1, ${MAX_RECALL_LIMIT}]`);
+      }
+      const { projection } = await this.memoryProjection(access);
+      const corpus = recallProjectedMemories(projection, access, {
+        ...filters,
+        limit: MAX_RECALL_LIMIT,
+      });
+      const candidates = await ranker.rank({
+        query,
+        limit: requestedLimit,
+        documents: corpus.map(({ memory }) => ({
+          memoryId: memory.id,
+          source: memory.source,
+          summary: memory.summary,
+          content: memory.content,
+          tags: memory.tags,
+          entities: memory.entities,
+          createdAt: memory.createdAt,
+          updatedAt: memory.updatedAt,
+        })),
+      });
+      if (candidates.length > MAX_RECALL_LIMIT) {
+        throw new FoldSdkError(`memory ranker returned more than ${MAX_RECALL_LIMIT} candidates`);
+      }
+      const memories = recallProjectedMemories(projection, access, {
+        ...filters,
+        ...(limit === undefined ? {} : { limit }),
+        candidates,
+      });
+      return {
+        memories,
+        ranking: { ...ranker.descriptor, corpusSize: corpus.length },
+      };
     });
   }
 

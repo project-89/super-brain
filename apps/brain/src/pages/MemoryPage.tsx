@@ -1,28 +1,43 @@
-import { Edit3, Plus, Trash2 } from "lucide-react";
+import { Edit3, ListFilter, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
 import { formatDateTime, memoryContent, uniqueSorted } from "../format";
-import type { PersonalMemory, RecalledMemory } from "../types";
+import type { MemoryScope, PersonalMemory, RankedMemoryRecallResult, RecalledMemory } from "../types";
+
+type RecallMode = "filter" | "ranked";
 
 export function MemoryPage({
   memories,
+  onRank,
   onCreate,
   onEdit,
   onForget,
 }: {
   readonly memories: readonly RecalledMemory[];
+  readonly onRank: (options: {
+    readonly query: string;
+    readonly scope?: MemoryScope;
+    readonly sources?: readonly string[];
+    readonly limit?: number;
+  }) => Promise<RankedMemoryRecallResult>;
   readonly onCreate: () => void;
   readonly onEdit: (memory: PersonalMemory) => void;
   readonly onForget: (memory: PersonalMemory) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [mode, setMode] = useState<RecallMode>("filter");
   const [source, setSource] = useState("all");
   const [scope, setScope] = useState("all");
   const [spaceId, setSpaceId] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
+  const [ranked, setRanked] = useState<RankedMemoryRecallResult>();
+  const [rankingPending, setRankingPending] = useState(false);
+  const [rankingError, setRankingError] = useState<string>();
+  const [rankedFingerprint, setRankedFingerprint] = useState<string>();
   const sources = useMemo(() => uniqueSorted(memories.map(({ memory }) => memory.source)), [memories]);
-  const filtered = useMemo(() => {
+  const fingerprint = JSON.stringify([query.trim(), source, scope, spaceId.trim()]);
+  const localFiltered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return memories.filter(({ memory }) => {
       if (source !== "all" && memory.source !== source) return false;
@@ -35,6 +50,40 @@ export function MemoryPage({
         .includes(needle);
     });
   }, [memories, query, source, scope, spaceId]);
+  const filtered = mode === "filter"
+    ? localFiltered
+    : rankedFingerprint === fingerprint
+      ? ranked?.memories ?? []
+      : [];
+
+  const rankingScope = (): MemoryScope | undefined => {
+    if (scope === "workspace") return { kind: "workspace" };
+    if (scope === "space" && spaceId.trim()) return { kind: "space", spaceId: spaceId.trim() };
+    return { kind: "all" };
+  };
+
+  const runRankedSearch = async () => {
+    const trimmed = query.trim();
+    if (!trimmed || (scope === "space" && !spaceId.trim())) return;
+    setRankingPending(true);
+    setRankingError(undefined);
+    try {
+      const result = await onRank({
+        query: trimmed,
+        scope: rankingScope(),
+        ...(source === "all" ? {} : { sources: [source] }),
+        limit: 100,
+      });
+      setRanked(result);
+      setRankedFingerprint(fingerprint);
+    } catch (caught) {
+      setRanked(undefined);
+      setRankedFingerprint(fingerprint);
+      setRankingError(caught instanceof Error ? caught.message : "Ranked recall failed");
+    } finally {
+      setRankingPending(false);
+    }
+  };
 
   useEffect(() => {
     if (filtered.length === 0) setSelectedId(undefined);
@@ -50,18 +99,25 @@ export function MemoryPage({
         title="Personal memory"
         actions={<button className="button button--primary" type="button" onClick={onCreate} aria-label="New memory" title="New memory"><Plus aria-hidden="true" />New memory</button>}
       />
-      <div className="filter-bar">
+      <form className="filter-bar memory-filter-bar" onSubmit={(event) => { event.preventDefault(); if (mode === "ranked") void runRankedSearch(); }}>
+        <div className="segmented-control memory-mode" role="group" aria-label="Recall mode">
+          <button type="button" aria-pressed={mode === "filter"} onClick={() => setMode("filter")}><ListFilter aria-hidden="true" />Filter</button>
+          <button type="button" aria-pressed={mode === "ranked"} onClick={() => setMode("ranked")}><Sparkles aria-hidden="true" />Ranked</button>
+        </div>
         <SearchField value={query} onChange={setQuery} placeholder="Search memory" />
         <label className="compact-field"><span>Source</span><select value={source} onChange={(event) => setSource(event.target.value)}><option value="all">All sources</option>{sources.map((value) => <option key={value}>{value}</option>)}</select></label>
         <label className="compact-field"><span>Scope</span><select value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">All accessible</option><option value="workspace">Workspace only</option><option value="space">Space</option></select></label>
         {scope === "space" && <label className="compact-field compact-field--space"><span>Space</span><input value={spaceId} onChange={(event) => setSpaceId(event.target.value)} /></label>}
+        {mode === "ranked" && <button className="icon-button memory-search-button" type="submit" disabled={rankingPending || !query.trim() || (scope === "space" && !spaceId.trim())} aria-label="Run ranked search" title="Run ranked search"><Search aria-hidden="true" /></button>}
         <span className="result-count">{filtered.length} {filtered.length === 1 ? "memory" : "memories"}</span>
-      </div>
+        {mode === "ranked" && rankedFingerprint === fingerprint && ranked !== undefined && <span className={`ranking-status ranking-status--${ranked.ranking.kind}`}>{ranked.ranking.kind} / {ranked.ranking.id} / {ranked.ranking.corpusSize} scanned</span>}
+        {rankingError !== undefined && <span className="filter-error" role="alert">{rankingError}</span>}
+      </form>
 
       <section className="master-detail">
         <div className="master-list" aria-label="Memories">
           {filtered.length === 0 ? (
-            <EmptyState title="No matching memories" />
+            <EmptyState title={mode === "ranked" && rankedFingerprint !== fingerprint ? "Run ranked search" : "No matching memories"} />
           ) : filtered.map(({ memory, score }) => (
             <button
               type="button"

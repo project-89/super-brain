@@ -8,6 +8,9 @@ import type {
   EpistemicAccessContext,
   ForgottenMemory,
   PersonalMemory,
+  RecallRequest,
+  RecalledMemory,
+  SemanticMemoryCandidate,
 } from "@_89/fold-epistemic";
 import type {
   TrajectoryRunRecord,
@@ -66,6 +69,46 @@ export interface MemoryMutationResult {
 export interface MemoryForgetResult {
   readonly event: FoldEvent;
   readonly forgotten: ForgottenMemory;
+}
+
+export type MemoryRankingKind = "lexical" | "semantic";
+
+export interface MemoryRankerDescriptor {
+  readonly id: string;
+  readonly kind: MemoryRankingKind;
+}
+
+export interface MemoryRankingDocument {
+  readonly memoryId: string;
+  readonly source: string;
+  readonly summary: string;
+  readonly content: PersonalMemory["content"];
+  readonly tags: readonly string[];
+  readonly entities: PersonalMemory["entities"];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface MemoryRankingRequest {
+  readonly query: string;
+  readonly documents: readonly MemoryRankingDocument[];
+  readonly limit: number;
+}
+
+export interface MemoryRanker {
+  readonly descriptor: MemoryRankerDescriptor;
+  rank(request: MemoryRankingRequest): Promise<readonly SemanticMemoryCandidate[]>;
+}
+
+export type RankedMemoryRecallRequest = Omit<RecallRequest, "candidates"> & {
+  readonly query: string;
+};
+
+export interface RankedMemoryRecallResult {
+  readonly memories: readonly RecalledMemory[];
+  readonly ranking: MemoryRankerDescriptor & {
+    readonly corpusSize: number;
+  };
 }
 
 export interface TrajectoryTreeMutationResult {

@@ -103,6 +103,57 @@ describe("SDK personal memory API", () => {
     expect(recalled.map(({ memory, score }) => [memory.id, score])).toEqual([[MEMORY_A, 0.3]]);
   });
 
+  it("ranks only authorized documents and reauthorizes provider candidates", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {
+      id: MEMORY_A,
+      source: "conversation",
+      summary: "Refresh the access token",
+    });
+    await sdk.recordMemory(
+      memoryContext({ principalId: "user-b" }),
+      stamp("event-b", 101),
+      { id: MEMORY_B, source: "conversation", summary: "Private owner note" },
+    );
+
+    const seen: string[] = [];
+    const result = await sdk.rankMemories(
+      access(),
+      { query: "refresh token", limit: 5 },
+      {
+        descriptor: { id: "test-ranker", kind: "semantic" },
+        async rank({ documents }) {
+          seen.push(...documents.map(({ memoryId }) => memoryId));
+          return [
+            { memoryId: MEMORY_B, score: 0.99 },
+            { memoryId: MEMORY_A, score: 0.75 },
+          ];
+        },
+      },
+    );
+
+    expect(seen).toEqual([MEMORY_A]);
+    expect(result).toEqual({
+      memories: [{ memory: expect.objectContaining({ id: MEMORY_A }), score: 0.75 }],
+      ranking: { id: "test-ranker", kind: "semantic", corpusSize: 1 },
+    });
+  });
+
+  it("rejects empty ranked recall queries before calling the provider", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    let called = false;
+    await expect(
+      sdk.rankMemories(access(), { query: "   " }, {
+        descriptor: { id: "test-ranker", kind: "lexical" },
+        async rank() {
+          called = true;
+          return [];
+        },
+      }),
+    ).rejects.toThrow(/1 to 500/);
+    expect(called).toBe(false);
+  });
+
   it("keeps an inaccessible and an absent memory indistinguishable on mutation", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {

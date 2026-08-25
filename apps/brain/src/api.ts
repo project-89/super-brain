@@ -9,6 +9,7 @@ import type {
   PersonalMemory,
   ProjectionResponse,
   RecalledMemory,
+  RankedMemoryRecallResult,
   SharedDecisionTree,
   TrajectoryImportBundle,
   TrajectoryInput,
@@ -248,6 +249,18 @@ export class FoldApiClient {
       `${this.workspacePath("memories")}${query}`,
     );
     return response.memories;
+  }
+
+  async rankMemories(options: {
+    readonly query: string;
+    readonly scope?: MemoryScope;
+    readonly sources?: readonly string[];
+    readonly limit?: number;
+  }): Promise<RankedMemoryRecallResult> {
+    return this.request<RankedMemoryRecallResult>(this.workspacePath("memories/search"), {
+      method: "POST",
+      body: JSON.stringify(options),
+    });
   }
 
   async createMemory(draft: MemoryDraft): Promise<PersonalMemory> {

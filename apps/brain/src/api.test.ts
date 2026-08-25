@@ -94,6 +94,33 @@ describe("Fold API client", () => {
     expect(body).not.toHaveProperty("input.workspaceId");
   });
 
+  it("submits ranked recall filters without client-authored candidates", async () => {
+    const result = {
+      memories: [],
+      ranking: { id: "local-bm25-v1", kind: "lexical", corpusSize: 3 },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(result));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client.rankMemories({
+      query: "refresh token",
+      scope: { kind: "space", spaceId: "space/a" },
+      sources: ["conversation"],
+      limit: 25,
+    })).resolves.toEqual(result);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/workspaces/workspace%2Fone/memories/search");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      query: "refresh token",
+      scope: { kind: "space", spaceId: "space/a" },
+      sources: ["conversation"],
+      limit: 25,
+    });
+    expect(String(init.body)).not.toContain("candidates");
+  });
+
   it("loads reports with encoded task ids and imports server-scoped bundles", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ report: { taskId: "task/one" } }))

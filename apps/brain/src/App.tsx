@@ -165,6 +165,7 @@ export default function App() {
       return (
         <MemoryPage
           memories={snapshot.memories}
+          onRank={(options) => api.rankMemories(options)}
           onCreate={() => setMemoryDialog({ open: true })}
           onEdit={(memory) => setMemoryDialog({ open: true, memory })}
           onForget={(memory) => {

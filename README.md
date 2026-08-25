@@ -41,16 +41,18 @@ The first milestone is the risk-retirement gate from the reference document:
   tombstones, and post-ranking authorization for external semantic candidates.
 - `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
   capture-scope enforcement, canonical ordering, access-filtered projection,
-  personal-memory lifecycle, trajectory task/report facades, and replay-built
-  fleet reads over validated activity signals.
+  personal-memory lifecycle and authorized ranker orchestration, trajectory
+  task/report facades, and replay-built fleet reads over validated activity
+  signals.
 - `@_89/super-brain-api` serves those SDK operations over authenticated HTTP,
   derives authorship and personal-memory capture identity from credentials,
-  resolves membership on every request, and persists one fsynced journal per
-  workspace.
+  resolves membership on every request, supplies a pluggable memory-ranker port
+  with a deterministic local lexical provider, and persists one fsynced journal
+  per workspace.
 - `@_89/super-brain` is the responsive operator client for workspace activity,
-  private personal-memory lifecycle, trajectory import and analysis, agent
-  fleet inspection and local simulation, canonical/draft event inspection, and
-  materialized Fold state. It talks only to the local HTTP API.
+  private personal-memory lifecycle and ranked recall, trajectory import and
+  analysis, agent fleet inspection and local simulation, canonical/draft event
+  inspection, and materialized Fold state. It talks only to the local HTTP API.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

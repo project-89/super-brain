@@ -172,7 +172,7 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
 
 One SDK instance serializes its read-check-append operations. Authentication,
 membership resolution, and HTTP transport now live in `apps/api`;
-cross-process transactionality, vector ranking, and UI remain follow-on work.
+cross-process transactionality and ranker infrastructure remain follow-on work.
 
 ## API Delivery Status
 
@@ -184,8 +184,10 @@ cross-process transactionality, vector ranking, and UI remain follow-on work.
    cached into stored records or inferred after capture.
 3. Generic event append, access-filtered listing, and materialized projection
    are exposed with canonical/draft and explicit cursor controls.
-4. Personal-memory record, revise, forget, lookup, metadata recall, and semantic
-   candidate recall use server-derived creator and capture identity.
+4. Personal-memory record, revise, forget, lookup, metadata recall, external
+   candidate recall, and server-ranked search use server-derived creator and
+   capture identity. Providers see only an authorized minimized corpus, and
+   their output passes through post-ranking authorization.
 5. Trajectory tree/run writes use server-derived collaborative scope and expose
    JSON-safe task analysis without accepting client-authored capture identity.
 6. Workspace IDs become opaque hashed filenames. A singleton SDK serializes each
@@ -199,7 +201,7 @@ cross-process transactionality, vector ranking, and UI remain follow-on work.
 
 Cross-process locking, external identity providers, authenticated external
 sensor credentials, recovery actuation, rate limiting, deployment TLS/CORS, and
-vector ranking remain explicit follow-on work.
+production embedding/vector infrastructure remain explicit follow-on work.
 
 ## Brain Delivery Status
 
@@ -207,8 +209,9 @@ vector ranking remain explicit follow-on work.
 
 1. A persistent responsive shell exposes overview, memory, trajectories, fleet,
    events, and state.
-2. Personal memory supports accessible search, source/scope filtering, record,
-   revision, and explicit forget with server-derived creator identity.
+2. Personal memory supports local filtering and provider-ranked recall with
+   visible provider provenance, source/scope controls, record, revision, and
+   explicit forget with server-derived creator identity.
 3. Event and projection inspectors expose canonical/draft status, changes,
    nodes, edges, component values, and diagnostics without bypassing the API.
 4. Trajectory tasks support JSON import, observed-path and coverage metrics,
@@ -222,7 +225,7 @@ vector ranking remain explicit follow-on work.
 7. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
-Real two-model capture, semantic ranking, general graph layout, event authoring,
+Real two-model capture, production semantic embeddings, general graph layout, event authoring,
 identity-provider login, and deployment-specific secret delivery remain
 follow-on product work.
 

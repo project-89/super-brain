@@ -737,6 +737,49 @@ p {
   margin-bottom: 14px;
 }
 
+.memory-filter-bar {
+  flex-wrap: wrap;
+}
+
+.memory-mode {
+  height: 36px;
+  padding: 2px;
+}
+
+.segmented-control.memory-mode button {
+  height: 30px;
+  gap: 5px;
+  min-width: 80px;
+}
+
+.memory-search-button {
+  width: 36px;
+  height: 36px;
+  color: #f7fbf9;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.memory-search-button:hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.ranking-status,
+.filter-error {
+  flex-basis: 100%;
+  color: var(--text-subtle);
+  font-size: 10px;
+}
+
+.ranking-status--semantic {
+  color: var(--blue);
+}
+
+.filter-error {
+  color: var(--danger);
+}
+
 .search-field {
   display: flex;
   width: min(360px, 100%);
