@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   JournalSdkRegistry,
+  DataDirectoryLockedError,
   workspaceJournalFilename,
 } from "../src/index.js";
 import { access, apiEvent } from "./helpers.js";
@@ -23,16 +24,56 @@ describe("workspace SDK registry", () => {
     const registry = new JournalSdkRegistry(directory);
     expect(await registry.sdkFor("workspace-1")).toBe(await registry.sdkFor("workspace-1"));
     expect(await registry.sdkFor("workspace-2")).not.toBe(await registry.sdkFor("workspace-1"));
+    await registry.close();
   });
 
   it("reopens fsynced journal state through a new registry", async () => {
     const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-"));
-    const first = await new JournalSdkRegistry(directory).sdkFor("workspace-1");
+    const firstRegistry = new JournalSdkRegistry(directory);
+    const first = await firstRegistry.sdkFor("workspace-1");
     await first.append(access(), apiEvent({ id: "event-a", t: 1 }));
+    await firstRegistry.close();
 
-    const reopened = await new JournalSdkRegistry(directory).sdkFor("workspace-1");
+    const reopenedRegistry = new JournalSdkRegistry(directory);
+    const reopened = await reopenedRegistry.sdkFor("workspace-1");
     expect((await reopened.listEntries(access())).map((entry) => entry.event.id)).toEqual([
       "event-a",
     ]);
+    await reopenedRegistry.close();
+  });
+
+  it("allows only one process-level writer lease per data directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-"));
+    const first = new JournalSdkRegistry(directory);
+    await first.sdkFor("workspace-1");
+    const second = new JournalSdkRegistry(directory);
+    await expect(second.sdkFor("workspace-1")).rejects.toBeInstanceOf(DataDirectoryLockedError);
+    await second.close();
+    await first.close();
+
+    const successor = new JournalSdkRegistry(directory);
+    await expect(successor.sdkFor("workspace-1")).resolves.toBeDefined();
+    await successor.close();
+  });
+
+  it("recovers a writer lease whose process no longer exists", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-"));
+    await writeFile(
+      join(directory, ".fold-writer.lock"),
+      JSON.stringify({ pid: 2_147_483_647, token: "stale", acquiredAt: "2026-08-01T00:00:00.000Z" }),
+      "utf8",
+    );
+    const first = new JournalSdkRegistry(directory);
+    const second = new JournalSdkRegistry(directory);
+    const attempts = await Promise.allSettled([
+      first.sdkFor("workspace-1"),
+      second.sdkFor("workspace-1"),
+    ]);
+    expect(attempts.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    const rejection = attempts.find(({ status }) => status === "rejected");
+    expect(rejection).toMatchObject({ reason: expect.any(DataDirectoryLockedError) });
+    await first.close();
+    await second.close();
   });
 });

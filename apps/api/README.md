@@ -33,9 +33,14 @@ Optional environment:
 
 - `FOLD_API_HOST`, default `127.0.0.1`;
 - `FOLD_API_PORT`, default `3000`;
-- `FOLD_DATA_DIR`, default `.data/fold` under the working directory.
+- `FOLD_DATA_DIR`, default `.data/fold` under the working directory;
 - `FOLD_API_ENABLE_SIMULATION`, default `false`; when `true`, workspace owners
-  and admins may append local simulated terminal signals.
+  and admins may append local simulated terminal signals;
+- `FOLD_API_RATE_LIMIT_PER_MINUTE`, default `300` per client socket address;
+  set it to `0` only when an upstream limiter owns that boundary;
+- `FOLD_API_CORS_ORIGINS`, an optional comma-separated list of exact `http` or
+  `https` origins. Configured origins receive CORS headers and every other
+  browser origin is rejected.
 
 Build and run with:
 
@@ -99,13 +104,23 @@ records are rejected from the generic event route. Workspace members may read
 steering state but cannot mutate it.
 
 Each workspace uses an opaque SHA-256 journal filename and one serialized SDK
-instance. Appends use complete-line JSONL with `sync: true`. This is an
-in-process transaction boundary; deploying multiple service processes against
-one data directory requires a store with cross-process locking or compare-and-
-append semantics.
+instance. Appends use complete-line JSONL with `sync: true`. The process
+acquires an exclusive writer lease before binding its HTTP socket, removes that
+lease on graceful shutdown, and recovers a well-formed lease whose PID no longer
+exists. This provides one-writer protection for processes on one host. Multiple
+hosts or a shared network filesystem still require a store with distributed
+locking or compare-and-append semantics.
+
+Application routes have a bounded, in-memory fixed-window rate limiter; health
+and valid CORS preflight remain observable. It keys the actual socket address
+and deliberately does not trust `X-Forwarded-For`. Deployments behind a proxy
+should either preserve a meaningful source address or disable the local limit
+only after enforcing a distributed limit upstream. HTTP request, header,
+keep-alive, per-socket request-count, and shutdown-drain bounds prevent indefinite
+connections.
 
 TLS termination, credential rotation, external identity providers, distributed
 transactions, authenticated external sensor ingestion, recovery actuation,
-production model/vector infrastructure, automated salience producers, rate
-limits, and CORS policy remain deployment concerns rather
-than implicit behavior in this local service.
+production model/vector infrastructure, automated salience producers,
+multi-host writer coordination, and distributed proxy rate limits remain
+deployment concerns rather than implicit behavior in this local service.

@@ -59,6 +59,9 @@ import {
 } from "./reasoning.js";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
+const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000;
 
 const stampSchema = z
   .object({
@@ -325,6 +328,79 @@ function responseHeaders(): Record<string, string> {
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, responseHeaders());
   response.end(JSON.stringify(body));
+}
+
+function corsOriginSet(origins: readonly string[] | undefined): ReadonlySet<string> | undefined {
+  if (origins === undefined) return undefined;
+  if (origins.length === 0) throw new TypeError("corsOrigins must not be empty when configured");
+  const result = new Set<string>();
+  for (const origin of origins) {
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      throw new TypeError(`Invalid CORS origin: ${origin}`);
+    }
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      parsed.origin !== origin ||
+      parsed.username.length > 0 ||
+      parsed.password.length > 0
+    ) {
+      throw new TypeError(`CORS origins must be exact HTTP(S) origins: ${origin}`);
+    }
+    result.add(origin);
+  }
+  return result;
+}
+
+function applyCorsPolicy(
+  request: IncomingMessage,
+  response: ServerResponse,
+  allowedOrigins: ReadonlySet<string> | undefined,
+): boolean {
+  if (allowedOrigins === undefined) return false;
+  const origin = request.headers.origin;
+  if (origin !== undefined && !allowedOrigins.has(origin)) {
+    throw new ApiHttpError(403, "origin_denied", "Request origin is not allowed");
+  }
+  if (origin !== undefined) {
+    response.setHeader("access-control-allow-origin", origin);
+    response.setHeader("vary", "Origin");
+  }
+  if (request.method !== "OPTIONS") return false;
+  if (origin === undefined) {
+    throw new ApiHttpError(403, "origin_required", "CORS preflight requires an Origin header");
+  }
+  response.writeHead(204, {
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "access-control-max-age": "600",
+    "cache-control": "no-store",
+  });
+  response.end();
+  return true;
+}
+
+function applyRateLimit(
+  request: IncomingMessage,
+  response: ServerResponse,
+  dependencies: ApiDependencies,
+): void {
+  if (dependencies.rateLimiter === undefined) return;
+  const decision = dependencies.rateLimiter.consume(request.socket.remoteAddress ?? "unknown");
+  response.setHeader("ratelimit-limit", decision.limit.toString());
+  response.setHeader("ratelimit-remaining", decision.remaining.toString());
+  response.setHeader("ratelimit-reset", Math.ceil(decision.resetAt / 1_000).toString());
+  if (decision.allowed) return;
+  const retryAfterSeconds = decision.retryAfterSeconds ?? 1;
+  response.setHeader("retry-after", retryAfterSeconds.toString());
+  throw new ApiHttpError(
+    429,
+    "rate_limited",
+    "Request rate limit exceeded",
+    { retryAfterSeconds },
+  );
 }
 
 function sendError(response: ServerResponse, error: ApiHttpError): void {
@@ -683,14 +759,17 @@ async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   dependencies: ApiDependencies,
+  allowedOrigins: ReadonlySet<string> | undefined,
 ): Promise<void> {
   const method = request.method ?? "";
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (applyCorsPolicy(request, response, allowedOrigins)) return;
   if (url.pathname === "/health") {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     sendJson(response, 200, { status: "ok" });
     return;
   }
+  applyRateLimit(request, response, dependencies);
 
   const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
   if (segments.length < 3 || segments[0] !== "v1" || segments[1] !== "workspaces") {
@@ -999,12 +1078,18 @@ export function createApiServer(dependencies: ApiDependencies): Server {
   ) {
     throw new TypeError("maxBodyBytes must be a positive integer");
   }
-  return createServer((request, response) => {
-    void handleRequest(request, response, dependencies).catch((error: unknown) => {
+  const allowedOrigins = corsOriginSet(dependencies.corsOrigins);
+  const server = createServer((request, response) => {
+    void handleRequest(request, response, dependencies, allowedOrigins).catch((error: unknown) => {
       const httpError = asHttpError(error);
       if (httpError.status === 500) dependencies.reportError?.(error);
       if (!response.headersSent) sendError(response, httpError);
       else response.destroy();
     });
   });
+  server.requestTimeout = DEFAULT_REQUEST_TIMEOUT_MS;
+  server.headersTimeout = DEFAULT_HEADERS_TIMEOUT_MS;
+  server.keepAliveTimeout = DEFAULT_KEEP_ALIVE_TIMEOUT_MS;
+  server.maxRequestsPerSocket = 1_000;
+  return server;
 }

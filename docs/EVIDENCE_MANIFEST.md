@@ -104,5 +104,6 @@ examples are structural fixtures, not empirical model evidence.
 `apps/api` is local application code over `fold-sdk` and `fold-storage`. It uses
 no Raven server or other external implementation. Authentication, per-request
 membership resolution, author binding, opaque workspace journal paths, fsynced
-append, HTTP schemas, owner-gated local activity simulation, and error responses
-are owned and tested here.
+append, single-host writer leasing, bounded rate limiting, exact-origin CORS,
+HTTP schemas, owner-gated local activity simulation, and error responses are
+owned and tested here.

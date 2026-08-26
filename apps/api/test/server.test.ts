@@ -1,4 +1,8 @@
-import type { MembershipResolver } from "../src/index.js";
+import {
+  FixedWindowRateLimiter,
+  createApiServer,
+  type MembershipResolver,
+} from "../src/index.js";
 import type { MemoryRanker } from "@_89/fold-sdk";
 import { describe, expect, it } from "vitest";
 
@@ -96,6 +100,74 @@ function activityBody(
 }
 
 describe("Fold HTTP API", () => {
+  it("configures bounded HTTP connection lifetimes", () => {
+    const directory = identityDirectory();
+    const server = createApiServer({
+      authenticator: directory,
+      memberships: directory,
+      sdks: { async sdkFor() { throw new Error("not used"); } },
+    });
+    expect(server.requestTimeout).toBe(60_000);
+    expect(server.headersTimeout).toBe(10_000);
+    expect(server.keepAliveTimeout).toBe(5_000);
+    expect(server.maxRequestsPerSocket).toBe(1_000);
+  });
+
+  it("enforces exact-origin CORS and answers valid preflight requests", async () => {
+    const api = await startApi({ corsOrigins: ["https://brain.example"] });
+    try {
+      const allowed = await fetch(`${api.baseUrl}/health`, {
+        headers: { origin: "https://brain.example" },
+      });
+      expect(allowed.status).toBe(200);
+      expect(allowed.headers.get("access-control-allow-origin")).toBe("https://brain.example");
+      expect(allowed.headers.get("vary")).toBe("Origin");
+
+      const preflight = await fetch(`${api.baseUrl}/v1/workspaces/workspace-1/events`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "https://brain.example",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-methods")).toContain("GET");
+      expect(preflight.headers.get("access-control-allow-headers")).toContain("authorization");
+
+      const denied = await fetch(`${api.baseUrl}/health`, {
+        headers: { origin: "https://hostile.example" },
+      });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toMatchObject({ error: { code: "origin_denied" } });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("rate limits application routes while keeping health observable", async () => {
+    const api = await startApi({ rateLimiter: new FixedWindowRateLimiter(1) });
+    try {
+      expect((await apiRequest(api.baseUrl, "/health")).status).toBe(200);
+      expect((await apiRequest(api.baseUrl, "/health")).status).toBe(200);
+      expect(
+        (await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events")).status,
+      ).toBe(401);
+      const limited = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events");
+      expect(limited).toMatchObject({
+        status: 429,
+        body: { error: { code: "rate_limited" } },
+      });
+      expect(limited.body.error.details.retryAfterSeconds).toBeGreaterThan(0);
+      expect(limited.headers.get("ratelimit-remaining")).toBe("0");
+      expect(limited.headers.get("retry-after")).toBe(
+        limited.body.error.details.retryAfterSeconds.toString(),
+      );
+    } finally {
+      await api.close();
+    }
+  });
+
   it("serves public health and fails closed on authentication and membership", async () => {
     const api = await startApi();
     try {

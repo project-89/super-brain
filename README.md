@@ -50,7 +50,9 @@ The first milestone is the risk-retirement gate from the reference document:
   resolves membership on every request, supplies a pluggable memory-ranker port
   with a deterministic local lexical provider, supplies a pull-reasoner port
   with an explicitly extractive local provider, gates canonical steering, and
-  persists one fsynced journal per workspace.
+  persists one fsynced journal per workspace behind a single-host writer lease.
+  Its runtime adds exact-origin CORS, bounded per-address request limiting,
+  connection timeouts, and graceful lease-releasing shutdown.
 - `@_89/super-brain` is the responsive operator client for workspace activity,
   private personal-memory lifecycle and ranked recall, trajectory import and
   analysis, agent fleet inspection and local simulation, pull reasoning, human

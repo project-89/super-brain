@@ -5,6 +5,7 @@ import type {
   MemoryRanker,
 } from "@_89/fold-sdk";
 import type { ReasoningProvider } from "./reasoning.js";
+import type { RequestRateLimiter } from "./rate-limit.js";
 
 export interface AuthenticatedSubject {
   readonly credentialId: string;
@@ -35,6 +36,8 @@ export interface ApiDependencies {
   readonly enableSimulation?: boolean;
   readonly memoryRanker?: MemoryRanker;
   readonly reasoner?: ReasoningProvider;
+  readonly rateLimiter?: RequestRateLimiter;
+  readonly corsOrigins?: readonly string[];
   readonly reportError?: (error: unknown) => void;
 }
 

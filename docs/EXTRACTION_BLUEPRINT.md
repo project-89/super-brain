@@ -194,7 +194,8 @@ cross-process transactionality and ranker infrastructure remain follow-on work.
 5. Trajectory tree/run writes use server-derived collaborative scope and expose
    JSON-safe task analysis without accepting client-authored capture identity.
 6. Workspace IDs become opaque hashed filenames. A singleton SDK serializes each
-   workspace and complete-line journal appends are fsynced.
+   workspace, complete-line journal appends are fsynced, and a single-host
+   writer lease is acquired before the HTTP socket binds.
 7. HTTP integration tests cover authentication, author spoofing, tenant and
    creator privacy, revocation, conflicts, validation, body limits, projection,
    memory lifecycle, and durable reopen.
@@ -206,11 +207,14 @@ cross-process transactionality and ranker infrastructure remain follow-on work.
    or model-backed without appending derived answers as canon.
 10. Human steering is owner/admin-only, server-authored, and reserved from the
     generic event route; workspace members retain read access to replayed state.
+11. Application routes have bounded per-address rate limiting, exact-origin CORS
+    is available by configuration, and HTTP connection and shutdown lifetimes
+    are bounded.
 
-Cross-process locking, external identity providers, authenticated external
-sensor credentials, recovery actuation, rate limiting, deployment TLS/CORS, and
-production embedding/vector/model infrastructure and automated salience
-producers remain explicit follow-on work.
+Multi-host writer coordination, external identity providers, authenticated
+external sensor credentials, recovery actuation, deployment TLS, distributed
+proxy rate limiting, production embedding/vector/model infrastructure, and
+automated salience producers remain explicit follow-on work.
 
 ## Brain Delivery Status
 
