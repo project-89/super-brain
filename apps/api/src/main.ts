@@ -15,12 +15,6 @@ function portFromEnvironment(value: string | undefined): number {
   return port;
 }
 
-function booleanFromEnvironment(name: string, value: string | undefined): boolean {
-  if (value === undefined || value === "false") return false;
-  if (value === "true") return true;
-  throw new TypeError(`${name} must be true or false`);
-}
-
 function nonNegativeIntegerFromEnvironment(
   name: string,
   value: string | undefined,
@@ -69,10 +63,6 @@ async function main(): Promise<void> {
       reasoner: new LocalEvidenceReasoner(),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),
       ...(corsOrigins === undefined ? {} : { corsOrigins }),
-      enableSimulation: booleanFromEnvironment(
-        "FOLD_API_ENABLE_SIMULATION",
-        process.env.FOLD_API_ENABLE_SIMULATION,
-      ),
       reportError: (error) => console.error(error),
     });
     await new Promise<void>((resolve, reject) => {

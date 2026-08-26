@@ -26,9 +26,6 @@ importers:
       '@_89/fold':
         specifier: workspace:*
         version: link:../../packages/fold
-      '@_89/fold-activity':
-        specifier: workspace:*
-        version: link:../../packages/fold-activity
       '@_89/fold-drives':
         specifier: workspace:*
         version: link:../../packages/fold-drives
@@ -44,6 +41,9 @@ importers:
       '@_89/fold-trajectory':
         specifier: workspace:*
         version: link:../../packages/fold-trajectory
+      '@_89/fold-transcript':
+        specifier: workspace:*
+        version: link:../../packages/fold-transcript
       zod:
         specifier: ^3.25.0
         version: 3.25.76
@@ -78,6 +78,12 @@ importers:
       vitest:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)(lightningcss@1.33.0)(yaml@2.9.0)
+
+  apps/importer:
+    dependencies:
+      '@_89/fold-transcript':
+        specifier: workspace:*
+        version: link:../../packages/fold-transcript
 
   packages/confidence-kernel: {}
 
@@ -150,6 +156,9 @@ importers:
       '@_89/fold-trajectory':
         specifier: workspace:*
         version: link:../fold-trajectory
+      '@_89/fold-transcript':
+        specifier: workspace:*
+        version: link:../fold-transcript
     devDependencies:
       '@_89/fold-storage':
         specifier: workspace:*
@@ -184,6 +193,15 @@ importers:
       '@_89/fold-trace':
         specifier: workspace:*
         version: link:../fold-trace
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+
+  packages/fold-transcript:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../fold
       zod:
         specifier: ^3.25.0
         version: 3.25.76

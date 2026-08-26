@@ -4,6 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { randomUUID } from "node:crypto";
 
 import {
   EventOrderError,
@@ -30,11 +31,10 @@ import {
   type FoldSdkCursor,
   type RankedMemoryRecallRequest,
   type TrajectoryTaskReport,
-  type FoldSdkActivityContext,
   type FoldSdkSteeringContext,
+  type FoldSdkTranscriptContext,
 } from "@_89/fold-sdk";
 import { JournalError } from "@_89/fold-storage";
-import type { TerminalManagerSignal } from "@_89/fold-activity";
 import {
   sharedDecisionTreeSchema,
   trajectoryInputSchema,
@@ -47,6 +47,14 @@ import {
   type IntentionEnd,
   type SurfacedCandidate,
 } from "@_89/fold-drives";
+import {
+  TRANSCRIPT_ARTIFACT_NODE_KIND,
+  TRANSCRIPT_CHUNK_NODE_KIND,
+  TRANSCRIPT_PROJECT_NODE_KIND,
+  TRANSCRIPT_RUN_NODE_KIND,
+  transcriptImportBundleSchema,
+  transcriptSourceSchema,
+} from "@_89/fold-transcript";
 
 import type {
   ApiDependencies,
@@ -58,7 +66,7 @@ import {
   validateReasoningResult,
 } from "./reasoning.js";
 
-const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000;
@@ -178,66 +186,6 @@ const trajectoryRecordSchema = z
     stamp: stampSchema,
     spaceId: z.string().min(1).optional(),
     input: trajectoryInputSchema,
-  })
-  .strict();
-
-const activityIdentitySchema = z
-  .object({
-    agent: z.string().min(1).max(200),
-    task: z.string().min(1).max(300),
-    repo: z.string().min(1).max(300),
-    branch: z.string().min(1).max(300),
-    session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/),
-    runtime: z.string().min(1).max(200).optional(),
-  })
-  .strict();
-
-const activitySignalSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("session_started") }).strict(),
-  z.object({ type: z.literal("session_ready") }).strict(),
-  z.object({ type: z.literal("session_stopped"), reason: z.string().min(1).max(2_000).optional() }).strict(),
-  z.object({ type: z.literal("session_error"), error: z.string().min(1).max(2_000) }).strict(),
-  z.object({ type: z.literal("session_status_changed"), status: z.string().min(1).max(100) }).strict(),
-  z.object({
-    type: z.literal("login_required"),
-    instructions: z.string().max(5_000).optional(),
-    url: z.string().url().max(2_000).optional(),
-  }).strict(),
-  z.object({
-    type: z.literal("auth_required"),
-    method: z.string().min(1).max(200),
-    instructions: z.string().max(5_000).optional(),
-    url: z.string().url().max(2_000).optional(),
-  }).strict(),
-  z.object({
-    type: z.literal("blocking_prompt"),
-    promptType: z.string().min(1).max(200),
-    prompt: z.string().max(5_000).optional(),
-    autoResponded: z.boolean(),
-  }).strict(),
-  z.object({
-    type: z.literal("stall_detected"),
-    recentOutput: z.string().max(200_000),
-    stallDurationMs: z.number().finite().nonnegative(),
-  }).strict(),
-  z.object({ type: z.literal("task_complete"), output: z.string().max(200_000).optional() }).strict(),
-  z.object({ type: z.literal("tool_running"), toolName: z.string().min(1).max(300) }).strict(),
-  z.object({ type: z.literal("output"), output: z.string().max(200_000) }).strict(),
-  z.object({ type: z.literal("heartbeat") }).strict(),
-  z.object({ type: z.literal("sensor_degraded"), detail: z.string().max(2_000).optional() }).strict(),
-]);
-
-const activitySignalRecordSchema = z
-  .object({
-    stamp: z.object({
-      id: z.string().min(1),
-      t: z.number().finite().nonnegative(),
-      observedAt: z.string().datetime({ offset: true }),
-    }).strict(),
-    spaceId: z.string().min(1).optional(),
-    identity: activityIdentitySchema,
-    heartbeatWindowMs: z.number().int().min(250).max(3_600_000),
-    signal: activitySignalSchema,
   })
   .strict();
 
@@ -454,6 +402,8 @@ function asHttpError(error: unknown): ApiHttpError {
       "TrajectoryProjectionError",
       "ActivityEventError",
       "FleetProjectionError",
+      "TranscriptEventError",
+      "TranscriptProjectionError",
     ].includes(error.name))
   ) {
     return new ApiHttpError(400, "invalid_request", error.message);
@@ -513,16 +463,24 @@ function assertAuthenticatedAuthor(event: FoldEvent, subject: AuthenticatedSubje
 }
 
 function assertGenericAppendRoute(event: FoldEvent): void {
+  const transcriptNodeKinds = new Set([
+    TRANSCRIPT_PROJECT_NODE_KIND,
+    TRANSCRIPT_ARTIFACT_NODE_KIND,
+    TRANSCRIPT_RUN_NODE_KIND,
+    TRANSCRIPT_CHUNK_NODE_KIND,
+  ]);
   if (
     event.kind.startsWith("intention.") ||
+    event.kind.startsWith("transcript.") ||
     event.changes.some(
-      (change) => "nodeKind" in change && change.nodeKind === INTENTION_EVENT_NODE_KIND,
+      (change) => "nodeKind" in change &&
+        (change.nodeKind === INTENTION_EVENT_NODE_KIND || transcriptNodeKinds.has(change.nodeKind)),
     )
   ) {
     throw new ApiHttpError(
       400,
       "reserved_event_route",
-      "Intention events must use the human steering route",
+      "Reserved events must use their dedicated route",
     );
   }
 }
@@ -680,38 +638,26 @@ function trajectoryContext(
   };
 }
 
-function activityContext(
+function transcriptContext(
+  subject: AuthenticatedSubject,
   access: FoldSdkAccessContext,
-  body: z.infer<typeof activitySignalRecordSchema>,
-): FoldSdkActivityContext {
-  const sensor = `urn:sensor:terminal:${body.identity.session}`;
+  bundle: z.infer<typeof transcriptImportBundleSchema>,
+): FoldSdkTranscriptContext {
   return {
     access,
-    sensor,
-    sessionId: body.identity.session,
-    heartbeatWindowMs: body.heartbeatWindowMs,
+    author: { kind: "ingest", id: `transcript-importer:${subject.principalId}` },
     capture: {
-      scope: {
-        workspace: access.workspaceId,
-        ...(body.spaceId === undefined ? {} : { space: body.spaceId }),
-      },
+      scope: { workspace: access.workspaceId },
       identity: {
         principal: access.principalId,
         workspace: access.workspaceId,
-        agent: body.identity.agent,
-        task: body.identity.task,
-        repo: body.identity.repo,
-        branch: body.identity.branch,
-        session: body.identity.session,
-        ...(body.identity.runtime === undefined ? {} : { runtime: body.identity.runtime }),
+        source: bundle.run.source,
+        run: bundle.run.id,
+        session: bundle.run.nativeId,
+        ...(bundle.run.projectId === undefined ? {} : { project: bundle.run.projectId }),
       },
     },
   };
-}
-
-function canSimulate(access: FoldSdkAccessContext, dependencies: ApiDependencies): boolean {
-  return dependencies.enableSimulation === true &&
-    (access.workspaceRole === "owner" || access.workspaceRole === "admin");
 }
 
 function canSteer(access: FoldSdkAccessContext): boolean {
@@ -849,9 +795,67 @@ async function handleRequest(
     const fleet = await sdk.fleetSnapshot(access, nowMs, {
       ...(orphanAfterMs === undefined ? {} : { orphanAfterMs }),
     });
+    sendJson(response, 200, { fleet });
+    return;
+  }
+
+  if (resource === "transcript-projects" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    sendJson(response, 200, { projects: await sdk.transcriptProjects(access) });
+    return;
+  }
+
+  if (resource === "transcript-projects" && resourceId !== undefined && segments.length === 5) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const project = (await sdk.transcriptProjects(access))
+      .find((candidate) => candidate.project.id === resourceId);
+    if (project === undefined) {
+      throw new ApiHttpError(404, "transcript_project_unavailable", "Transcript project is unavailable");
+    }
+    const runs = await sdk.transcriptRuns(access, { projectId: resourceId });
+    sendJson(response, 200, { ...project, runs });
+    return;
+  }
+
+  if (resource === "transcript-runs" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const rawSource = url.searchParams.get("source");
+    const source = rawSource === null ? undefined : transcriptSourceSchema.parse(rawSource);
+    const projectId = url.searchParams.get("projectId") ?? undefined;
     sendJson(response, 200, {
-      fleet,
-      simulationEnabled: canSimulate(access, dependencies),
+      runs: await sdk.transcriptRuns(access, {
+        ...(source === undefined ? {} : { source }),
+        ...(projectId === undefined ? {} : { projectId }),
+      }),
+    });
+    return;
+  }
+
+  if (resource === "transcript-runs" && resourceId !== undefined && segments.length === 5) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const run = await sdk.transcriptRun(access, resourceId);
+    if (run === undefined) {
+      throw new ApiHttpError(404, "transcript_run_unavailable", "Transcript run is unavailable");
+    }
+    sendJson(response, 200, run);
+    return;
+  }
+
+  if (resource === "transcript-imports" && resourceId === undefined) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (!canSteer(access)) {
+      throw new ApiHttpError(403, "transcript_import_access_denied", "Transcript import access denied");
+    }
+    const bundle = transcriptImportBundleSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const result = await sdk.importTranscript(
+      transcriptContext(subject, access, bundle),
+      bundle,
+      { importId: `transcript-import:${randomUUID()}`, importedAt: Date.now() },
+    );
+    sendJson(response, result.events.length === 0 ? 200 : 201, {
+      imported: result.events.length > 0,
+      eventCount: result.events.length,
+      run: result.run,
     });
     return;
   }
@@ -947,24 +951,6 @@ async function handleRequest(
       })),
       ...(steering === undefined ? {} : { steering }),
     });
-    return;
-  }
-
-  if (resource === "activity-signals" && resourceId === undefined) {
-    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
-    if (dependencies.enableSimulation !== true) {
-      throw new ApiHttpError(404, "not_found", "Route not found");
-    }
-    if (!canSimulate(access, dependencies)) {
-      throw new ApiHttpError(403, "simulation_access_denied", "Fleet simulation access denied");
-    }
-    const body = activitySignalRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
-    const result = await sdk.recordActivitySignal(
-      activityContext(access, body),
-      body.stamp,
-      body.signal as unknown as TerminalManagerSignal,
-    );
-    sendJson(response, 201, result);
     return;
   }
 

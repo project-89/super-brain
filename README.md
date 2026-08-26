@@ -33,6 +33,10 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-fleet` reconstructs agent/session state from those records at boot,
   separates last-known status from lifecycle freshness, and plans timeout-gated
   orphan reconciliation without interpreting silence as offline.
+- `@_89/fold-transcript` owns immutable project, artifact, source-qualified run,
+  context-segment, turn, and observable-action records for historical Claude
+  Code and Codex imports. Canonical records never contain transcript text or
+  private reasoning.
 - `@_89/fold-drives` incrementally advances drive and wear state, records causal
   discontinuities as canonical Fold events, and rebuilds surfaced, committed,
   declined, acted, and ended intentions without performing host cognition. The
@@ -43,21 +47,27 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
   capture-scope enforcement, canonical ordering, access-filtered projection,
   personal-memory lifecycle and authorized ranker orchestration, trajectory
-  task/report facades, and replay-built fleet reads over validated activity
-  signals.
+  task/report facades, replay-built fleet reads over validated activity signals,
+  and idempotent transcript import/catalog queries.
 - `@_89/super-brain-api` serves those SDK operations over authenticated HTTP,
   derives authorship and personal-memory capture identity from credentials,
   resolves membership on every request, supplies a pluggable memory-ranker port
   with a deterministic local lexical provider, supplies a pull-reasoner port
   with an explicitly extractive local provider, gates canonical steering, and
   persists one fsynced journal per workspace behind a single-host writer lease.
+  Owner-authorized transcript imports and workspace-readable history queries use
+  dedicated routes that cannot be bypassed through generic event append.
   Its runtime adds exact-origin CORS, bounded per-address request limiting,
   connection timeouts, and graceful lease-releasing shutdown.
 - `@_89/super-brain` is the responsive operator client for workspace activity,
   private personal-memory lifecycle and ranked recall, trajectory import and
-  analysis, agent fleet inspection and local simulation, pull reasoning, human
-  steering, canonical/draft event inspection, and materialized Fold state. It
-  talks only to the local HTTP API.
+  analysis, historical project/run inspection, live agent fleet inspection,
+  pull reasoning, human steering, canonical/draft event inspection, and
+  materialized Fold state. It talks only to the local HTTP API.
+- `@_89/super-brain-importer` streams local Claude Code and Codex JSONL, performs
+  metadata-only dry runs, writes explicitly requested redacted artifacts to a
+  restrictive local vault, and delivers confirmed canonical bundles through
+  the authenticated API without modifying source histories.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,
@@ -88,6 +98,8 @@ pnpm verify
 
 Local client setup and proxy configuration are documented in
 [`apps/brain/README.md`](./apps/brain/README.md).
+Historical transcript identity, privacy, import, and query behavior is recorded
+in [`docs/TRANSCRIPT_INGESTION.md`](./docs/TRANSCRIPT_INGESTION.md).
 
 The repository remains private. New Fold packages are `UNLICENSED` until package
 ownership and release terms are settled; the imported confidence kernel retains

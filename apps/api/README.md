@@ -1,9 +1,9 @@
 # Super Brain API
 
 Authenticated HTTP delivery for scoped Fold events, projections, personal
-memory, trajectory evidence, pull reasoning, and human steering. The service
-uses `@_89/fold-sdk` for canonical record, recall, trajectory, fleet, and
-steering behavior.
+memory, trajectory evidence, transcript history, pull reasoning, and human
+steering. The service uses `@_89/fold-sdk` for canonical record, recall,
+trajectory, fleet, steering, and transcript catalog behavior.
 
 ## Configuration
 
@@ -34,8 +34,6 @@ Optional environment:
 - `FOLD_API_HOST`, default `127.0.0.1`;
 - `FOLD_API_PORT`, default `3000`;
 - `FOLD_DATA_DIR`, default `.data/fold` under the working directory;
-- `FOLD_API_ENABLE_SIMULATION`, default `false`; when `true`, workspace owners
-  and admins may append local simulated terminal signals;
 - `FOLD_API_RATE_LIMIT_PER_MINUTE`, default `300` per client socket address;
   set it to `0` only when an upstream limiter owns that boundary;
 - `FOLD_API_CORS_ORIGINS`, an optional comma-separated list of exact `http` or
@@ -67,7 +65,11 @@ FOLD_API_CREDENTIALS_JSON='{"local-secret":{"principalId":"local","workspaces":{
 | `GET` | `/v1/workspaces/:workspace/trajectory-tasks/:taskId` | Projection, route, divergence, and review report |
 | `POST` | `/v1/workspaces/:workspace/trajectories` | Record a projected model run |
 | `GET` | `/v1/workspaces/:workspace/fleet` | Rebuilt sessions, freshness, and recovery plans |
-| `POST` | `/v1/workspaces/:workspace/activity-signals` | Owner/admin local simulation signal when explicitly enabled |
+| `GET` | `/v1/workspaces/:workspace/transcript-projects` | Imported project summaries |
+| `GET` | `/v1/workspaces/:workspace/transcript-projects/:projectId` | Project summary and runs |
+| `GET` | `/v1/workspaces/:workspace/transcript-runs` | Runs, optionally filtered by project and source |
+| `GET` | `/v1/workspaces/:workspace/transcript-runs/:runId` | Run, artifact, project, turn, and action metadata |
+| `POST` | `/v1/workspaces/:workspace/transcript-imports` | Owner/admin idempotent metadata import |
 | `GET` | `/v1/workspaces/:workspace/steering` | Replayed per-actor candidates and intentions |
 | `GET`, `POST` | `/v1/workspaces/:workspace/steering/:actorId` | Actor state or owner/admin steering action |
 | `POST` | `/v1/workspaces/:workspace/reasoning/ask` | Noncanonical provider answer over authorized evidence |
@@ -83,6 +85,15 @@ by the server and cannot be supplied by the request. Trajectory authorship and
 workspace/optional-space scope are derived the same way, but omit creator scope
 because task evidence is collaborative. Space membership is resolved on every
 request, so revocation applies immediately to raw records and every projection.
+
+Transcript imports accept only the strict `@_89/fold-transcript` bundle. The
+server derives ingest authorship and workspace capture identity, appends missing
+records in project/artifact/run/chunk order, rejects changed immutable identity,
+and makes an exact retry a no-op. Transcript and intention event kinds are
+reserved from generic append. The API journal contains metadata only; a local
+redacted artifact vault is owned by the importer and is not served by this API.
+Project/run reads follow normal workspace authorization, while import requires
+an owner or admin role.
 
 Ranked recall defaults to the deterministic `local-bm25-v1` lexical provider.
 `ApiDependencies.memoryRanker` is the host port for an embedding or vector

@@ -1,7 +1,7 @@
 {
-  "name": "@_89/fold-sdk",
+  "name": "@_89/fold-transcript",
   "version": "0.0.0",
-  "description": "Scoped producer and consumer APIs over canonical Fold records",
+  "description": "Canonical project, artifact, run, turn, and action records for imported agent transcripts",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -23,14 +23,6 @@
   },
   "dependencies": {
     "@_89/fold": "workspace:*",
-    "@_89/fold-activity": "workspace:*",
-    "@_89/fold-drives": "workspace:*",
-    "@_89/fold-epistemic": "workspace:*",
-    "@_89/fold-fleet": "workspace:*",
-    "@_89/fold-transcript": "workspace:*",
-    "@_89/fold-trajectory": "workspace:*"
-  },
-  "devDependencies": {
-    "@_89/fold-storage": "workspace:*"
+    "zod": "^3.25.0"
   }
 }

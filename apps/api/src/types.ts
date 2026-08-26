@@ -33,7 +33,6 @@ export interface ApiDependencies {
   readonly memberships: MembershipResolver;
   readonly sdks: FoldSdkRegistry;
   readonly maxBodyBytes?: number;
-  readonly enableSimulation?: boolean;
   readonly memoryRanker?: MemoryRanker;
   readonly reasoner?: ReasoningProvider;
   readonly rateLimiter?: RequestRateLimiter;

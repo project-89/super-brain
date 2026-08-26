@@ -66,6 +66,19 @@ import {
   type IntentionEnd,
   type SurfacedCandidate,
 } from "@_89/fold-drives";
+import {
+  makeTranscriptArtifactEvent,
+  makeTranscriptChunkEvent,
+  makeTranscriptProjectEvent,
+  makeTranscriptRunEvent,
+  rebuildTranscriptCatalog,
+  transcriptImportBundleSchema,
+  validateTranscriptEventEnvelope,
+  type TranscriptCatalog,
+  type TranscriptChunk,
+  type TranscriptProject,
+  type TranscriptRun,
+} from "@_89/fold-transcript";
 
 import { assertCanAppendEvent, authorizeEventAccess } from "./access.js";
 import type {
@@ -86,6 +99,12 @@ import type {
   RankedMemoryRecallResult,
   SteeringMutationResult,
   SteeringSnapshot,
+  FoldSdkTranscriptContext,
+  TranscriptImportOptions,
+  TranscriptImportResult,
+  TranscriptProjectSummary,
+  TranscriptRunDetail,
+  TranscriptRunFilters,
   TrajectoryMutationResult,
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
@@ -226,6 +245,7 @@ export class FoldSdk {
       validateTrajectoryEnvelope(event);
       validateActivityEventEnvelope(event);
       validateIntentionEventEnvelope(event);
+      validateTranscriptEventEnvelope(event);
       return { event, status: entry.status };
     });
     validateProducerOrder(entries.map((entry) => entry.event));
@@ -243,12 +263,33 @@ export class FoldSdk {
     validateTrajectoryEnvelope(parsed);
     validateActivityEventEnvelope(parsed);
     validateIntentionEventEnvelope(parsed);
+    validateTranscriptEventEnvelope(parsed);
     assertCanAppendEvent(parsed, access);
     const entries = await this.readStoredEntries();
     validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
     const entry = { event: parsed, status } as const;
     await this.store.append(entry);
     return entry;
+  }
+
+  private async appendSequenceInternal(
+    access: FoldSdkAccessContext,
+    events: readonly FoldEvent[],
+  ): Promise<readonly FoldEvent[]> {
+    const parsed = events.map((event) => {
+      const candidate = parseEvent(event);
+      validateMemoryEnvelope(candidate);
+      validateTrajectoryEnvelope(candidate);
+      validateActivityEventEnvelope(candidate);
+      validateIntentionEventEnvelope(candidate);
+      validateTranscriptEventEnvelope(candidate);
+      assertCanAppendEvent(candidate, access);
+      return candidate;
+    });
+    const entries = await this.readStoredEntries();
+    validateProducerOrder([...entries.map((entry) => entry.event), ...parsed]);
+    for (const event of parsed) await this.store.append({ event, status: "canon" });
+    return parsed;
   }
 
   append(
@@ -315,6 +356,155 @@ export class FoldSdk {
     const entries = await this.entriesForAccess(access, { include: "canon" });
     const events = entries.map((entry) => entry.event);
     return { events, state: rebuildTrajectories(events) };
+  }
+
+  private async transcriptProjection(access: FoldSdkAccessContext): Promise<TranscriptCatalog> {
+    const entries = await this.entriesForAccess(access, { include: "canon" });
+    return rebuildTranscriptCatalog(entries.map((entry) => entry.event));
+  }
+
+  transcriptProjects(
+    access: FoldSdkAccessContext,
+  ): Promise<readonly TranscriptProjectSummary[]> {
+    return this.enqueue(async () => {
+      const catalog = await this.transcriptProjection(access);
+      return [...catalog.projects.values()]
+        .map((project): TranscriptProjectSummary => {
+          const runs = [...catalog.runs.values()].filter((run) =>
+            run.projectId === project.id || run.segments.some((segment) => segment.projectId === project.id),
+          );
+          const lastRunAt = runs
+            .flatMap((run) => run.endedAt ?? run.startedAt ?? [])
+            .sort((left, right) => right.localeCompare(left))[0];
+          return {
+            project,
+            runCount: runs.length,
+            ...(lastRunAt === undefined ? {} : { lastRunAt }),
+          };
+        })
+        .sort((left, right) =>
+          (right.lastRunAt ?? "").localeCompare(left.lastRunAt ?? "") ||
+          left.project.name.localeCompare(right.project.name),
+        );
+    });
+  }
+
+  transcriptRuns(
+    access: FoldSdkAccessContext,
+    filters: TranscriptRunFilters = {},
+  ): Promise<readonly TranscriptRun[]> {
+    return this.enqueue(async () => {
+      const catalog = await this.transcriptProjection(access);
+      return [...catalog.runs.values()]
+        .filter((run) => filters.source === undefined || run.source === filters.source)
+        .filter((run) => filters.projectId === undefined ||
+          run.projectId === filters.projectId ||
+          run.segments.some((segment) => segment.projectId === filters.projectId))
+        .sort((left, right) =>
+          (right.endedAt ?? right.startedAt ?? "").localeCompare(left.endedAt ?? left.startedAt ?? "") ||
+          left.id.localeCompare(right.id),
+        );
+    });
+  }
+
+  transcriptRun(
+    access: FoldSdkAccessContext,
+    runId: string,
+  ): Promise<TranscriptRunDetail | undefined> {
+    return this.enqueue(async () => {
+      const catalog = await this.transcriptProjection(access);
+      const run = catalog.runs.get(runId);
+      if (run === undefined) return undefined;
+      const artifact = catalog.artifacts.get(run.artifactId);
+      if (artifact === undefined) throw new FoldSdkError(`transcript run ${runId} has no artifact`);
+      const projectIds = new Set([
+        ...(run.projectId === undefined ? [] : [run.projectId]),
+        ...run.segments.flatMap((segment) => segment.projectId ?? []),
+      ]);
+      return {
+        run,
+        artifact,
+        projects: [...projectIds].flatMap((projectId) => {
+          const project = catalog.projects.get(projectId);
+          return project === undefined ? [] : [project];
+        }),
+        chunks: catalog.chunksByRun.get(run.id) ?? [],
+      };
+    });
+  }
+
+  importTranscript(
+    context: FoldSdkTranscriptContext,
+    input: unknown,
+    options: TranscriptImportOptions,
+  ): Promise<TranscriptImportResult> {
+    return this.enqueue(async () => {
+      const bundle = transcriptImportBundleSchema.parse(input);
+      if (options.importId.trim().length === 0) {
+        throw new FoldSdkError("transcript import id must not be empty");
+      }
+      if (!Number.isSafeInteger(options.importedAt) || options.importedAt < 0) {
+        throw new FoldSdkError("transcript importedAt must be a nonnegative safe integer");
+      }
+
+      const entries = await this.entriesForAccess(context.access, { include: "canon" });
+      const events = entries.map((entry) => entry.event);
+      const catalog = rebuildTranscriptCatalog(events);
+      const same = (left: unknown, right: unknown): boolean =>
+        JSON.stringify(left) === JSON.stringify(right);
+      const assertSame = <T>(existing: T | undefined, candidate: T, label: string): boolean => {
+        if (existing === undefined) return false;
+        if (!same(existing, candidate)) {
+          throw new FoldSdkConflictError(`${label} changed after import`);
+        }
+        return true;
+      };
+
+      const records: Array<
+        | { readonly type: "project"; readonly value: TranscriptProject }
+        | { readonly type: "artifact"; readonly value: typeof bundle.artifact }
+        | { readonly type: "run"; readonly value: TranscriptRun }
+        | { readonly type: "chunk"; readonly value: TranscriptChunk }
+      > = [];
+      for (const project of bundle.projects) {
+        if (!assertSame(catalog.projects.get(project.id), project, `transcript project ${project.id}`)) {
+          records.push({ type: "project", value: project });
+        }
+      }
+      if (!assertSame(catalog.artifacts.get(bundle.artifact.id), bundle.artifact, `transcript artifact ${bundle.artifact.id}`)) {
+        records.push({ type: "artifact", value: bundle.artifact });
+      }
+      if (!assertSame(catalog.runs.get(bundle.run.id), bundle.run, `transcript run ${bundle.run.id}`)) {
+        records.push({ type: "run", value: bundle.run });
+      }
+      const existingChunks = new Map(
+        (catalog.chunksByRun.get(bundle.run.id) ?? []).map((chunk) => [chunk.sequence, chunk]),
+      );
+      for (const chunk of bundle.chunks) {
+        if (!assertSame(existingChunks.get(chunk.sequence), chunk, `transcript run ${bundle.run.id} chunk ${chunk.sequence}`)) {
+          records.push({ type: "chunk", value: chunk });
+        }
+      }
+
+      const maxT = events.reduce((maximum, event) => Math.max(maximum, event.at.t), -1);
+      const firstT = Math.max(options.importedAt, maxT + 1);
+      const worldDate = new Date(options.importedAt).toISOString().slice(0, 10);
+      const newEvents = records.map((record, index) => {
+        const stamp = {
+          id: `${options.importId}:${String(index).padStart(6, "0")}`,
+          t: firstT + index,
+          worldDate,
+        };
+        if (record.type === "project") return makeTranscriptProjectEvent(context, stamp, record.value);
+        if (record.type === "artifact") return makeTranscriptArtifactEvent(context, stamp, record.value);
+        if (record.type === "run") return makeTranscriptRunEvent(context, stamp, record.value);
+        return makeTranscriptChunkEvent(context, stamp, record.value);
+      });
+
+      rebuildTranscriptCatalog([...events, ...newEvents]);
+      await this.appendSequenceInternal(context.access, newEvents);
+      return { events: newEvents, run: bundle.run };
+    });
   }
 
   recordTrajectoryTree(

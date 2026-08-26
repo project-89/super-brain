@@ -4,7 +4,6 @@ import {
   Bot,
   CircleOff,
   Clock3,
-  Play,
   RadioTower,
   RotateCcw,
 } from "lucide-react";
@@ -27,11 +26,9 @@ function sessionStatus(session: FleetSession): string {
 export function FleetPage({
   response,
   events,
-  onSimulate,
 }: {
   readonly response: FleetResponse;
   readonly events: readonly FoldLogEntry[];
-  readonly onSimulate: () => void;
 }) {
   const { sessions, recoveryActions } = response.fleet;
   const [selectedId, setSelectedId] = useState<string>();
@@ -63,7 +60,6 @@ export function FleetPage({
       <PageHeader
         eyebrow="Replay-built operations"
         title="Agent fleet"
-        actions={response.simulationEnabled ? <button className="button button--primary" type="button" onClick={onSimulate}><Play aria-hidden="true" />Simulate</button> : undefined}
       />
 
       <section className="fleet-metrics" aria-label="Fleet totals">
@@ -77,7 +73,7 @@ export function FleetPage({
         <div className="fleet-session-list">
           <header><span className="eyebrow">Sessions</span><strong>{sessions.length} total</strong></header>
           {sessions.length === 0 ? (
-            <div className="fleet-empty"><EmptyState title="No captured sessions" />{response.simulationEnabled && <button className="button button--primary" type="button" onClick={onSimulate}><Play aria-hidden="true" />Simulate</button>}</div>
+            <div className="fleet-empty"><EmptyState title="No captured sessions" /></div>
           ) : sessions.map((session) => (
             <button key={session.sessionId} type="button" className={session.sessionId === selectedId ? "is-selected" : undefined} onClick={() => setSelectedId(session.sessionId)}>
               <span className={`fleet-agent-icon fleet-agent-icon--${session.availability}`}><Bot aria-hidden="true" /></span>

@@ -29,13 +29,14 @@ The intended dependency direction is:
 
 ```text
 @_89/fold --> fold-storage, fold-narrative, fold-trace, fold-activity,
-             fold-epistemic, fold-drives
+             fold-epistemic, fold-drives, fold-transcript
 @_89/confidence-kernel --> fold-eval
 @_89/fold-trace --> fold-eval
 @_89/fold-activity --> fold-fleet
 @_89/fold-trace + fold-eval + fold-epistemic --> fold-trajectory
-@_89/fold + fold-activity + fold-fleet + fold-epistemic + fold-trajectory --> fold-sdk
+@_89/fold + fold-activity + fold-fleet + fold-epistemic + fold-trajectory + fold-transcript --> fold-sdk
 @_89/fold-sdk + fold-storage --> apps/api --> apps/brain
+fold-transcript --> apps/importer --> apps/api
 ```
 
 The diagram shows allowed direction, not a requirement that every pack depend on
@@ -52,12 +53,14 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-narrative` | Canon, character knowledge, arcs, curves, convergence | Mythopia | First parity slice implemented |
 | `@_89/fold-activity` | Captured observations, normalization, sensor lifecycle | pty-state-capture; tmux-manager; Haunt contract | Terminal canonical and envelope-validation slice implemented |
 | `@_89/fold-fleet` | Agent/session identity, heartbeats, status, orphan recovery | tmux-manager; Parallax | Replay, orphan, SDK/API, and operator-view core implemented |
+| `@_89/fold-transcript` | Historical project, artifact, run, turn, and observable-action metadata | Claude Code and Codex local JSONL formats | Implemented |
 | `@_89/fold-epistemic` | Scoped personal memory and recall-time access enforcement | Raven | Recall-enforced personal memory core implemented |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
 | `@_89/fold-trajectory` | Scoped tree/run lifecycle and task analysis | Local `fold-trace` and `fold-eval` contracts | Implemented; empirical runs pending |
-| `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log, memory, trajectory, activity, and fleet core implemented |
-| `apps/api` | Authenticated service over the local SDK | Local packages only | HTTP event, projection, memory, and trajectory core implemented |
-| `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Memory, event, state, and trajectory workflows implemented |
+| `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log, memory, trajectory, activity, fleet, and transcript core implemented |
+| `apps/importer` | Read-only historical source adapters and local redacted vault | Local Claude Code and Codex JSONL | Scan and confirmed API delivery implemented |
+| `apps/api` | Authenticated service over the local SDK | Local packages only | Event, projection, memory, trajectory, transcript, fleet, steering, and reasoning HTTP core implemented |
+| `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Memory, history, event, state, trajectory, fleet, steering, and reasoning workflows implemented |
 
 ## Source-to-Target Map
 
@@ -98,17 +101,17 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    parity, and standalone eval/oracle primitives are implemented.
 6. **Sensing and fleet:** terminal normalization, canonical lifecycle and
    observations, complete source identity, heartbeat freshness, boot
-   reconstruction, orphan planning, scoped SDK/API delivery, local simulation,
+   reconstruction, orphan planning, scoped SDK/API delivery,
    and the operator view are implemented. Authenticated external sensor wiring
    and runtime actuation remain host integrations.
 7. **Domain completion:** drive, wear, intention, personal memory, tombstone,
    and recall-time access cores are implemented. Raven vector search and UI stay
    host concerns rather than core dependencies.
 8. **Delivery:** `@_89/fold-sdk` exposes scoped journal, projection,
-   personal-memory, trajectory, activity, and fleet APIs. `apps/api` serves that boundary with
+   personal-memory, trajectory, activity, fleet, and transcript APIs. `apps/api` serves that boundary with
    authenticated authors, fresh membership, and durable per-workspace journals.
    The repository-owned view layer covers overview, personal-memory,
-   trajectory-analysis, fleet, event, and projected-state workflows against this API.
+   trajectory-analysis, historical project/run, fleet, event, and projected-state workflows against this API.
    Add other domain facades only when product workflows require them.
 
 ## Drive Parity Status
@@ -172,6 +175,9 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
 8. Intention records pass through `fold-drives` envelope validation; lifecycle
    transitions are replay-validated before append and returned as JSON-safe
    per-actor steering state.
+9. Transcript bundles pass through strict `fold-transcript` envelope validation;
+   imports append only missing immutable project/artifact/run/chunk records and
+   catalog reads remain workspace-authorized.
 
 One SDK instance serializes its read-check-append operations. Authentication,
 membership resolution, and HTTP transport now live in `apps/api`;
@@ -199,9 +205,8 @@ cross-process transactionality and ranker infrastructure remain follow-on work.
 7. HTTP integration tests cover authentication, author spoofing, tenant and
    creator privacy, revocation, conflicts, validation, body limits, projection,
    memory lifecycle, and durable reopen.
-8. Fleet reads are always available. Local signal generation is disabled by
-   default and requires both an explicit environment flag and an owner/admin
-   role; sensor author and capture identity are server-derived.
+8. Fleet reads are always replayed from received canonical sensor records. The
+   API exposes no simulated activity mutation route.
 9. Pull reasoning ranks authorized memory, optionally includes replayed actor
    state, validates citations, and reports whether its provider is extractive
    or model-backed without appending derived answers as canon.
@@ -210,6 +215,9 @@ cross-process transactionality and ranker infrastructure remain follow-on work.
 11. Application routes have bounded per-address rate limiting, exact-origin CORS
     is available by configuration, and HTTP connection and shutdown lifetimes
     are bounded.
+12. Owner/admin transcript imports use server-derived ingest identity, immutable
+    replay validation, and idempotent retries; project/run history is readable to
+    authorized workspace members and reserved from generic append.
 
 Multi-host writer coordination, external identity providers, authenticated
 external sensor credentials, recovery actuation, deployment TLS, distributed
@@ -220,8 +228,8 @@ automated salience producers remain explicit follow-on work.
 
 `apps/brain` supplies the first operational client without importing Raven:
 
-1. A persistent responsive shell exposes overview, memory, trajectories, fleet,
-   steering, events, and state.
+1. A persistent responsive shell exposes overview, memory, history,
+   trajectories, fleet, steering, events, and state.
 2. Personal memory supports local filtering and provider-ranked recall with
    visible provider provenance, source/scope controls, record, revision, and
    explicit forget with server-derived creator identity.
@@ -231,14 +239,16 @@ automated salience producers remain explicit follow-on work.
    model-run selection, divergence/review status, and per-step assignment
    inspection through authenticated APIs.
 5. Fleet workflows expose availability, status, freshness, immutable identity,
-   canonical activity, and recovery plans; enabled operators can generate five
-   bounded local scenarios without direct event authorship.
+   canonical activity, and recovery plans without simulated controls.
 6. Pull reasoning visibly distinguishes extractive/model providers and
    lexical/semantic ranking; actor steering supports the complete canonical
    candidate and intention lifecycle with capability-aware controls.
 7. The bearer token is session-scoped; workspace and API URL preferences may be
    retained locally. Authentication and access failures remain visible.
-8. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
+8. Historical project/run workflows distinguish stable project identity from
+   source-qualified runs and expose context, turn, action, artifact, and privacy
+   metadata through authenticated APIs.
+9. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
 Real two-model capture, production semantic embeddings/model reasoning,

@@ -4,6 +4,7 @@ import {
   type MembershipResolver,
 } from "../src/index.js";
 import type { MemoryRanker } from "@_89/fold-sdk";
+import type { TranscriptImportBundle } from "@_89/fold-transcript";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -73,31 +74,72 @@ function trajectoryInput(
   };
 }
 
-const fleetEpoch = Date.parse("2026-08-20T12:00:00.000Z");
+const transcriptProject = {
+  id: "project-a",
+  name: "Project A",
+  identityKeyHash: "a".repeat(64),
+  resolution: "resolved" as const,
+  roots: ["/workspace/project-a"],
+};
 
-function activityBody(
-  sequence: number,
-  offsetMs: number,
-  signal: Readonly<Record<string, unknown>>,
-) {
-  return {
-    stamp: {
-      id: `fleet-event-${sequence}`,
-      t: fleetEpoch + offsetMs,
-      observedAt: new Date(fleetEpoch + offsetMs).toISOString(),
-    },
-    identity: {
-      agent: "sim-agent-a",
-      task: "api-fleet-test",
-      repo: "super-brain",
-      branch: "main",
-      session: "sim-session-a",
-      runtime: "simulation",
-    },
-    heartbeatWindowMs: 1_000,
-    signal,
-  };
-}
+const transcriptArtifact = {
+  id: "artifact-a",
+  source: "codex" as const,
+  sha256: "b".repeat(64),
+  sourcePathHash: "c".repeat(64),
+  byteLength: 100,
+  mediaType: "application/x-ndjson",
+  parser: { id: "codex-jsonl", version: "1" },
+  contentPolicy: "metadata-only" as const,
+  stored: false,
+  redactionCount: 0,
+};
+
+const transcriptRun = {
+  id: "codex:run-a",
+  nativeId: "run-a",
+  source: "codex" as const,
+  artifactId: transcriptArtifact.id,
+  projectId: transcriptProject.id,
+  projectResolution: "resolved" as const,
+  startedAt: "2026-08-20T12:00:00.000Z",
+  endedAt: "2026-08-20T12:05:00.000Z",
+  cwd: "/workspace/project-a",
+  counts: { records: 5, turns: 1, messages: 2, actions: 1, unknown: 0 },
+  segments: [{
+    id: "codex:run-a:segment:0",
+    ordinal: 0,
+    projectId: transcriptProject.id,
+    resolution: "resolved" as const,
+    cwd: "/workspace/project-a",
+    startedAt: "2026-08-20T12:00:00.000Z",
+  }],
+};
+
+const transcriptBundle: TranscriptImportBundle = {
+  projects: [transcriptProject],
+  artifact: transcriptArtifact,
+  run: transcriptRun,
+  chunks: [{
+    runId: transcriptRun.id,
+    sequence: 0,
+    turns: [{
+      id: "codex:run-a:turn:0",
+      ordinal: 0,
+      messageCount: 2,
+      actionCount: 1,
+      roles: ["user", "assistant"],
+    }],
+    actions: [{
+      id: "codex:run-a:action:0",
+      ordinal: 0,
+      turnId: "codex:run-a:turn:0",
+      kind: "tool-call",
+      name: "exec_command",
+      status: "completed",
+    }],
+  }],
+};
 
 describe("Fold HTTP API", () => {
   it("configures bounded HTTP connection lifetimes", () => {
@@ -256,7 +298,7 @@ describe("Fold HTTP API", () => {
     }
   });
 
-  it("reserves intention records to the authorized steering route", async () => {
+  it("reserves intention and transcript records to their dedicated routes", async () => {
     const api = await startApi();
     try {
       const base = apiEvent({ id: "event-a", t: 1 });
@@ -291,6 +333,16 @@ describe("Fold HTTP API", () => {
         },
       });
       expect(response).toMatchObject({
+        status: 400,
+        body: { error: { code: "reserved_event_route" } },
+      });
+
+      const transcript = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", {
+        method: "POST",
+        token: "token-a",
+        body: { event: apiEvent({ id: "event-b", t: 2, kind: "transcript.run-imported" }) },
+      });
+      expect(transcript).toMatchObject({
         status: 400,
         body: { error: { code: "reserved_event_route" } },
       });
@@ -672,7 +724,7 @@ describe("Fold HTTP API", () => {
     }
   });
 
-  it("keeps local activity simulation disabled by default", async () => {
+  it("does not expose a simulated activity mutation route", async () => {
     const api = await startApi();
     try {
       const response = await apiRequest(
@@ -681,7 +733,7 @@ describe("Fold HTTP API", () => {
         {
           method: "POST",
           token: "token-b",
-          body: activityBody(1, 0, { type: "session_started" }),
+          body: {},
         },
       );
       expect(response).toMatchObject({ status: 404, body: { error: { code: "not_found" } } });
@@ -690,80 +742,86 @@ describe("Fold HTTP API", () => {
     }
   });
 
-  it("records owner-only simulated signals and rebuilds fleet state", async () => {
-    const api = await startApi({ enableSimulation: true });
+  it("imports transcript metadata owner-only and exposes project and run history", async () => {
+    const api = await startApi();
     try {
       const denied = await apiRequest(
         api.baseUrl,
-        "/v1/workspaces/workspace-1/activity-signals",
+        "/v1/workspaces/workspace-1/transcript-imports",
         {
           method: "POST",
           token: "token-a",
-          body: activityBody(1, 0, { type: "session_started" }),
+          body: transcriptBundle,
         },
       );
       expect(denied).toMatchObject({
         status: 403,
-        body: { error: { code: "simulation_access_denied" } },
+        body: { error: { code: "transcript_import_access_denied" } },
       });
 
-      for (const [index, item] of [
-        { offset: 0, signal: { type: "session_started" } },
-        { offset: 400, signal: { type: "heartbeat" } },
-        { offset: 500, signal: { type: "tool_running", toolName: "vitest" } },
-      ].entries()) {
-        const recorded = await apiRequest(
-          api.baseUrl,
-          "/v1/workspaces/workspace-1/activity-signals",
-          {
-            method: "POST",
-            token: "token-b",
-            body: activityBody(index + 1, item.offset, item.signal),
-          },
-        );
-        expect(recorded.status).toBe(201);
-        if (index === 0) {
-          expect(recorded.body.event).toMatchObject({
-            author: { kind: "sensor", id: "urn:sensor:terminal:sim-session-a" },
-            capture: {
-              scope: { workspace: "workspace-1" },
-              identity: { principal: "user-b", workspace: "workspace-1" },
-            },
-          });
-        }
-      }
-
-      const fleet = await apiRequest(
+      const imported = await apiRequest(
         api.baseUrl,
-        `/v1/workspaces/workspace-1/fleet?nowMs=${fleetEpoch + 900}&orphanAfterMs=2000`,
-        { token: "token-b" },
+        "/v1/workspaces/workspace-1/transcript-imports",
+        { method: "POST", token: "token-b", body: transcriptBundle },
       );
-      expect(fleet).toMatchObject({
-        status: 200,
-        body: {
-          simulationEnabled: true,
-          fleet: {
-            sessions: [{
-              sessionId: "sim-session-a",
-              agentId: "sim-agent-a",
-              status: "busy",
-              availability: "available",
-              freshness: "current",
-              orphaned: false,
-            }],
-            recoveryActions: [],
-          },
-        },
+      expect(imported).toMatchObject({
+        status: 201,
+        body: { imported: true, eventCount: 4, run: { id: transcriptRun.id } },
       });
 
-      const memberView = await apiRequest(
+      const retried = await apiRequest(
         api.baseUrl,
-        `/v1/workspaces/workspace-1/fleet?nowMs=${fleetEpoch + 900}`,
+        "/v1/workspaces/workspace-1/transcript-imports",
+        { method: "POST", token: "token-b", body: transcriptBundle },
+      );
+      expect(retried).toMatchObject({
+        status: 200,
+        body: { imported: false, eventCount: 0 },
+      });
+
+      const projects = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/transcript-projects",
         { token: "token-a" },
       );
-      expect(memberView.body).toMatchObject({
-        simulationEnabled: false,
-        fleet: { sessions: [{ sessionId: "sim-session-a" }] },
+      expect(projects).toMatchObject({
+        status: 200,
+        body: { projects: [{ project: { id: transcriptProject.id }, runCount: 1 }] },
+      });
+
+      const project = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/transcript-projects/${transcriptProject.id}`,
+        { token: "token-a" },
+      );
+      expect(project).toMatchObject({
+        status: 200,
+        body: { project: { id: transcriptProject.id }, runs: [{ id: transcriptRun.id }] },
+      });
+
+      const runs = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/transcript-runs?projectId=${transcriptProject.id}&source=codex`,
+        { token: "token-a" },
+      );
+      expect(runs).toMatchObject({
+        status: 200,
+        body: { runs: [{ id: transcriptRun.id, nativeId: transcriptRun.nativeId }] },
+      });
+
+      const detail = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/transcript-runs/${encodeURIComponent(transcriptRun.id)}`,
+        { token: "token-a" },
+      );
+      expect(detail).toMatchObject({
+        status: 200,
+        body: {
+          run: { id: transcriptRun.id },
+          artifact: { id: transcriptArtifact.id, contentPolicy: "metadata-only" },
+          projects: [{ id: transcriptProject.id }],
+          chunks: [{ runId: transcriptRun.id, sequence: 0 }],
+        },
       });
     } finally {
       await api.close();

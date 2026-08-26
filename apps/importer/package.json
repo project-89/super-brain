@@ -1,12 +1,15 @@
 {
-  "name": "@_89/super-brain-api",
+  "name": "@_89/super-brain-importer",
   "version": "0.0.0",
-  "description": "Authenticated HTTP API for scoped Fold records and personal memory",
+  "description": "Read-only Claude Code and Codex transcript inventory and import CLI",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "super-brain-import": "./dist/main.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -21,13 +24,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@_89/fold": "workspace:*",
-    "@_89/fold-drives": "workspace:*",
-    "@_89/fold-epistemic": "workspace:*",
-    "@_89/fold-sdk": "workspace:*",
-    "@_89/fold-storage": "workspace:*",
-    "@_89/fold-transcript": "workspace:*",
-    "@_89/fold-trajectory": "workspace:*",
-    "zod": "^3.25.0"
+    "@_89/fold-transcript": "workspace:*"
   }
 }

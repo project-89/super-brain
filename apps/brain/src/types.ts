@@ -128,11 +128,115 @@ export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
   readonly memories: readonly RecalledMemory[];
   readonly trajectoryTasks: readonly TrajectoryTaskSummary[];
+  readonly transcriptProjects: readonly TranscriptProjectSummary[];
+  readonly transcriptRuns: readonly TranscriptRun[];
   readonly fleet: FleetResponse;
   readonly steering: SteeringResponse;
   readonly projection: ProjectionResponse;
   readonly workingProjection: ProjectionResponse;
   readonly loadedAt: number;
+}
+
+export type TranscriptSource = "claude-code" | "codex";
+export type TranscriptIdentityResolution = "resolved" | "estimated" | "unassigned";
+
+export interface TranscriptProject {
+  readonly id: string;
+  readonly name: string;
+  readonly identityKeyHash: string;
+  readonly resolution: TranscriptIdentityResolution;
+  readonly roots: readonly string[];
+  readonly remote?: string;
+}
+
+export interface TranscriptProjectSummary {
+  readonly project: TranscriptProject;
+  readonly runCount: number;
+  readonly lastRunAt?: string;
+}
+
+export interface TranscriptContextSegment {
+  readonly id: string;
+  readonly ordinal: number;
+  readonly projectId?: string;
+  readonly resolution: TranscriptIdentityResolution;
+  readonly cwd?: string;
+  readonly repo?: string;
+  readonly branch?: string;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+}
+
+export interface TranscriptRun {
+  readonly id: string;
+  readonly nativeId: string;
+  readonly source: TranscriptSource;
+  readonly artifactId: string;
+  readonly projectId?: string;
+  readonly projectResolution: TranscriptIdentityResolution;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  readonly cwd?: string;
+  readonly branch?: string;
+  readonly model?: string;
+  readonly clientVersion?: string;
+  readonly counts: {
+    readonly records: number;
+    readonly turns: number;
+    readonly messages: number;
+    readonly actions: number;
+    readonly unknown: number;
+  };
+  readonly segments: readonly TranscriptContextSegment[];
+}
+
+export interface TranscriptArtifact {
+  readonly id: string;
+  readonly source: TranscriptSource;
+  readonly sha256: string;
+  readonly sourcePathHash: string;
+  readonly byteLength: number;
+  readonly mediaType: string;
+  readonly parser: { readonly id: string; readonly version: string };
+  readonly modifiedAt?: string;
+  readonly contentPolicy: "metadata-only" | "redacted";
+  readonly stored: boolean;
+  readonly redactionCount: number;
+}
+
+export interface TranscriptTurn {
+  readonly id: string;
+  readonly ordinal: number;
+  readonly nativeId?: string;
+  readonly startedAt?: string;
+  readonly endedAt?: string;
+  readonly messageCount: number;
+  readonly actionCount: number;
+  readonly roles: readonly ("user" | "assistant" | "developer" | "system" | "tool" | "other")[];
+}
+
+export interface TranscriptAction {
+  readonly id: string;
+  readonly ordinal: number;
+  readonly turnId?: string;
+  readonly at?: string;
+  readonly kind: "tool-call" | "tool-result" | "command" | "file-change" | "test" | "other";
+  readonly name?: string;
+  readonly status?: "started" | "completed" | "failed" | "unknown";
+}
+
+export interface TranscriptChunk {
+  readonly runId: string;
+  readonly sequence: number;
+  readonly turns: readonly TranscriptTurn[];
+  readonly actions: readonly TranscriptAction[];
+}
+
+export interface TranscriptRunDetail {
+  readonly run: TranscriptRun;
+  readonly artifact: TranscriptArtifact;
+  readonly projects: readonly TranscriptProject[];
+  readonly chunks: readonly TranscriptChunk[];
 }
 
 export type MemoryScope =
@@ -377,18 +481,6 @@ export interface FleetResponse {
     readonly sessions: readonly FleetSession[];
     readonly recoveryActions: readonly OrphanRecoveryAction[];
   };
-  readonly simulationEnabled: boolean;
-}
-
-export type FleetSimulationScenario = "active" | "blocked" | "degraded" | "orphaned" | "stopped";
-
-export interface FleetSimulationDraft {
-  readonly scenario: FleetSimulationScenario;
-  readonly agentId: string;
-  readonly taskId: string;
-  readonly repo: string;
-  readonly branch: string;
-  readonly spaceId?: string;
 }
 
 export interface SteeringSatisfier {

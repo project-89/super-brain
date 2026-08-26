@@ -91,7 +91,7 @@ reapplies workspace, creator, and current space access after external semantic
 ranking, correcting a missing creator check in the pinned semantic path.
 
 `packages/fold-sdk` is local delivery code over repository-owned Fold,
-epistemic, trajectory, activity, and fleet contracts. It uses no external source
+epistemic, trajectory, activity, fleet, and transcript contracts. It uses no external source
 material. Its JSONL integration test exercises the local `FoldJournal` through a
 structural store port; the SDK production bundle has no filesystem storage
 dependency.
@@ -105,5 +105,11 @@ examples are structural fixtures, not empirical model evidence.
 no Raven server or other external implementation. Authentication, per-request
 membership resolution, author binding, opaque workspace journal paths, fsynced
 append, single-host writer leasing, bounded rate limiting, exact-origin CORS,
-HTTP schemas, owner-gated local activity simulation, and error responses are
-owned and tested here.
+HTTP schemas, owner-gated transcript import, and error responses are owned and
+tested here.
+
+`packages/fold-transcript` and `apps/importer` are local implementations based
+on observed Claude Code and Codex JSONL formats found on the development host.
+No transcript source or producer implementation was copied. Test fixtures are
+synthetic; real validation artifacts and imported journals remain under `/tmp`
+and are not repository evidence.

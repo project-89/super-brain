@@ -26,6 +26,15 @@ import type {
   IntentionDecline,
   SurfacedCandidate,
 } from "@_89/fold-drives";
+import type {
+  TranscriptArtifact,
+  TranscriptChunk,
+  TranscriptEventContext,
+  TranscriptImportBundle,
+  TranscriptProject,
+  TranscriptRun,
+  TranscriptSource,
+} from "@_89/fold-transcript";
 
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
@@ -141,6 +150,38 @@ export interface ActivityMutationResult {
   readonly event: FoldEvent;
 }
 
+export interface FoldSdkTranscriptContext extends TranscriptEventContext {
+  readonly access: FoldSdkAccessContext;
+}
+
+export interface TranscriptImportOptions {
+  readonly importId: string;
+  readonly importedAt: number;
+}
+
+export interface TranscriptImportResult {
+  readonly events: readonly FoldEvent[];
+  readonly run: TranscriptRun;
+}
+
+export interface TranscriptProjectSummary {
+  readonly project: TranscriptProject;
+  readonly runCount: number;
+  readonly lastRunAt?: string;
+}
+
+export interface TranscriptRunFilters {
+  readonly projectId?: string;
+  readonly source?: TranscriptSource;
+}
+
+export interface TranscriptRunDetail {
+  readonly run: TranscriptRun;
+  readonly artifact: TranscriptArtifact;
+  readonly projects: readonly TranscriptProject[];
+  readonly chunks: readonly TranscriptChunk[];
+}
+
 export interface FoldSdkActivityContext extends TerminalSensorContext {
   readonly access: FoldSdkAccessContext;
 }
@@ -169,3 +210,11 @@ export interface SteeringMutationResult {
 }
 
 export type { TrajectoryTaskReport };
+export type {
+  TranscriptArtifact,
+  TranscriptChunk,
+  TranscriptImportBundle,
+  TranscriptProject,
+  TranscriptRun,
+  TranscriptSource,
+};

@@ -1,6 +1,7 @@
 import {
   Boxes,
   BrainCircuit,
+  FolderClock,
   History,
   LayoutDashboard,
   MessagesSquare,
@@ -18,26 +19,27 @@ import { useEffect, useMemo, useState } from "react";
 import { FoldApiClient } from "./api";
 import { initialConnection, saveConnection } from "./connection";
 import { useSnapshot } from "./use-snapshot";
-import type { ConnectionSettings, FleetSimulationDraft, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
+import type { ConnectionSettings, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
 import { ConnectionDialog } from "./components/ConnectionDialog";
 import { MemoryDialog } from "./components/MemoryDialog";
 import { Modal } from "./components/Modal";
 import { TrajectoryImportDialog } from "./components/TrajectoryImportDialog";
-import { FleetSimulationDialog } from "./components/FleetSimulationDialog";
 import { EventsPage } from "./pages/EventsPage";
 import { MemoryPage } from "./pages/MemoryPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { StatePage } from "./pages/StatePage";
 import { TrajectoriesPage } from "./pages/TrajectoriesPage";
 import { FleetPage } from "./pages/FleetPage";
+import { HistoryPage } from "./pages/HistoryPage";
 import { SteeringPage } from "./pages/SteeringPage";
 
-type Page = "overview" | "memory" | "trajectories" | "fleet" | "steering" | "events" | "state";
+type Page = "overview" | "memory" | "history" | "trajectories" | "fleet" | "steering" | "events" | "state";
 type Theme = "light" | "dark";
 
 const PAGES: readonly { readonly id: Page; readonly label: string; readonly icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "memory", label: "Memory", icon: BrainCircuit },
+  { id: "history", label: "History", icon: FolderClock },
   { id: "trajectories", label: "Trajectories", icon: Waypoints },
   { id: "fleet", label: "Fleet", icon: RadioTower },
   { id: "steering", label: "Steering", icon: MessagesSquare },
@@ -65,7 +67,6 @@ export default function App() {
   const [forgetMemory, setForgetMemory] = useState<PersonalMemory>();
   const [forgetReason, setForgetReason] = useState("no longer needed");
   const [trajectoryImportOpen, setTrajectoryImportOpen] = useState(false);
-  const [fleetSimulationOpen, setFleetSimulationOpen] = useState(false);
   const [mutationPending, setMutationPending] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [mutationError, setMutationError] = useState<string>();
@@ -149,19 +150,6 @@ export default function App() {
     }
   };
 
-  const simulateFleet = async (draft: FleetSimulationDraft) => {
-    setMutationPending(true);
-    setMutationError(undefined);
-    try {
-      await api.simulateFleetScenario(draft);
-      setFleetSimulationOpen(false);
-      setNotice(`${draft.scenario} session simulated`);
-      await refresh(true);
-    } finally {
-      setMutationPending(false);
-    }
-  };
-
   const renderPage = () => {
     if (snapshot === undefined) return null;
     if (page === "memory") {
@@ -182,8 +170,11 @@ export default function App() {
     if (page === "trajectories") {
       return <TrajectoriesPage tasks={snapshot.trajectoryTasks} api={api} onImport={() => setTrajectoryImportOpen(true)} />;
     }
+    if (page === "history") {
+      return <HistoryPage projects={snapshot.transcriptProjects} runs={snapshot.transcriptRuns} api={api} />;
+    }
     if (page === "fleet") {
-      return <FleetPage response={snapshot.fleet} events={snapshot.events} onSimulate={() => setFleetSimulationOpen(true)} />;
+      return <FleetPage response={snapshot.fleet} events={snapshot.events} />;
     }
     if (page === "steering") {
       return <SteeringPage response={snapshot.steering} fleet={snapshot.fleet.fleet.sessions} api={api} onRefresh={() => refresh(true)} />;
@@ -267,7 +258,6 @@ export default function App() {
       <ConnectionDialog connection={connection} open={settingsOpen} required={disconnected} onClose={() => setSettingsOpen(false)} onSave={saveSettings} />
       <MemoryDialog memory={memoryDialog.memory} open={memoryDialog.open} pending={mutationPending} onClose={() => setMemoryDialog({ open: false })} onSave={saveMemory} />
       <TrajectoryImportDialog open={trajectoryImportOpen} pending={mutationPending} onClose={() => setTrajectoryImportOpen(false)} onImport={importTrajectories} />
-      <FleetSimulationDialog open={fleetSimulationOpen} pending={mutationPending} onClose={() => setFleetSimulationOpen(false)} onSimulate={simulateFleet} />
       <Modal open={forgetMemory !== undefined} title="Forget memory" onClose={() => setForgetMemory(undefined)}>
         <div className="form-stack">
           <p className="confirm-copy">This removes <strong>{forgetMemory?.summary || "this memory"}</strong> from recall and records a durable tombstone.</p>

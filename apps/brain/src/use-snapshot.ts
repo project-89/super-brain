@@ -29,10 +29,12 @@ export function useSnapshot(connection: ConnectionSettings) {
       }));
       try {
         const client = new FoldApiClient(connection);
-        const [events, memories, trajectoryTasks, fleet, steering, projection, workingProjection] = await Promise.all([
+        const [events, memories, trajectoryTasks, transcriptProjects, transcriptRuns, fleet, steering, projection, workingProjection] = await Promise.all([
           client.listEvents({ includeDrafts: true }),
           client.recallMemories({ scope: { kind: "all" }, limit: 100 }),
           client.listTrajectoryTasks(),
+          client.listTranscriptProjects(),
+          client.listTranscriptRuns(),
           client.fleet(),
           client.steering(),
           client.projection(),
@@ -40,7 +42,7 @@ export function useSnapshot(connection: ConnectionSettings) {
         ]);
         if (request !== requestNumber.current) return;
         setState({
-          snapshot: { events, memories, trajectoryTasks, fleet, steering, projection, workingProjection, loadedAt: Date.now() },
+          snapshot: { events, memories, trajectoryTasks, transcriptProjects, transcriptRuns, fleet, steering, projection, workingProjection, loadedAt: Date.now() },
           loading: false,
           refreshing: false,
         });
