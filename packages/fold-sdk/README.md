@@ -21,7 +21,9 @@ another implementation. The SDK owns these delivery rules:
   summaries and projection-gap-safe analysis without exposing an unfiltered
   trajectory projection.
 - append validated terminal-manager signals and rebuild JSON-safe fleet sessions
-  and orphan recovery plans from the caller's current canonical view.
+  and orphan recovery plans from the caller's current canonical view;
+- validate intention envelopes, reject invalid lifecycle transitions before
+  append, and rebuild JSON-safe per-actor human steering state.
 
 Workspace roles do not override creator-scoped privacy. Space access is supplied
 freshly on every call, so revocation removes scoped records from both raw event

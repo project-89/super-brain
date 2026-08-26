@@ -169,6 +169,9 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
 7. Terminal signals pass through `fold-activity` envelope validation and fleet
    reads rebuild authorized canonical records through `fold-fleet`, including
    freshness and deterministic orphan recovery plans.
+8. Intention records pass through `fold-drives` envelope validation; lifecycle
+   transitions are replay-validated before append and returned as JSON-safe
+   per-actor steering state.
 
 One SDK instance serializes its read-check-append operations. Authentication,
 membership resolution, and HTTP transport now live in `apps/api`;
@@ -198,17 +201,23 @@ cross-process transactionality and ranker infrastructure remain follow-on work.
 8. Fleet reads are always available. Local signal generation is disabled by
    default and requires both an explicit environment flag and an owner/admin
    role; sensor author and capture identity are server-derived.
+9. Pull reasoning ranks authorized memory, optionally includes replayed actor
+   state, validates citations, and reports whether its provider is extractive
+   or model-backed without appending derived answers as canon.
+10. Human steering is owner/admin-only, server-authored, and reserved from the
+    generic event route; workspace members retain read access to replayed state.
 
 Cross-process locking, external identity providers, authenticated external
 sensor credentials, recovery actuation, rate limiting, deployment TLS/CORS, and
-production embedding/vector infrastructure remain explicit follow-on work.
+production embedding/vector/model infrastructure and automated salience
+producers remain explicit follow-on work.
 
 ## Brain Delivery Status
 
 `apps/brain` supplies the first operational client without importing Raven:
 
 1. A persistent responsive shell exposes overview, memory, trajectories, fleet,
-   events, and state.
+   steering, events, and state.
 2. Personal memory supports local filtering and provider-ranked recall with
    visible provider provenance, source/scope controls, record, revision, and
    explicit forget with server-derived creator identity.
@@ -220,12 +229,16 @@ production embedding/vector infrastructure remain explicit follow-on work.
 5. Fleet workflows expose availability, status, freshness, immutable identity,
    canonical activity, and recovery plans; enabled operators can generate five
    bounded local scenarios without direct event authorship.
-6. The bearer token is session-scoped; workspace and API URL preferences may be
+6. Pull reasoning visibly distinguishes extractive/model providers and
+   lexical/semantic ranking; actor steering supports the complete canonical
+   candidate and intention lifecycle with capability-aware controls.
+7. The bearer token is session-scoped; workspace and API URL preferences may be
    retained locally. Authentication and access failures remain visible.
-7. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
+8. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
-Real two-model capture, production semantic embeddings, general graph layout, event authoring,
+Real two-model capture, production semantic embeddings/model reasoning,
+automated salience producers, general graph layout, event authoring,
 identity-provider login, and deployment-specific secret delivery remain
 follow-on product work.
 

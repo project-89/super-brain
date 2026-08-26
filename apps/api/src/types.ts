@@ -4,6 +4,7 @@ import type {
   FoldSdkAccessContext,
   MemoryRanker,
 } from "@_89/fold-sdk";
+import type { ReasoningProvider } from "./reasoning.js";
 
 export interface AuthenticatedSubject {
   readonly credentialId: string;
@@ -33,6 +34,7 @@ export interface ApiDependencies {
   readonly maxBodyBytes?: number;
   readonly enableSimulation?: boolean;
   readonly memoryRanker?: MemoryRanker;
+  readonly reasoner?: ReasoningProvider;
   readonly reportError?: (error: unknown) => void;
 }
 

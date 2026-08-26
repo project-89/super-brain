@@ -9,6 +9,10 @@ Work-focused browser client for the authenticated Fold API. It provides:
   per-step projection inspection;
 - replay-built fleet status, freshness, lifecycle, recovery-plan, and canonical
   activity inspection, with scenario generation only when the API enables it;
+- provider-labeled pull reasoning over authorized memory and optional actor
+  context;
+- replayed human steering with actor discovery, candidate surfacing,
+  commit/decline decisions, action recording, and explicit intention endings;
 - canonical and draft event inspection;
 - materialized node, edge, component-value, and diagnostic inspection.
 
@@ -22,6 +26,9 @@ list/detail, and memory metadata interactions were used only as product evidence
 Ranked results show the server-reported provider kind, identifier, scanned
 corpus size, and normalized score so lexical and semantic retrieval remain
 operationally distinguishable.
+The local reasoning provider is visibly labeled `extractive`; the client does
+not present it as a model answer. Steering controls follow the server-reported
+owner/admin capability and remain read-only for other workspace roles.
 
 ## Development
 

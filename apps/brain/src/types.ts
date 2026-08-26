@@ -129,6 +129,7 @@ export interface BrainSnapshot {
   readonly memories: readonly RecalledMemory[];
   readonly trajectoryTasks: readonly TrajectoryTaskSummary[];
   readonly fleet: FleetResponse;
+  readonly steering: SteeringResponse;
   readonly projection: ProjectionResponse;
   readonly workingProjection: ProjectionResponse;
   readonly loadedAt: number;
@@ -388,4 +389,90 @@ export interface FleetSimulationDraft {
   readonly repo: string;
   readonly branch: string;
   readonly spaceId?: string;
+}
+
+export interface SteeringSatisfier {
+  readonly kind: string;
+  readonly ref: string;
+  readonly params?: Readonly<Record<string, JsonValue>>;
+}
+
+export type SurfacingTrigger =
+  | { readonly kind: "coincidence"; readonly note: string }
+  | { readonly kind: "quiet" }
+  | { readonly kind: "threshold" };
+
+export interface SteeringCandidate {
+  readonly id: string;
+  readonly sourceDriveId: string;
+  readonly satisfier: SteeringSatisfier;
+  readonly aim: string;
+  readonly surfacedAtMs: number;
+  readonly trigger: SurfacingTrigger;
+}
+
+export interface SteeringIntention {
+  readonly id: string;
+  readonly aim: string;
+  readonly sourceDriveId: string;
+  readonly satisfier: SteeringSatisfier;
+  readonly fromCandidateId: string;
+  readonly formedAtMs: number;
+  readonly attempts: number;
+}
+
+export interface SteeringDecline {
+  readonly candidate: SteeringCandidate;
+  readonly reason: string;
+  readonly atMs: number;
+}
+
+export interface SteeringActorSnapshot {
+  readonly actorId: string;
+  readonly pendingCandidates: readonly SteeringCandidate[];
+  readonly intentions: readonly SteeringIntention[];
+  readonly recentDeclines: readonly SteeringDecline[];
+  readonly driveSample?: {
+    readonly actorId: string;
+    readonly elapsedMs: number;
+    readonly levels: Readonly<Record<string, number>>;
+    readonly wear: {
+      readonly perDrive: Readonly<Record<string, { readonly sustainedBelowMs: number; readonly sustainedAboveMs: number }>>;
+      readonly chronicLoad: number;
+    };
+  };
+}
+
+export interface SteeringResponse {
+  readonly actors: readonly SteeringActorSnapshot[];
+  readonly steeringEnabled: boolean;
+}
+
+export interface SteeringCandidateDraft {
+  readonly actorId: string;
+  readonly sourceDriveId: string;
+  readonly satisfierKind: string;
+  readonly satisfierRef: string;
+  readonly aim: string;
+  readonly trigger: SurfacingTrigger;
+}
+
+export type SteeringIntentionEnd =
+  | { readonly kind: "satisfied" }
+  | { readonly kind: "expired" }
+  | { readonly kind: "abandoned"; readonly reason: string }
+  | { readonly kind: "superseded"; readonly byIntentionId: string };
+
+export interface ReasoningResponse {
+  readonly answer: string;
+  readonly citations: readonly string[];
+  readonly provider: { readonly id: string; readonly kind: "extractive" | "model" };
+  readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic"; readonly corpusSize: number };
+  readonly evidence: readonly {
+    readonly memoryId: string;
+    readonly source: string;
+    readonly summary: string;
+    readonly score?: number;
+  }[];
+  readonly steering?: SteeringActorSnapshot;
 }

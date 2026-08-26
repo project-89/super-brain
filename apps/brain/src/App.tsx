@@ -3,6 +3,7 @@ import {
   BrainCircuit,
   History,
   LayoutDashboard,
+  MessagesSquare,
   Moon,
   RadioTower,
   RefreshCw,
@@ -29,8 +30,9 @@ import { OverviewPage } from "./pages/OverviewPage";
 import { StatePage } from "./pages/StatePage";
 import { TrajectoriesPage } from "./pages/TrajectoriesPage";
 import { FleetPage } from "./pages/FleetPage";
+import { SteeringPage } from "./pages/SteeringPage";
 
-type Page = "overview" | "memory" | "trajectories" | "fleet" | "events" | "state";
+type Page = "overview" | "memory" | "trajectories" | "fleet" | "steering" | "events" | "state";
 type Theme = "light" | "dark";
 
 const PAGES: readonly { readonly id: Page; readonly label: string; readonly icon: typeof LayoutDashboard }[] = [
@@ -38,6 +40,7 @@ const PAGES: readonly { readonly id: Page; readonly label: string; readonly icon
   { id: "memory", label: "Memory", icon: BrainCircuit },
   { id: "trajectories", label: "Trajectories", icon: Waypoints },
   { id: "fleet", label: "Fleet", icon: RadioTower },
+  { id: "steering", label: "Steering", icon: MessagesSquare },
   { id: "events", label: "Events", icon: History },
   { id: "state", label: "State", icon: Boxes },
 ];
@@ -181,6 +184,9 @@ export default function App() {
     }
     if (page === "fleet") {
       return <FleetPage response={snapshot.fleet} events={snapshot.events} onSimulate={() => setFleetSimulationOpen(true)} />;
+    }
+    if (page === "steering") {
+      return <SteeringPage response={snapshot.steering} fleet={snapshot.fleet.fleet.sessions} api={api} onRefresh={() => refresh(true)} />;
     }
     if (page === "state") {
       return (

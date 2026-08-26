@@ -184,6 +184,49 @@ describe("Fold HTTP API", () => {
     }
   });
 
+  it("reserves intention records to the authorized steering route", async () => {
+    const api = await startApi();
+    try {
+      const base = apiEvent({ id: "event-a", t: 1 });
+      const response = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", {
+        method: "POST",
+        token: "token-a",
+        body: {
+          event: {
+            ...base,
+            kind: "intention.surfaced",
+            capture: { scope: { workspace: "workspace-1" }, identity: { actor: "agent-a" } },
+            changes: [{
+              verb: "create",
+              subject: "urn:fold-record:event-a",
+              nodeKind: "x.fold.intention-event",
+              after: {
+                actorId: "agent-a",
+                atMs: 1,
+                eventType: "surfaced",
+                candidate: {
+                  id: "candidate-a",
+                  sourceDriveId: "delivery",
+                  satisfier: { kind: "task", ref: "verify" },
+                  aim: "Verify release",
+                  surfacedAtMs: 1,
+                  trigger: { kind: "threshold" },
+                },
+              },
+              provenance: { basis: "authored" },
+            }],
+          },
+        },
+      });
+      expect(response).toMatchObject({
+        status: 400,
+        body: { error: { code: "reserved_event_route" } },
+      });
+    } finally {
+      await api.close();
+    }
+  });
+
   it("returns a stable conflict for duplicate events", async () => {
     const api = await startApi();
     try {
@@ -343,6 +386,54 @@ describe("Fold HTTP API", () => {
           ranking: { id: "host-semantic-test", kind: "semantic", corpusSize: 1 },
         },
       });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("answers pull reasoning with provider and evidence provenance", async () => {
+    const api = await startApi();
+    try {
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", {
+        method: "POST",
+        token: "token-a",
+        body: memoryRecordBody({
+          input: {
+            id: MEMORY_A,
+            source: "conversation",
+            summary: "Rotate the access token before retrying",
+            content: { outcome: "refresh succeeded" },
+            tags: ["authentication"],
+          },
+        }),
+      });
+
+      const response = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/reasoning/ask",
+        {
+          method: "POST",
+          token: "token-a",
+          body: { question: "How did the access token refresh recover?", limit: 5 },
+        },
+      );
+      expect(response).toMatchObject({
+        status: 200,
+        body: {
+          answer: "Relevant evidence: Rotate the access token before retrying.",
+          citations: [MEMORY_A],
+          provider: { id: "local-evidence-v1", kind: "extractive" },
+          ranking: { id: "local-bm25-v1", kind: "lexical", corpusSize: 1 },
+          evidence: [{ memoryId: MEMORY_A, source: "conversation", score: 1 }],
+        },
+      });
+
+      const entries = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/events",
+        { token: "token-a" },
+      );
+      expect(entries.body.entries.map((entry: any) => entry.event.kind)).toEqual(["memory.recorded"]);
     } finally {
       await api.close();
     }
@@ -601,6 +692,103 @@ describe("Fold HTTP API", () => {
       expect(memberView.body).toMatchObject({
         simulationEnabled: false,
         fleet: { sessions: [{ sessionId: "sim-session-a" }] },
+      });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("records owner-only human steering and rebuilds actor intentions", async () => {
+    const api = await startApi();
+    try {
+      const denied = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/steering/agent-a",
+        {
+          method: "POST",
+          token: "token-a",
+          body: {
+            action: "surface",
+            stamp: { id: "steer-event-a", t: 300, worldDate: "2026-08-21" },
+            candidate: {
+              id: "candidate-a",
+              sourceDriveId: "delivery",
+              satisfier: { kind: "task", ref: "verify-ranked-recall" },
+              aim: "Verify ranked recall before rollout",
+              trigger: { kind: "threshold" },
+            },
+          },
+        },
+      );
+      expect(denied).toMatchObject({
+        status: 403,
+        body: { error: { code: "steering_access_denied" } },
+      });
+
+      const surfaced = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/steering/agent-a",
+        {
+          method: "POST",
+          token: "token-b",
+          body: {
+            action: "surface",
+            stamp: { id: "steer-event-a", t: 300, worldDate: "2026-08-21" },
+            candidate: {
+              id: "candidate-a",
+              sourceDriveId: "delivery",
+              satisfier: { kind: "task", ref: "verify-ranked-recall" },
+              aim: "Verify ranked recall before rollout",
+              trigger: { kind: "threshold" },
+            },
+          },
+        },
+      );
+      expect(surfaced).toMatchObject({
+        status: 201,
+        body: {
+          event: {
+            kind: "intention.surfaced",
+            author: { kind: "human", id: "user-b" },
+            capture: {
+              scope: { workspace: "workspace-1" },
+              identity: { actor: "agent-a" },
+            },
+          },
+          steering: { actorId: "agent-a", pendingCandidates: [{ id: "candidate-a" }] },
+        },
+      });
+
+      const committed = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/steering/agent-a",
+        {
+          method: "POST",
+          token: "token-b",
+          body: {
+            action: "commit",
+            stamp: { id: "steer-event-b", t: 301, worldDate: "2026-08-21" },
+            candidateId: "candidate-a",
+            intentionId: "intention-a",
+          },
+        },
+      );
+      expect(committed).toMatchObject({
+        status: 201,
+        body: { steering: { pendingCandidates: [], intentions: [{ id: "intention-a" }] } },
+      });
+
+      const memberRead = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/steering",
+        { token: "token-a" },
+      );
+      expect(memberRead).toMatchObject({
+        status: 200,
+        body: {
+          steeringEnabled: false,
+          actors: [{ actorId: "agent-a", intentions: [{ id: "intention-a" }] }],
+        },
       });
     } finally {
       await api.close();

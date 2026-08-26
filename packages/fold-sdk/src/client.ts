@@ -51,11 +51,27 @@ import {
   rebuildFleet,
   type FleetProjectionOptions,
 } from "@_89/fold-fleet";
+import {
+  intentionRecordsFromEvent,
+  latestDriveSample,
+  makeIntentionActedEvent,
+  makeIntentionCommittedEvent,
+  makeIntentionDeclinedEvent,
+  makeIntentionEndedEvent,
+  makeIntentionSurfacedEvent,
+  rebuildIntentions,
+  recentDeclines,
+  validateIntentionEventEnvelope,
+  type DriveEventStamp,
+  type IntentionEnd,
+  type SurfacedCandidate,
+} from "@_89/fold-drives";
 
 import { assertCanAppendEvent, authorizeEventAccess } from "./access.js";
 import type {
   FoldSdkAccessContext,
   FoldSdkActivityContext,
+  FoldSdkSteeringContext,
   FoldSdkListOptions,
   FoldSdkProjectOptions,
   FoldSdkProjection,
@@ -68,6 +84,8 @@ import type {
   MemoryRanker,
   RankedMemoryRecallRequest,
   RankedMemoryRecallResult,
+  SteeringMutationResult,
+  SteeringSnapshot,
   TrajectoryMutationResult,
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
@@ -207,6 +225,7 @@ export class FoldSdk {
       validateMemoryEnvelope(event);
       validateTrajectoryEnvelope(event);
       validateActivityEventEnvelope(event);
+      validateIntentionEventEnvelope(event);
       return { event, status: entry.status };
     });
     validateProducerOrder(entries.map((entry) => entry.event));
@@ -223,6 +242,7 @@ export class FoldSdk {
     validateMemoryEnvelope(parsed);
     validateTrajectoryEnvelope(parsed);
     validateActivityEventEnvelope(parsed);
+    validateIntentionEventEnvelope(parsed);
     assertCanAppendEvent(parsed, access);
     const entries = await this.readStoredEntries();
     validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
@@ -399,6 +419,126 @@ export class FoldSdk {
         recoveryActions: planOrphanRecovery(snapshot),
       };
     });
+  }
+
+  private async steeringEvents(access: FoldSdkAccessContext): Promise<readonly FoldEvent[]> {
+    const entries = await this.entriesForAccess(access, { include: "canon" });
+    return entries.map((entry) => entry.event);
+  }
+
+  private steeringSnapshotFromEvents(
+    events: readonly FoldEvent[],
+    actorId: string,
+  ): SteeringSnapshot {
+    const projection = rebuildIntentions(events, actorId);
+    const driveSample = latestDriveSample(events, actorId);
+    return {
+      actorId,
+      pendingCandidates: [...projection.pendingCandidates].sort(
+        (left, right) => right.surfacedAtMs - left.surfacedAtMs || left.id.localeCompare(right.id),
+      ),
+      intentions: [...projection.intentions.values()].sort(
+        (left, right) => right.formedAtMs - left.formedAtMs || left.id.localeCompare(right.id),
+      ),
+      recentDeclines: recentDeclines(projection),
+      ...(driveSample === undefined ? {} : { driveSample }),
+    };
+  }
+
+  steeringSnapshots(access: FoldSdkAccessContext): Promise<readonly SteeringSnapshot[]> {
+    return this.enqueue(async () => {
+      const events = await this.steeringEvents(access);
+      const actors = new Set<string>();
+      for (const event of events) {
+        for (const record of intentionRecordsFromEvent(event)) actors.add(record.actorId);
+      }
+      return [...actors]
+        .sort((left, right) => left.localeCompare(right))
+        .map((actorId) => this.steeringSnapshotFromEvents(events, actorId));
+    });
+  }
+
+  steeringSnapshot(
+    access: FoldSdkAccessContext,
+    actorId: string,
+  ): Promise<SteeringSnapshot> {
+    return this.enqueue(async () => {
+      const events = await this.steeringEvents(access);
+      return this.steeringSnapshotFromEvents(events, actorId);
+    });
+  }
+
+  private async appendSteeringEvent(
+    context: FoldSdkSteeringContext,
+    event: FoldEvent,
+  ): Promise<SteeringMutationResult> {
+    const events = await this.steeringEvents(context.access);
+    const steering = this.steeringSnapshotFromEvents([...events, event], context.actorId);
+    await this.appendInternal(context.access, event, "canon");
+    return { event, steering };
+  }
+
+  surfaceIntentionCandidate(
+    context: FoldSdkSteeringContext,
+    stamp: DriveEventStamp,
+    input: Omit<SurfacedCandidate, "surfacedAtMs">,
+    causedBy?: readonly string[],
+  ): Promise<SteeringMutationResult> {
+    return this.enqueue(() => this.appendSteeringEvent(
+      context,
+      makeIntentionSurfacedEvent(context, stamp, input, causedBy),
+    ));
+  }
+
+  commitIntentionCandidate(
+    context: FoldSdkSteeringContext,
+    stamp: DriveEventStamp,
+    candidateId: string,
+    intentionId: string,
+    causedBy?: readonly string[],
+  ): Promise<SteeringMutationResult> {
+    return this.enqueue(() => this.appendSteeringEvent(
+      context,
+      makeIntentionCommittedEvent(context, stamp, candidateId, intentionId, causedBy),
+    ));
+  }
+
+  declineIntentionCandidate(
+    context: FoldSdkSteeringContext,
+    stamp: DriveEventStamp,
+    candidateId: string,
+    reason: string,
+    causedBy?: readonly string[],
+  ): Promise<SteeringMutationResult> {
+    return this.enqueue(() => this.appendSteeringEvent(
+      context,
+      makeIntentionDeclinedEvent(context, stamp, candidateId, reason, causedBy),
+    ));
+  }
+
+  recordIntentionAction(
+    context: FoldSdkSteeringContext,
+    stamp: DriveEventStamp,
+    intentionId: string,
+    causedBy?: readonly string[],
+  ): Promise<SteeringMutationResult> {
+    return this.enqueue(() => this.appendSteeringEvent(
+      context,
+      makeIntentionActedEvent(context, stamp, intentionId, causedBy),
+    ));
+  }
+
+  endIntention(
+    context: FoldSdkSteeringContext,
+    stamp: DriveEventStamp,
+    intentionId: string,
+    end: IntentionEnd,
+    causedBy?: readonly string[],
+  ): Promise<SteeringMutationResult> {
+    return this.enqueue(() => this.appendSteeringEvent(
+      context,
+      makeIntentionEndedEvent(context, stamp, intentionId, end, causedBy),
+    ));
   }
 
   recordMemory(

@@ -15,6 +15,7 @@ import {
   recentDeclines,
   sourcePressure,
   urgency,
+  validateIntentionEventEnvelope,
   type DriveEventContext,
   type DriveEventStamp,
   type Satisfier,
@@ -135,6 +136,20 @@ describe("intention replay", () => {
       );
     }
     expect(() => rebuildIntentions(events, "poe")).toThrow(/cap of 3/);
+  });
+
+  it("rejects event-kind and intention-record envelope mismatches", () => {
+    const valid = surfaced(1, "candidate");
+    expect(() => validateIntentionEventEnvelope(valid)).not.toThrow();
+    expect(() => validateIntentionEventEnvelope({ ...valid, kind: "test.event" })).toThrow(
+      /requires an intention event kind/,
+    );
+    expect(() => validateIntentionEventEnvelope({ ...valid, kind: "intention.committed" })).toThrow(
+      /wrong record type/,
+    );
+    expect(() => validateIntentionEventEnvelope({ ...valid, changes: [] })).toThrow(
+      /exactly one intention record/,
+    );
   });
 });
 

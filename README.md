@@ -35,7 +35,8 @@ The first milestone is the risk-retirement gate from the reference document:
   orphan reconciliation without interpreting silence as offline.
 - `@_89/fold-drives` incrementally advances drive and wear state, records causal
   discontinuities as canonical Fold events, and rebuilds surfaced, committed,
-  declined, acted, and ended intentions without performing host cognition.
+  declined, acted, and ended intentions without performing host cognition. The
+  SDK and API expose that lifecycle as replayed human steering.
 - `@_89/fold-epistemic` records, revises, forgets, and recalls personal memory
   with mandatory workspace and creator identity, current space access, durable
   tombstones, and post-ranking authorization for external semantic candidates.
@@ -47,12 +48,14 @@ The first milestone is the risk-retirement gate from the reference document:
 - `@_89/super-brain-api` serves those SDK operations over authenticated HTTP,
   derives authorship and personal-memory capture identity from credentials,
   resolves membership on every request, supplies a pluggable memory-ranker port
-  with a deterministic local lexical provider, and persists one fsynced journal
-  per workspace.
+  with a deterministic local lexical provider, supplies a pull-reasoner port
+  with an explicitly extractive local provider, gates canonical steering, and
+  persists one fsynced journal per workspace.
 - `@_89/super-brain` is the responsive operator client for workspace activity,
   private personal-memory lifecycle and ranked recall, trajectory import and
-  analysis, agent fleet inspection and local simulation, canonical/draft event
-  inspection, and materialized Fold state. It talks only to the local HTTP API.
+  analysis, agent fleet inspection and local simulation, pull reasoning, human
+  steering, canonical/draft event inspection, and materialized Fold state. It
+  talks only to the local HTTP API.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,

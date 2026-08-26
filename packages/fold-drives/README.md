@@ -15,6 +15,10 @@ discontinuities, but advance continuous drive state step by step. It provides:
 - deterministic intention replay, urgency, decline cooldown, commitment caps,
   and surfacing eligibility.
 
+`@_89/fold-sdk` exposes this canonical intention lifecycle as replayed human
+steering. Host authorization decides who may surface, commit, decline, act on,
+or end an intention; this package continues to make no autonomous decisions.
+
 `eligibleToSurface` is a signal. Hosts decide whether a satisfier is available,
 whether the moment is quiet, what aim to author, and whether to commit or
 decline. This package performs no model, process, filesystem, or network I/O.

@@ -1,8 +1,9 @@
 # Super Brain API
 
 Authenticated HTTP delivery for scoped Fold events, projections, personal
-memory, and trajectory evidence. The service uses `@_89/fold-sdk` exclusively
-for record, recall, and trajectory behavior.
+memory, trajectory evidence, pull reasoning, and human steering. The service
+uses `@_89/fold-sdk` for canonical record, recall, trajectory, fleet, and
+steering behavior.
 
 ## Configuration
 
@@ -62,6 +63,9 @@ FOLD_API_CREDENTIALS_JSON='{"local-secret":{"principalId":"local","workspaces":{
 | `POST` | `/v1/workspaces/:workspace/trajectories` | Record a projected model run |
 | `GET` | `/v1/workspaces/:workspace/fleet` | Rebuilt sessions, freshness, and recovery plans |
 | `POST` | `/v1/workspaces/:workspace/activity-signals` | Owner/admin local simulation signal when explicitly enabled |
+| `GET` | `/v1/workspaces/:workspace/steering` | Replayed per-actor candidates and intentions |
+| `GET`, `POST` | `/v1/workspaces/:workspace/steering/:actorId` | Actor state or owner/admin steering action |
+| `POST` | `/v1/workspaces/:workspace/reasoning/ask` | Noncanonical provider answer over authorized evidence |
 
 Event reads accept `include=canon|canon+draft`, paired `cursorT` and
 `cursorEventId`, and repeated `kind` filters. Memory reads accept
@@ -82,6 +86,18 @@ documents and reapplies current access to every returned candidate. Responses
 identify the provider as `lexical` or `semantic`; the local provider is never
 presented as semantic retrieval.
 
+Pull reasoning defaults to `local-evidence-v1`, an explicitly `extractive`
+provider that briefs ranked memory and optional actor state. A host may inject a
+`model` provider through `ApiDependencies.reasoner`. Provider citations are
+restricted to the authorized evidence supplied for that request. Questions and
+answers are not appended to Fold implicitly.
+
+Human steering writes are restricted to workspace owners and admins. Actor,
+author, workspace, and capture identity are derived by the server, every
+lifecycle transition is validated against replay before append, and intention
+records are rejected from the generic event route. Workspace members may read
+steering state but cannot mutate it.
+
 Each workspace uses an opaque SHA-256 journal filename and one serialized SDK
 instance. Appends use complete-line JSONL with `sync: true`. This is an
 in-process transaction boundary; deploying multiple service processes against
@@ -90,5 +106,6 @@ append semantics.
 
 TLS termination, credential rotation, external identity providers, distributed
 transactions, authenticated external sensor ingestion, recovery actuation,
-production vector infrastructure, rate limits, and CORS policy remain deployment concerns rather
+production model/vector infrastructure, automated salience producers, rate
+limits, and CORS policy remain deployment concerns rather
 than implicit behavior in this local service.

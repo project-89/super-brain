@@ -31,6 +31,7 @@ import {
   type RankedMemoryRecallRequest,
   type TrajectoryTaskReport,
   type FoldSdkActivityContext,
+  type FoldSdkSteeringContext,
 } from "@_89/fold-sdk";
 import { JournalError } from "@_89/fold-storage";
 import type { TerminalManagerSignal } from "@_89/fold-activity";
@@ -41,12 +42,21 @@ import {
   type TrajectoryInput,
 } from "@_89/fold-trajectory";
 import { z, ZodError } from "zod";
+import {
+  INTENTION_EVENT_NODE_KIND,
+  type IntentionEnd,
+  type SurfacedCandidate,
+} from "@_89/fold-drives";
 
 import type {
   ApiDependencies,
   AuthenticatedSubject,
 } from "./types.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
+import {
+  LocalEvidenceReasoner,
+  validateReasoningResult,
+} from "./reasoning.js";
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 
@@ -116,6 +126,15 @@ const recallRequestSchema = z
 const rankedRecallRequestSchema = recallRequestSchema
   .omit({ candidates: true })
   .extend({ query: z.string().trim().min(1).max(500) })
+  .strict();
+
+const reasoningRequestSchema = recallRequestSchema
+  .omit({ candidates: true })
+  .extend({
+    question: z.string().trim().min(1).max(2_000),
+    actorId: z.string().trim().min(1).max(300).optional(),
+    limit: z.number().int().min(1).max(10).optional(),
+  })
   .strict();
 
 const causedByField = { causedBy: z.array(z.string().min(1)).optional() };
@@ -218,6 +237,69 @@ const activitySignalRecordSchema = z
     signal: activitySignalSchema,
   })
   .strict();
+
+const satisfierSchema = z
+  .object({
+    kind: z.string().trim().min(1).max(200),
+    ref: z.string().trim().min(1).max(500),
+    params: z.record(jsonValueSchema).optional(),
+  })
+  .strict();
+
+const surfacingTriggerSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("quiet") }).strict(),
+  z.object({ kind: z.literal("threshold") }).strict(),
+  z.object({ kind: z.literal("coincidence"), note: z.string().trim().min(1).max(2_000) }).strict(),
+]);
+
+const intentionEndSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("satisfied") }).strict(),
+  z.object({ kind: z.literal("expired") }).strict(),
+  z.object({ kind: z.literal("abandoned"), reason: z.string().trim().min(1).max(2_000) }).strict(),
+  z.object({ kind: z.literal("superseded"), byIntentionId: z.string().trim().min(1).max(300) }).strict(),
+]);
+
+const steeringActionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("surface"),
+    stamp: stampSchema,
+    candidate: z.object({
+      id: z.string().trim().min(1).max(300),
+      sourceDriveId: z.string().trim().min(1).max(300),
+      satisfier: satisfierSchema,
+      aim: z.string().trim().min(1).max(2_000),
+      trigger: surfacingTriggerSchema,
+    }).strict(),
+    ...causedByField,
+  }).strict(),
+  z.object({
+    action: z.literal("commit"),
+    stamp: stampSchema,
+    candidateId: z.string().trim().min(1).max(300),
+    intentionId: z.string().trim().min(1).max(300),
+    ...causedByField,
+  }).strict(),
+  z.object({
+    action: z.literal("decline"),
+    stamp: stampSchema,
+    candidateId: z.string().trim().min(1).max(300),
+    reason: z.string().trim().min(1).max(2_000),
+    ...causedByField,
+  }).strict(),
+  z.object({
+    action: z.literal("acted"),
+    stamp: stampSchema,
+    intentionId: z.string().trim().min(1).max(300),
+    ...causedByField,
+  }).strict(),
+  z.object({
+    action: z.literal("end"),
+    stamp: stampSchema,
+    intentionId: z.string().trim().min(1).max(300),
+    end: intentionEndSchema,
+    ...causedByField,
+  }).strict(),
+]);
 
 export class ApiHttpError extends Error {
   override readonly name = "ApiHttpError";
@@ -351,6 +433,21 @@ function sameAuthor(left: Author, right: Author): boolean {
 function assertAuthenticatedAuthor(event: FoldEvent, subject: AuthenticatedSubject): void {
   if (!sameAuthor(event.author, subject.author)) {
     throw new ApiHttpError(403, "author_mismatch", "Event author is not authorized by this credential");
+  }
+}
+
+function assertGenericAppendRoute(event: FoldEvent): void {
+  if (
+    event.kind.startsWith("intention.") ||
+    event.changes.some(
+      (change) => "nodeKind" in change && change.nodeKind === INTENTION_EVENT_NODE_KIND,
+    )
+  ) {
+    throw new ApiHttpError(
+      400,
+      "reserved_event_route",
+      "Intention events must use the human steering route",
+    );
   }
 }
 
@@ -541,6 +638,26 @@ function canSimulate(access: FoldSdkAccessContext, dependencies: ApiDependencies
     (access.workspaceRole === "owner" || access.workspaceRole === "admin");
 }
 
+function canSteer(access: FoldSdkAccessContext): boolean {
+  return access.workspaceRole === "owner" || access.workspaceRole === "admin";
+}
+
+function steeringContext(
+  subject: AuthenticatedSubject,
+  access: FoldSdkAccessContext,
+  actorId: string,
+): FoldSdkSteeringContext {
+  return {
+    access,
+    actorId,
+    author: subject.author,
+    capture: {
+      scope: { workspace: access.workspaceId },
+      identity: { actor: actorId },
+    },
+  };
+}
+
 function serializeTrajectoryReport(report: TrajectoryTaskReport) {
   return {
     ...report,
@@ -605,6 +722,7 @@ async function handleRequest(
     if (method === "POST") {
       const body = eventAppendSchema.parse(await readJsonBody(request, maxBodyBytes));
       assertAuthenticatedAuthor(body.event, subject);
+      assertGenericAppendRoute(body.event);
       const entry = await sdk.append(access, body.event, body.status ?? "canon");
       sendJson(response, 201, { entry });
       return;
@@ -655,6 +773,100 @@ async function handleRequest(
     sendJson(response, 200, {
       fleet,
       simulationEnabled: canSimulate(access, dependencies),
+    });
+    return;
+  }
+
+  if (resource === "steering" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    sendJson(response, 200, {
+      actors: await sdk.steeringSnapshots(access),
+      steeringEnabled: canSteer(access),
+    });
+    return;
+  }
+
+  if (resource === "steering" && resourceId !== undefined && segments.length === 5) {
+    if (method === "GET") {
+      sendJson(response, 200, { steering: await sdk.steeringSnapshot(access, resourceId) });
+      return;
+    }
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (!canSteer(access)) {
+      throw new ApiHttpError(403, "steering_access_denied", "Human steering access denied");
+    }
+    const body = steeringActionSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const context = steeringContext(subject, access, resourceId);
+    if (body.action === "surface") {
+      sendJson(response, 201, await sdk.surfaceIntentionCandidate(
+        context,
+        body.stamp,
+        body.candidate as Omit<SurfacedCandidate, "surfacedAtMs">,
+        body.causedBy,
+      ));
+    } else if (body.action === "commit") {
+      sendJson(response, 201, await sdk.commitIntentionCandidate(
+        context, body.stamp, body.candidateId, body.intentionId, body.causedBy,
+      ));
+    } else if (body.action === "decline") {
+      sendJson(response, 201, await sdk.declineIntentionCandidate(
+        context, body.stamp, body.candidateId, body.reason, body.causedBy,
+      ));
+    } else if (body.action === "acted") {
+      sendJson(response, 201, await sdk.recordIntentionAction(
+        context, body.stamp, body.intentionId, body.causedBy,
+      ));
+    } else {
+      sendJson(response, 201, await sdk.endIntention(
+        context, body.stamp, body.intentionId, body.end as IntentionEnd, body.causedBy,
+      ));
+    }
+    return;
+  }
+
+  if (resource === "reasoning" && resourceId === "ask" && segments.length === 5) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = reasoningRequestSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const ranked = await sdk.rankMemories(access, {
+      query: body.question,
+      ...(body.scope === undefined ? {} : { scope: body.scope }),
+      ...(body.tags === undefined ? {} : { tags: body.tags }),
+      ...(body.sources === undefined ? {} : { sources: body.sources }),
+      ...(body.from === undefined ? {} : { from: body.from }),
+      ...(body.to === undefined ? {} : { to: body.to }),
+      limit: body.limit ?? 5,
+    }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker());
+    const evidence = ranked.memories.map(({ memory, score }) => ({
+      memoryId: memory.id,
+      source: memory.source,
+      summary: memory.summary,
+      content: memory.content,
+      tags: memory.tags,
+      ...(score === undefined ? {} : { score }),
+    }));
+    const steering = body.actorId === undefined
+      ? undefined
+      : await sdk.steeringSnapshot(access, body.actorId);
+    const reasoner = dependencies.reasoner ?? new LocalEvidenceReasoner();
+    const result = validateReasoningResult(
+      await reasoner.answer({
+        question: body.question,
+        evidence,
+        ...(steering === undefined ? {} : { steering }),
+      }),
+      evidence,
+    );
+    sendJson(response, 200, {
+      ...result,
+      provider: reasoner.descriptor,
+      ranking: ranked.ranking,
+      evidence: evidence.map(({ memoryId, source, summary, score }) => ({
+        memoryId,
+        source,
+        summary,
+        ...(score === undefined ? {} : { score }),
+      })),
+      ...(steering === undefined ? {} : { steering }),
     });
     return;
   }

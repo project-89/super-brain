@@ -19,6 +19,13 @@ import type {
 } from "@_89/fold-trajectory";
 import type { FleetSessionSnapshot, OrphanRecoveryAction } from "@_89/fold-fleet";
 import type { TerminalSensorContext } from "@_89/fold-activity";
+import type {
+  DriveEventContext,
+  DriveSystemSnapshot,
+  Intention,
+  IntentionDecline,
+  SurfacedCandidate,
+} from "@_89/fold-drives";
 
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
@@ -138,10 +145,27 @@ export interface FoldSdkActivityContext extends TerminalSensorContext {
   readonly access: FoldSdkAccessContext;
 }
 
+export interface FoldSdkSteeringContext extends DriveEventContext {
+  readonly access: FoldSdkAccessContext;
+}
+
 export interface FleetReadModel {
   readonly rebuiltAt: string;
   readonly sessions: readonly FleetSessionSnapshot[];
   readonly recoveryActions: readonly OrphanRecoveryAction[];
+}
+
+export interface SteeringSnapshot {
+  readonly actorId: string;
+  readonly pendingCandidates: readonly SurfacedCandidate[];
+  readonly intentions: readonly Intention[];
+  readonly recentDeclines: readonly IntentionDecline[];
+  readonly driveSample?: DriveSystemSnapshot;
+}
+
+export interface SteeringMutationResult {
+  readonly event: FoldEvent;
+  readonly steering: SteeringSnapshot;
 }
 
 export type { TrajectoryTaskReport };

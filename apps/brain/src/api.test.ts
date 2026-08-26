@@ -213,6 +213,67 @@ describe("Fold API client", () => {
     expect(bodies[0]).not.toHaveProperty("capture");
   });
 
+  it("loads steering and emits server-authored lifecycle commands", async () => {
+    const steering = { actors: [], steeringEnabled: true };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(steering))
+      .mockResolvedValue(jsonResponse({}, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client.steering()).resolves.toEqual(steering);
+    await client.surfaceSteeringCandidate({
+      actorId: "agent/one",
+      sourceDriveId: "delivery",
+      satisfierKind: "task",
+      satisfierRef: "verify-release",
+      aim: "Verify the release",
+      trigger: { kind: "coincidence", note: "trajectory divergence" },
+    });
+    await client.commitSteeringCandidate("agent/one", "candidate-a");
+    await client.recordSteeringAction("agent/one", "intention-a");
+    await client.endSteeringIntention("agent/one", "intention-a", { kind: "satisfied" });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/workspaces/workspace%2Fone/steering");
+    const mutations = fetchMock.mock.calls.slice(1) as [string, RequestInit][];
+    expect(mutations.every(([url]) => url === "/api/v1/workspaces/workspace%2Fone/steering/agent%2Fone")).toBe(true);
+    const bodies = mutations.map(([, init]) => JSON.parse(String(init.body)));
+    expect(bodies.map(({ action }) => action)).toEqual(["surface", "commit", "acted", "end"]);
+    expect(bodies[0]).toMatchObject({
+      stamp: { id: expect.any(String), t: expect.any(Number) },
+      candidate: {
+        id: expect.stringMatching(/^candidate-[0-9a-f-]{36}$/),
+        sourceDriveId: "delivery",
+        satisfier: { kind: "task", ref: "verify-release" },
+        aim: "Verify the release",
+        trigger: { kind: "coincidence", note: "trajectory divergence" },
+      },
+    });
+    expect(bodies[0]).not.toHaveProperty("author");
+    expect(bodies[1].intentionId).toMatch(/^intention-[0-9a-f-]{36}$/);
+  });
+
+  it("asks for provider-labeled reasoning without writing an event", async () => {
+    const result = {
+      answer: "Relevant evidence: Rotate the token.",
+      citations: ["memory-a"],
+      provider: { id: "local-evidence-v1", kind: "extractive" },
+      ranking: { id: "local-bm25-v1", kind: "lexical", corpusSize: 1 },
+      evidence: [{ memoryId: "memory-a", source: "conversation", summary: "Rotate the token", score: 1 }],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(result));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client.askReasoning("How did refresh recover?", "agent-a")).resolves.toEqual(result);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/workspaces/workspace%2Fone/reasoning/ask");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      question: "How did refresh recover?",
+      actorId: "agent-a",
+      limit: 5,
+    });
+  });
+
   it("maps stable API errors and network failures", async () => {
     vi.stubGlobal(
       "fetch",

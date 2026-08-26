@@ -29,6 +29,9 @@ importers:
       '@_89/fold-activity':
         specifier: workspace:*
         version: link:../../packages/fold-activity
+      '@_89/fold-drives':
+        specifier: workspace:*
+        version: link:../../packages/fold-drives
       '@_89/fold-epistemic':
         specifier: workspace:*
         version: link:../../packages/fold-epistemic
@@ -135,6 +138,9 @@ importers:
       '@_89/fold-activity':
         specifier: workspace:*
         version: link:../fold-activity
+      '@_89/fold-drives':
+        specifier: workspace:*
+        version: link:../fold-drives
       '@_89/fold-epistemic':
         specifier: workspace:*
         version: link:../fold-epistemic

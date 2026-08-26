@@ -23,6 +23,7 @@
   "dependencies": {
     "@_89/fold": "workspace:*",
     "@_89/fold-activity": "workspace:*",
+    "@_89/fold-drives": "workspace:*",
     "@_89/fold-epistemic": "workspace:*",
     "@_89/fold-sdk": "workspace:*",
     "@_89/fold-storage": "workspace:*",

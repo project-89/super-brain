@@ -10,7 +10,11 @@ import type {
   ProjectionResponse,
   RecalledMemory,
   RankedMemoryRecallResult,
+  ReasoningResponse,
   SharedDecisionTree,
+  SteeringCandidateDraft,
+  SteeringIntentionEnd,
+  SteeringResponse,
   TrajectoryImportBundle,
   TrajectoryInput,
   TrajectoryTaskReport,
@@ -115,6 +119,62 @@ export class FoldApiClient {
 
   async fleet(): Promise<FleetResponse> {
     return this.request<FleetResponse>(this.workspacePath("fleet"));
+  }
+
+  async steering(): Promise<SteeringResponse> {
+    return this.request<SteeringResponse>(this.workspacePath("steering"));
+  }
+
+  private async steer(actorId: string, body: Readonly<Record<string, unknown>>): Promise<void> {
+    await this.request(`${this.workspacePath("steering")}/${encodeURIComponent(actorId)}`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, stamp: nextEventStamp() }),
+    });
+  }
+
+  async surfaceSteeringCandidate(draft: SteeringCandidateDraft): Promise<void> {
+    const now = Date.now();
+    await this.steer(draft.actorId, {
+      action: "surface",
+      candidate: {
+        id: `candidate-${uuidV7(now)}`,
+        sourceDriveId: draft.sourceDriveId,
+        satisfier: { kind: draft.satisfierKind, ref: draft.satisfierRef },
+        aim: draft.aim,
+        trigger: draft.trigger,
+      },
+    });
+  }
+
+  async commitSteeringCandidate(actorId: string, candidateId: string): Promise<void> {
+    await this.steer(actorId, {
+      action: "commit",
+      candidateId,
+      intentionId: `intention-${uuidV7()}`,
+    });
+  }
+
+  async declineSteeringCandidate(actorId: string, candidateId: string, reason: string): Promise<void> {
+    await this.steer(actorId, { action: "decline", candidateId, reason });
+  }
+
+  async recordSteeringAction(actorId: string, intentionId: string): Promise<void> {
+    await this.steer(actorId, { action: "acted", intentionId });
+  }
+
+  async endSteeringIntention(
+    actorId: string,
+    intentionId: string,
+    end: SteeringIntentionEnd,
+  ): Promise<void> {
+    await this.steer(actorId, { action: "end", intentionId, end });
+  }
+
+  async askReasoning(question: string, actorId?: string): Promise<ReasoningResponse> {
+    return this.request<ReasoningResponse>(this.workspacePath("reasoning/ask"), {
+      method: "POST",
+      body: JSON.stringify({ question, ...(actorId === undefined ? {} : { actorId }), limit: 5 }),
+    });
   }
 
   private async recordSimulatedActivitySignal(

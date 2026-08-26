@@ -17,6 +17,14 @@ export const DRIVE_SATIATION_NODE_KIND = "x.fold.drive-satiation";
 export const DRIVE_WEAR_TRANSITION_NODE_KIND = "x.fold.drive-wear-transition";
 export const INTENTION_EVENT_NODE_KIND = "x.fold.intention-event";
 
+const INTENTION_EVENT_TYPE_BY_KIND = {
+  "intention.surfaced": "surfaced",
+  "intention.committed": "committed",
+  "intention.declined": "declined",
+  "intention.acted": "acted",
+  "intention.ended": "ended",
+} as const;
+
 const DERIVED_PROVENANCE: Provenance = {
   basis: "derived",
   method: { kind: "system", id: "@_89/fold-drives" },
@@ -449,6 +457,25 @@ export function intentionRecordsFromEvent(event: FoldEvent): IntentionRecord[] {
     }
   }
   return records;
+}
+
+export function validateIntentionEventEnvelope(event: FoldEvent): void {
+  const records = intentionRecordsFromEvent(event);
+  const expected = INTENTION_EVENT_TYPE_BY_KIND[
+    event.kind as keyof typeof INTENTION_EVENT_TYPE_BY_KIND
+  ];
+  if (expected === undefined) {
+    if (records.length > 0) {
+      throw new DriveEventError(`intention record ${event.id} requires an intention event kind`);
+    }
+    return;
+  }
+  if (event.changes.length !== 1 || records.length !== 1) {
+    throw new DriveEventError(`intention event ${event.id} must contain exactly one intention record`);
+  }
+  if (records[0]?.eventType !== expected) {
+    throw new DriveEventError(`intention event ${event.id} contains the wrong record type`);
+  }
 }
 
 function snapshotFromPayload(event: FoldEvent, payload: Record<string, JsonValue>): DriveSystemSnapshot {
