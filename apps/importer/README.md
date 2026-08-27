@@ -29,5 +29,11 @@ FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- import \
 
 `FOLD_API_URL`, `FOLD_API_WORKSPACE`, and `FOLD_TRANSCRIPT_VAULT` may replace
 their command-line options. Credentials are accepted only through
-`FOLD_API_TOKEN`, keeping them out of command arguments and CLI output. Network and
-transient server failures are retried; an exact rerun is an API-level no-op.
+`FOLD_API_TOKEN`, keeping them out of command arguments and CLI output. Network,
+rate-limit, and transient server failures are retried; an exact rerun is an
+API-level no-op.
+
+For an interrupted import into the same workspace and vault, add `--resume`.
+The importer loads committed run IDs from the authenticated API and skips only
+those runs, avoiding repeated redaction and delivery of completed artifacts.
+Uncommitted runs still pass source-stability, redaction, and delivery checks.

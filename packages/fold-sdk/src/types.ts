@@ -39,6 +39,7 @@ import type {
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
 export interface FoldSdkStore {
+  readonly stableReads?: boolean;
   read(options?: { readonly missing?: "error" | "empty" }): Promise<{
     readonly entries: readonly FoldLogEntry[];
   }>;

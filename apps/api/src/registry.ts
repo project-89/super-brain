@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
+  chmod,
   open,
   readFile,
   unlink,
@@ -113,14 +114,22 @@ async function acquireWriterLease(path: string, lease: WriterLease): Promise<Fil
 }
 
 class DurableJournalStore implements FoldSdkStore {
+  readonly stableReads = true;
+  private entries: FoldLogEntry[] | undefined;
+
   constructor(private readonly journal: FoldJournal) {}
 
-  read(options: ReadJournalOptions = {}) {
-    return this.journal.read(options);
+  async read(options: ReadJournalOptions = {}) {
+    if (this.entries === undefined) {
+      const read = await this.journal.read(options);
+      this.entries = [...read.entries];
+    }
+    return { entries: [...this.entries] };
   }
 
-  append(entry: FoldLogEntry): Promise<void> {
-    return this.journal.append(entry, { sync: true });
+  async append(entry: FoldLogEntry): Promise<void> {
+    await this.journal.append(entry, { sync: true });
+    this.entries?.push(entry);
   }
 }
 
@@ -145,7 +154,8 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
   }
 
   private async initialize(): Promise<void> {
-    await mkdir(this.dataDirectory, { recursive: true });
+    await mkdir(this.dataDirectory, { recursive: true, mode: 0o700 });
+    await chmod(this.dataDirectory, 0o700);
     this.lockHandle = await acquireWriterLease(this.lockPath, this.lease);
   }
 
@@ -159,6 +169,9 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
     let sdk = this.sdks.get(workspaceId);
     if (sdk === undefined) {
       const path = join(this.dataDirectory, workspaceJournalFilename(workspaceId));
+      await chmod(path, 0o600).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      });
       sdk = new FoldSdk(new DurableJournalStore(new FoldJournal(path)));
       this.sdks.set(workspaceId, sdk);
     }

@@ -215,7 +215,7 @@ export async function appendJournalRecord(
 ): Promise<void> {
   const encoded = encodeJournalRecord(record);
   await ensureParent(path);
-  const handle = await open(path, "a+");
+  const handle = await open(path, "a+", 0o600);
   try {
     const stat = await handle.stat();
     if (stat.size > 0) {
@@ -244,7 +244,7 @@ export async function rewriteJournalAtomically(
   const encoded = records.map(encodeJournalRecord).join("");
   await ensureParent(path);
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  const handle = await open(temporaryPath, "wx");
+  const handle = await open(temporaryPath, "wx", 0o600);
   try {
     await handle.writeFile(encoded, "utf8");
     if (options.sync === true) await handle.sync();

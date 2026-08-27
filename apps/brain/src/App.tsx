@@ -19,7 +19,7 @@ import { useEffect, useMemo, useState } from "react";
 import { FoldApiClient } from "./api";
 import { initialConnection, saveConnection } from "./connection";
 import { useSnapshot } from "./use-snapshot";
-import type { ConnectionSettings, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
+import type { BrainPage, ConnectionSettings, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
 import { ConnectionDialog } from "./components/ConnectionDialog";
 import { MemoryDialog } from "./components/MemoryDialog";
 import { Modal } from "./components/Modal";
@@ -33,7 +33,7 @@ import { FleetPage } from "./pages/FleetPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { SteeringPage } from "./pages/SteeringPage";
 
-type Page = "overview" | "memory" | "history" | "trajectories" | "fleet" | "steering" | "events" | "state";
+type Page = BrainPage;
 type Theme = "light" | "dark";
 
 const PAGES: readonly { readonly id: Page; readonly label: string; readonly icon: typeof LayoutDashboard }[] = [
@@ -70,7 +70,7 @@ export default function App() {
   const [mutationPending, setMutationPending] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [mutationError, setMutationError] = useState<string>();
-  const { snapshot, loading, refreshing, error, refresh } = useSnapshot(connection);
+  const { snapshot, loading, refreshing, error, refresh } = useSnapshot(connection, page);
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());

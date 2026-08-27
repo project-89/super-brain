@@ -9,6 +9,7 @@ import {
   parseCodexTranscript,
   projectForRoot,
   deliverTranscriptBundle,
+  listDeliveredTranscriptRunIds,
   scanTranscripts,
   storeRedactedArtifact,
 } from "../src/index.js";
@@ -122,7 +123,27 @@ describe("transcript source adapters", () => {
     expect(content).not.toContain("never store this");
     expect(content).not.toContain("also never store this");
     expect(content).toContain('"excluded":true');
+    expect((await stat(vault)).mode & 0o777).toBe(0o700);
     expect((await stat(target)).mode & 0o777).toBe(0o600);
+  });
+
+  it("rejects an artifact whose source changed after scanning", async () => {
+    const path = await fixture("66666666-6666-4666-8666-666666666666.jsonl", [{
+      type: "user",
+      sessionId: "66666666-6666-4666-8666-666666666666",
+      uuid: "message-a",
+      cwd: "/work/changing",
+      timestamp: "2026-08-20T12:00:00.000Z",
+      message: { role: "user", content: "first" },
+    }]);
+    const parsed = await parseClaudeTranscript(path);
+    await writeFile(path, `${JSON.stringify({ type: "summary", timestamp: "2026-08-20T12:00:01.000Z" })}\n`, {
+      encoding: "utf8",
+      flag: "a",
+    });
+
+    await expect(storeRedactedArtifact(parsed, await mkdtemp(join(tmpdir(), "fold-vault-"))))
+      .rejects.toThrow("Transcript source changed after it was scanned");
   });
 
   it("produces a metadata-only dry-run report and deduplicates source-qualified runs", async () => {
@@ -176,5 +197,63 @@ describe("transcript source adapters", () => {
       maxAttempts: 1,
       fetcher: deniedFetcher as unknown as typeof fetch,
     })).rejects.not.toThrow(/private-token/);
+  });
+
+  it("loads committed run ids for an authenticated resume", async () => {
+    const path = await fixture("77777777-7777-4777-8777-777777777777.jsonl", [{
+      type: "user",
+      sessionId: "77777777-7777-4777-8777-777777777777",
+      uuid: "message-a",
+      cwd: "/work/resume",
+      timestamp: "2026-08-20T12:00:00.000Z",
+      message: { role: "user", content: "hello" },
+    }]);
+    const run = (await parseClaudeTranscript(path)).bundle.run;
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ runs: [run] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    await expect(listDeliveredTranscriptRunIds({
+      apiUrl: "http://127.0.0.1:3000/",
+      workspaceId: "workspace/one",
+      bearerToken: "private-token",
+      fetcher: fetcher as unknown as typeof fetch,
+    })).resolves.toEqual(new Set([run.id]));
+    expect(fetcher).toHaveBeenCalledWith(
+      "http://127.0.0.1:3000/v1/workspaces/workspace%2Fone/transcript-runs",
+      { headers: { authorization: "Bearer private-token" } },
+    );
+  });
+
+  it("honors a rate-limit retry before delivering the same bundle", async () => {
+    const path = await fixture("88888888-8888-4888-8888-888888888888.jsonl", [{
+      type: "user",
+      sessionId: "88888888-8888-4888-8888-888888888888",
+      uuid: "message-a",
+      cwd: "/work/rate-limit",
+      timestamp: "2026-08-20T12:00:00.000Z",
+      message: { role: "user", content: "hello" },
+    }]);
+    const bundle = (await parseClaudeTranscript(path)).bundle;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: {
+        code: "rate_limited",
+        message: "Request rate limit exceeded",
+      } }), { status: 429, headers: { "content-type": "application/json", "retry-after": "0" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        imported: true,
+        eventCount: 4,
+        run: bundle.run,
+      }), { status: 201, headers: { "content-type": "application/json" } }));
+
+    await expect(deliverTranscriptBundle(bundle, {
+      apiUrl: "http://127.0.0.1:3000",
+      workspaceId: "workspace-one",
+      bearerToken: "private-token",
+      maxAttempts: 2,
+      fetcher: fetcher as unknown as typeof fetch,
+    })).resolves.toMatchObject({ imported: true, eventCount: 4 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
   });
 });

@@ -5,6 +5,7 @@ import {
   makeTranscriptChunkEvent,
   makeTranscriptProjectEvent,
   makeTranscriptRunEvent,
+  extendTranscriptCatalog,
   rebuildTranscriptCatalog,
   TranscriptEventError,
   TranscriptProjectionError,
@@ -114,6 +115,21 @@ describe("transcript catalog", () => {
     expect(catalog.projects.get(project.id)).toEqual(project);
     expect(catalog.runs.get(run.id)).toEqual(run);
     expect(catalog.chunksByRun.get(run.id)?.[0]).toEqual(chunk);
+  });
+
+  it("extends a validated catalog without mutating its prior snapshot", () => {
+    const base = rebuildTranscriptCatalog([
+      makeTranscriptProjectEvent(context, stamp(1), project),
+      makeTranscriptArtifactEvent(context, stamp(2), artifact),
+    ]);
+    const extended = extendTranscriptCatalog(base, [
+      makeTranscriptRunEvent(context, stamp(3), run),
+      makeTranscriptChunkEvent(context, stamp(4), chunk),
+    ]);
+
+    expect(base.runs.size).toBe(0);
+    expect(extended.runs.get(run.id)).toEqual(run);
+    expect(extended.chunksByRun.get(run.id)).toEqual([chunk]);
   });
 
   it("rejects masquerading records and unavailable references", () => {

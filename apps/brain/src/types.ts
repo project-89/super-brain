@@ -124,6 +124,8 @@ export interface ProjectionResponse {
   readonly state: SerializedFoldState;
 }
 
+export type BrainPage = "overview" | "memory" | "history" | "trajectories" | "fleet" | "steering" | "events" | "state";
+
 export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
   readonly memories: readonly RecalledMemory[];

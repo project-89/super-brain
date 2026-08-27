@@ -262,6 +262,25 @@ describe("Fold HTTP API", () => {
         { token: "token-a" },
       );
       expect(all.body.entries.map((entry: any) => entry.event.id)).toEqual(["event-a", "event-b"]);
+      expect(all.body.total).toBe(2);
+
+      const bounded = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/events?include=canon%2Bdraft&limit=1",
+        { token: "token-a" },
+      );
+      expect(bounded.body).toMatchObject({ total: 2 });
+      expect(bounded.body.entries.map((entry: any) => entry.event.id)).toEqual(["event-b"]);
+
+      const invalidLimit = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/events?limit=0",
+        { token: "token-a" },
+      );
+      expect(invalidLimit).toMatchObject({
+        status: 400,
+        body: { error: { code: "invalid_query" } },
+      });
 
       const projection = await apiRequest(
         api.baseUrl,

@@ -71,6 +71,7 @@ import {
   makeTranscriptChunkEvent,
   makeTranscriptProjectEvent,
   makeTranscriptRunEvent,
+  extendTranscriptCatalog,
   rebuildTranscriptCatalog,
   transcriptImportBundleSchema,
   validateTranscriptEventEnvelope,
@@ -222,8 +223,19 @@ function validateReadOptions(options: FoldSdkReadOptions): "canon" | "canon+draf
   return include;
 }
 
+function transcriptCatalogCacheKey(access: FoldSdkAccessContext): string {
+  return JSON.stringify([
+    access.principalId,
+    access.workspaceId,
+    access.workspaceRole,
+    Object.entries(access.spaceRoles).sort(([left], [right]) => left.localeCompare(right)),
+  ]);
+}
+
 export class FoldSdk {
   private queue: Promise<void> = Promise.resolve();
+  private storedEntries: FoldLogEntry[] | undefined;
+  private readonly transcriptCatalogs = new Map<string, TranscriptCatalog>();
 
   constructor(private readonly store: FoldSdkStore) {}
 
@@ -237,6 +249,9 @@ export class FoldSdk {
   }
 
   private async readStoredEntries(): Promise<FoldLogEntry[]> {
+    if (this.store.stableReads === true && this.storedEntries !== undefined) {
+      return this.storedEntries;
+    }
     const read = await this.store.read({ missing: "empty" });
     const entries = read.entries.map((entry) => {
       validateStatus(entry.status);
@@ -249,6 +264,7 @@ export class FoldSdk {
       return { event, status: entry.status };
     });
     validateProducerOrder(entries.map((entry) => entry.event));
+    if (this.store.stableReads === true) this.storedEntries = entries;
     return entries;
   }
 
@@ -269,6 +285,8 @@ export class FoldSdk {
     validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
     const entry = { event: parsed, status } as const;
     await this.store.append(entry);
+    this.storedEntries?.push(entry);
+    if (parsed.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
     return entry;
   }
 
@@ -286,9 +304,15 @@ export class FoldSdk {
       assertCanAppendEvent(candidate, access);
       return candidate;
     });
+    if (parsed.length === 0) return parsed;
     const entries = await this.readStoredEntries();
     validateProducerOrder([...entries.map((entry) => entry.event), ...parsed]);
-    for (const event of parsed) await this.store.append({ event, status: "canon" });
+    for (const event of parsed) {
+      const entry = { event, status: "canon" as const };
+      await this.store.append(entry);
+      this.storedEntries?.push(entry);
+      if (event.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
+    }
     return parsed;
   }
 
@@ -359,8 +383,13 @@ export class FoldSdk {
   }
 
   private async transcriptProjection(access: FoldSdkAccessContext): Promise<TranscriptCatalog> {
+    const cacheKey = transcriptCatalogCacheKey(access);
+    const cached = this.transcriptCatalogs.get(cacheKey);
+    if (this.store.stableReads === true && cached !== undefined) return cached;
     const entries = await this.entriesForAccess(access, { include: "canon" });
-    return rebuildTranscriptCatalog(entries.map((entry) => entry.event));
+    const catalog = rebuildTranscriptCatalog(entries.map((entry) => entry.event));
+    if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, catalog);
+    return catalog;
   }
 
   transcriptProjects(
@@ -449,7 +478,12 @@ export class FoldSdk {
 
       const entries = await this.entriesForAccess(context.access, { include: "canon" });
       const events = entries.map((entry) => entry.event);
-      const catalog = rebuildTranscriptCatalog(events);
+      const cacheKey = transcriptCatalogCacheKey(context.access);
+      const cachedCatalog = this.transcriptCatalogs.get(cacheKey);
+      const catalog = this.store.stableReads === true && cachedCatalog !== undefined
+        ? cachedCatalog
+        : rebuildTranscriptCatalog(events);
+      if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, catalog);
       const same = (left: unknown, right: unknown): boolean =>
         JSON.stringify(left) === JSON.stringify(right);
       const assertSame = <T>(existing: T | undefined, candidate: T, label: string): boolean => {
@@ -485,6 +519,7 @@ export class FoldSdk {
           records.push({ type: "chunk", value: chunk });
         }
       }
+      if (records.length === 0) return { events: [], run: bundle.run };
 
       const maxT = events.reduce((maximum, event) => Math.max(maximum, event.at.t), -1);
       const firstT = Math.max(options.importedAt, maxT + 1);
@@ -501,8 +536,9 @@ export class FoldSdk {
         return makeTranscriptChunkEvent(context, stamp, record.value);
       });
 
-      rebuildTranscriptCatalog([...events, ...newEvents]);
+      const nextCatalog = extendTranscriptCatalog(catalog, newEvents);
       await this.appendSequenceInternal(context.access, newEvents);
+      if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, nextCatalog);
       return { events: newEvents, run: bundle.run };
     });
   }

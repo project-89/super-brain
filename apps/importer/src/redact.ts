@@ -1,10 +1,11 @@
 import { createReadStream } from "node:fs";
-import { mkdir, open, rename, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { transcriptImportBundleSchema } from "@_89/fold-transcript";
 
+import { fileMetadata, sha256File } from "./files.js";
 import { isRecord } from "./json.js";
 import type { ParsedTranscript } from "./types.js";
 
@@ -87,6 +88,20 @@ export async function storeRedactedArtifact(
   vaultRoot: string,
 ): Promise<ParsedTranscript> {
   const { artifact } = transcript.bundle;
+  const beforeHash = await fileMetadata(transcript.sourcePath);
+  const sourceSha256 = await sha256File(transcript.sourcePath);
+  const afterHash = await fileMetadata(transcript.sourcePath);
+  if (
+    sourceSha256 !== artifact.sha256 ||
+    beforeHash.byteLength !== artifact.byteLength ||
+    beforeHash.modifiedAt !== artifact.modifiedAt ||
+    afterHash.byteLength !== artifact.byteLength ||
+    afterHash.modifiedAt !== artifact.modifiedAt
+  ) {
+    throw new Error("Transcript source changed after it was scanned; retry the import");
+  }
+  await mkdir(vaultRoot, { recursive: true, mode: 0o700 });
+  await chmod(vaultRoot, 0o700);
   const target = join(vaultRoot, artifact.source, artifact.sha256.slice(0, 2), `${artifact.sha256}.jsonl`);
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.tmp`;
@@ -106,6 +121,10 @@ export async function storeRedactedArtifact(
       const redacted = redactJsonValue(safe);
       redactionCount += redacted.count;
       await output.writeFile(`${JSON.stringify(redacted.value)}\n`, "utf8");
+    }
+    const storedMetadata = await fileMetadata(transcript.sourcePath);
+    if (storedMetadata.byteLength !== artifact.byteLength || storedMetadata.modifiedAt !== artifact.modifiedAt) {
+      throw new Error("Transcript source changed while it was being stored; retry the import");
     }
     await output.sync();
     await output.close();

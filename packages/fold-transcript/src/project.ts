@@ -30,11 +30,16 @@ function insertUnique<T>(map: Map<string, T>, id: string, value: T, label: strin
   }
 }
 
-export function rebuildTranscriptCatalog(events: readonly FoldEvent[]): TranscriptCatalog {
-  const projects = new Map<string, TranscriptProject>();
-  const artifacts = new Map<string, TranscriptArtifact>();
-  const runs = new Map<string, TranscriptRun>();
-  const chunksByRun = new Map<string, TranscriptChunk[]>();
+function projectTranscriptEvents(
+  events: readonly FoldEvent[],
+  seed?: TranscriptCatalog,
+): TranscriptCatalog {
+  const projects = new Map(seed?.projects);
+  const artifacts = new Map(seed?.artifacts);
+  const runs = new Map(seed?.runs);
+  const chunksByRun = new Map(
+    [...(seed?.chunksByRun ?? [])].map(([runId, chunks]) => [runId, [...chunks]]),
+  );
 
   for (const event of [...events].sort(compareEventKeys)) {
     validateTranscriptEventEnvelope(event);
@@ -78,4 +83,15 @@ export function rebuildTranscriptCatalog(events: readonly FoldEvent[]): Transcri
   }
 
   return { projects, artifacts, runs, chunksByRun };
+}
+
+export function rebuildTranscriptCatalog(events: readonly FoldEvent[]): TranscriptCatalog {
+  return projectTranscriptEvents(events);
+}
+
+export function extendTranscriptCatalog(
+  catalog: TranscriptCatalog,
+  events: readonly FoldEvent[],
+): TranscriptCatalog {
+  return projectTranscriptEvents(events, catalog);
 }

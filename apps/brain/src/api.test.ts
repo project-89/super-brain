@@ -50,12 +50,16 @@ describe("Fold API client", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entries: [] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await client.listEvents({ includeDrafts: true, kinds: ["memory.recorded", "agent status"] });
+    await client.listEvents({
+      includeDrafts: true,
+      kinds: ["memory.recorded", "agent status"],
+      limit: 200,
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      "/api/v1/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status",
+      "/api/v1/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200",
     );
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret-token");
   });

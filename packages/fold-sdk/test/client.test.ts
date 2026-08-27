@@ -4,6 +4,16 @@ import { FoldSdk } from "../src/index.js";
 import { access, event, MemoryStore } from "./helpers.js";
 
 describe("Fold SDK producer and consumer API", () => {
+  it("caches validated entries only for stores that guarantee stable reads", async () => {
+    const store = new MemoryStore(true);
+    const sdk = new FoldSdk(store);
+    await sdk.append(access(), event({ id: "event-a", t: 1 }));
+    await sdk.append(access(), event({ id: "event-b", t: 2 }));
+    await sdk.listEntries(access());
+
+    expect(store.readCount).toBe(1);
+  });
+
   it("appends canonical entries and returns them in Fold order", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.append(access(), event({ id: "event-b", t: 2 }));

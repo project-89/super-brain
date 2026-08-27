@@ -53,6 +53,11 @@ to a `0700` content-addressed vault tree with `0600` files. Common token, key,
 password, bearer, AWS key, and private-key patterns are replaced with
 `[REDACTED]`. The original file remains untouched.
 
+The adapter verifies file size and modification time across parsing and hashing,
+and the vault writer verifies the source hash again before storage. A transcript
+that changes during either phase is rejected for retry instead of producing a
+mismatched artifact and metadata bundle.
+
 `artifact.stored: true` means the importer successfully persisted that local
 vault copy. The API stores only artifact metadata and does not serve or assume
 access to client-local vault content. A remote or multi-user deployment needs a
@@ -76,12 +81,15 @@ FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- import \
   --api-url http://127.0.0.1:3000 \
   --workspace local \
   --vault ~/.super-brain/transcript-vault \
-  --confirm
+  --confirm \
+  --resume
 ```
 
 Use `--claude-root`, `--codex-root`, and `--limit` to scope a batch. API URL,
 workspace, token, and vault also accept the environment variables documented in
-`apps/importer/README.md`. The bearer token is never written to CLI output.
+`apps/importer/README.md`. `--resume` queries the authenticated run catalog and
+skips IDs already committed to that workspace, which avoids repeating completed
+work after interruption. The bearer token is never written to CLI output.
 
 ## Delivery Surface
 

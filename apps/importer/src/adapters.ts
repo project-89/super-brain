@@ -11,8 +11,30 @@ import type { ParsedTranscript } from "./types.js";
 
 const PARSER_VERSION = "1";
 
-async function artifactFor(path: string, source: TranscriptSource, parserId: string): Promise<TranscriptArtifact> {
-  const [sha256, metadata] = await Promise.all([sha256File(path), fileMetadata(path)]);
+interface SourceMetadata {
+  readonly byteLength: number;
+  readonly modifiedAt: string;
+}
+
+function sameMetadata(left: SourceMetadata, right: SourceMetadata): boolean {
+  return left.byteLength === right.byteLength && left.modifiedAt === right.modifiedAt;
+}
+
+async function artifactFor(
+  path: string,
+  source: TranscriptSource,
+  parserId: string,
+  parsedMetadata: SourceMetadata,
+): Promise<TranscriptArtifact> {
+  const beforeHash = await fileMetadata(path);
+  if (!sameMetadata(parsedMetadata, beforeHash)) {
+    throw new Error("Transcript source changed while it was being parsed; retry the scan");
+  }
+  const sha256 = await sha256File(path);
+  const metadata = await fileMetadata(path);
+  if (!sameMetadata(beforeHash, metadata)) {
+    throw new Error("Transcript source changed while it was being hashed; retry the scan");
+  }
   return {
     id: `artifact-${sha256}`,
     source,
@@ -60,6 +82,7 @@ function role(value: unknown): "user" | "assistant" | "developer" | "system" | "
 }
 
 export async function parseClaudeTranscript(path: string): Promise<ParsedTranscript> {
+  const parsedMetadata = await fileMetadata(path);
   const source = "claude-code" as const;
   const builder = new TranscriptBuilder(source, nativeIdFromFilename(path));
   const knownTypes = new Set([
@@ -109,11 +132,12 @@ export async function parseClaudeTranscript(path: string): Promise<ParsedTranscr
     builder.countRecord();
     builder.countUnknown();
   });
-  const artifact = await artifactFor(path, source, "claude-jsonl");
+  const artifact = await artifactFor(path, source, "claude-jsonl", parsedMetadata);
   return { sourcePath: path, bundle: builder.finish(artifact) };
 }
 
 export async function parseCodexTranscript(path: string): Promise<ParsedTranscript> {
+  const parsedMetadata = await fileMetadata(path);
   const source = "codex" as const;
   const builder = new TranscriptBuilder(source, nativeIdFromFilename(path));
   await visitJsonl(path, (record) => {
@@ -155,6 +179,6 @@ export async function parseCodexTranscript(path: string): Promise<ParsedTranscri
     builder.countRecord();
     builder.countUnknown();
   });
-  const artifact = await artifactFor(path, source, "codex-jsonl");
+  const artifact = await artifactFor(path, source, "codex-jsonl", parsedMetadata);
   return { sourcePath: path, bundle: builder.finish(artifact) };
 }

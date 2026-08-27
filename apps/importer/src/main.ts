@@ -2,7 +2,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { deliverTranscriptBundle } from "./delivery.js";
+import { deliverTranscriptBundle, listDeliveredTranscriptRunIds } from "./delivery.js";
 import { storeRedactedArtifact } from "./redact.js";
 import { scanTranscripts } from "./scan.js";
 
@@ -83,6 +83,14 @@ async function main(): Promise<void> {
 
   if (delivery === undefined) throw new TypeError("transcript delivery configuration is unavailable");
 
+  const deliveredRunIds = hasFlag("--resume")
+    ? await listDeliveredTranscriptRunIds({
+        apiUrl: delivery.apiUrl,
+        workspaceId: delivery.workspaceId,
+        bearerToken: delivery.bearerToken,
+      })
+    : new Set<string>();
+
   const results: Array<{
     readonly runId: string;
     readonly source: string;
@@ -91,6 +99,15 @@ async function main(): Promise<void> {
     readonly error?: string;
   }> = [];
   for (const transcript of report.transcripts) {
+    if (deliveredRunIds.has(transcript.bundle.run.id)) {
+      results.push({
+        runId: transcript.bundle.run.id,
+        source: transcript.bundle.run.source,
+        imported: false,
+        eventCount: 0,
+      });
+      continue;
+    }
     try {
       const stored = await storeRedactedArtifact(transcript, delivery.vaultRoot);
       const delivered = await deliverTranscriptBundle(stored.bundle, {
@@ -119,6 +136,7 @@ async function main(): Promise<void> {
     deliveredRuns: results.length - deliveryFailures,
     newRuns: results.filter((result) => result.imported === true).length,
     unchangedRuns: results.filter((result) => result.imported === false).length,
+    resumedRuns: deliveredRunIds.size,
     deliveryFailures,
     results,
   }, null, 2)}\n`);

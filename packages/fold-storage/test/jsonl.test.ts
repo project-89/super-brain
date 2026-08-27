@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -26,6 +26,7 @@ describe("JSONL journal", () => {
     const bytes = await readFile(path, "utf8");
     expect(bytes.endsWith("\n")).toBe(true);
     expect(bytes.trimEnd().split("\n")).toHaveLength(2);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
 
     const reopened = await new FoldJournal(path).replay({ include: "canon" });
     expect(reopened.entries.map(({ event }) => event.id)).toEqual(["event-001", "event-002"]);
@@ -57,5 +58,6 @@ describe("JSONL journal", () => {
     const read = await readJournal(source);
     await rewriteJournalAtomically(target, read.records);
     expect(await readFile(target)).toEqual(await readFile(source));
+    expect((await stat(target)).mode & 0o777).toBe(0o600);
   });
 });

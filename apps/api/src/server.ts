@@ -535,6 +535,15 @@ function finiteQueryNumber(url: URL, key: string): number | undefined {
   return value;
 }
 
+function positiveIntegerQuery(url: URL, key: string, maximum: number): number | undefined {
+  const value = finiteQueryNumber(url, key);
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new ApiHttpError(400, "invalid_query", `${key} must be an integer within [1, ${maximum}]`);
+  }
+  return value;
+}
+
 function parsedRecallRequest(input: unknown): RecallRequest {
   const parsed = recallRequestSchema.parse(input);
   return {
@@ -736,12 +745,16 @@ async function handleRequest(
     if (method === "GET") {
       const include = includeFromUrl(url);
       const cursor = cursorFromUrl(url);
+      const limit = positiveIntegerQuery(url, "limit", 1_000);
       const entries = await sdk.listEntries(access, {
         ...(include === undefined ? {} : { include }),
         ...(cursor === undefined ? {} : { cursor }),
         ...(url.searchParams.has("kind") ? { kinds: url.searchParams.getAll("kind") } : {}),
       });
-      sendJson(response, 200, { entries });
+      sendJson(response, 200, {
+        entries: limit === undefined ? entries : entries.slice(-limit),
+        total: entries.length,
+      });
       return;
     }
     if (method === "POST") {

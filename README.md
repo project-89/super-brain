@@ -58,7 +58,8 @@ The first milestone is the risk-retirement gate from the reference document:
   Owner-authorized transcript imports and workspace-readable history queries use
   dedicated routes that cannot be bypassed through generic event append.
   Its runtime adds exact-origin CORS, bounded per-address request limiting,
-  connection timeouts, and graceful lease-releasing shutdown.
+  connection timeouts, graceful lease-releasing shutdown, and an in-process
+  validated-entry cache held behind the exclusive writer lease.
 - `@_89/super-brain` is the responsive operator client for workspace activity,
   private personal-memory lifecycle and ranked recall, trajectory import and
   analysis, historical project/run inspection, live agent fleet inspection,

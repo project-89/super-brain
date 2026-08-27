@@ -135,8 +135,9 @@ describe("Fold SDK transcript imports", () => {
   });
 
   it("keeps transcript queries inside the authenticated workspace", async () => {
-    const sdk = new FoldSdk(new MemoryStore());
+    const sdk = new FoldSdk(new MemoryStore(true));
     await sdk.importTranscript(context(), bundle, { importId: "import-a", importedAt: 1 });
+    expect(await sdk.transcriptProjects(access())).toHaveLength(1);
     expect(await sdk.transcriptProjects(access({ workspaceId: "workspace-2" }))).toEqual([]);
     expect(await sdk.transcriptRun(access({ workspaceId: "workspace-2" }), run.id)).toBeUndefined();
   });

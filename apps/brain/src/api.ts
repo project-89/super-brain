@@ -52,7 +52,10 @@ function appendRepeated(params: URLSearchParams, key: string, values?: readonly 
 }
 
 export class FoldApiClient {
-  constructor(private readonly settings: ConnectionSettings) {}
+  constructor(
+    private readonly settings: ConnectionSettings,
+    private readonly signal?: AbortSignal,
+  ) {}
 
   private workspacePath(resource: string): string {
     return `/v1/workspaces/${encodeURIComponent(this.settings.workspaceId)}/${resource}`;
@@ -64,7 +67,11 @@ export class FoldApiClient {
     if (init.body !== undefined) headers.set("content-type", "application/json");
     let response: Response;
     try {
-      response = await fetch(`${this.settings.baseUrl}${path}`, { ...init, headers });
+      response = await fetch(`${this.settings.baseUrl}${path}`, {
+        ...init,
+        headers,
+        signal: init.signal ?? this.signal,
+      });
     } catch (error) {
       throw new FoldApiError(0, "network_error", error instanceof Error ? error.message : "API request failed");
     }
@@ -80,10 +87,15 @@ export class FoldApiClient {
     return body as T;
   }
 
-  async listEvents(options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] } = {}) {
+  async listEvents(options: {
+    readonly includeDrafts?: boolean;
+    readonly kinds?: readonly string[];
+    readonly limit?: number;
+  } = {}) {
     const params = new URLSearchParams();
     if (options.includeDrafts) params.set("include", "canon+draft");
     appendRepeated(params, "kind", options.kinds);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
     const query = params.size > 0 ? `?${params.toString()}` : "";
     const response = await this.request<{ readonly entries: readonly FoldLogEntry[] }>(
       `${this.workspacePath("events")}${query}`,

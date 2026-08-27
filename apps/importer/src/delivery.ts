@@ -31,7 +31,7 @@ export class TranscriptDeliveryError extends Error {
   }
 }
 
-function endpoint(options: TranscriptDeliveryOptions): string {
+function endpoint(options: TranscriptDeliveryOptions, resource: string): string {
   let url: URL;
   try {
     url = new URL(options.apiUrl);
@@ -47,7 +47,7 @@ function endpoint(options: TranscriptDeliveryOptions): string {
   if (options.bearerToken.trim().length === 0) {
     throw new TypeError("transcript bearer token must not be empty");
   }
-  return `${options.apiUrl.replace(/\/+$/, "")}/v1/workspaces/${encodeURIComponent(options.workspaceId)}/transcript-imports`;
+  return `${options.apiUrl.replace(/\/+$/, "")}/v1/workspaces/${encodeURIComponent(options.workspaceId)}/${resource}`;
 }
 
 function responseError(status: number, body: unknown): TranscriptDeliveryError {
@@ -90,7 +90,7 @@ export async function deliverTranscriptBundle(
   options: TranscriptDeliveryOptions,
 ): Promise<TranscriptDeliveryResult> {
   const bundle = transcriptImportBundleSchema.parse(input);
-  const url = endpoint(options);
+  const url = endpoint(options, "transcript-imports");
   const attempts = options.maxAttempts ?? 3;
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) {
     throw new TypeError("transcript delivery attempts must be an integer within [1, 5]");
@@ -98,6 +98,7 @@ export async function deliverTranscriptBundle(
   const fetcher = options.fetcher ?? fetch;
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let retryDelayMs = 250 * attempt;
     try {
       const response = await fetcher(url, {
         method: "POST",
@@ -110,18 +111,38 @@ export async function deliverTranscriptBundle(
       const body = await response.json().catch(() => undefined) as unknown;
       if (response.ok) return parseResult(body);
       const error = responseError(response.status, body);
-      if (![502, 503, 504].includes(response.status) || attempt === attempts) throw error;
+      if (![429, 502, 503, 504].includes(response.status) || attempt === attempts) throw error;
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get("retry-after"));
+        if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+          retryDelayMs = Math.min(60_000, Math.ceil(retryAfterSeconds * 1_000));
+        }
+      }
       lastError = error;
     } catch (error) {
       if (error instanceof TranscriptDeliveryError && error.status !== undefined &&
-        ![502, 503, 504].includes(error.status)) throw error;
+        ![429, 502, 503, 504].includes(error.status)) throw error;
       lastError = error;
       if (attempt === attempts) break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
   }
   if (lastError instanceof TranscriptDeliveryError) throw lastError;
   throw new TranscriptDeliveryError(
     lastError instanceof Error ? `Transcript API request failed: ${lastError.message}` : "Transcript API request failed",
   );
+}
+
+export async function listDeliveredTranscriptRunIds(
+  options: TranscriptDeliveryOptions,
+): Promise<ReadonlySet<string>> {
+  const response = await (options.fetcher ?? fetch)(endpoint(options, "transcript-runs"), {
+    headers: { authorization: `Bearer ${options.bearerToken}` },
+  });
+  const body = await response.json().catch(() => undefined) as unknown;
+  if (!response.ok) throw responseError(response.status, body);
+  if (typeof body !== "object" || body === null || !("runs" in body) || !Array.isArray(body.runs)) {
+    throw new TranscriptDeliveryError("Transcript run catalog returned an invalid response");
+  }
+  return new Set(body.runs.map((run) => transcriptRunSchema.parse(run).id));
 }

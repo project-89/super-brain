@@ -8,8 +8,12 @@ export const MEMORY_B = "01890f47-7c01-7000-8000-000000000002";
 
 export class MemoryStore implements FoldSdkStore {
   readonly entries: FoldLogEntry[] = [];
+  readCount = 0;
+
+  constructor(readonly stableReads = false) {}
 
   async read(): Promise<{ readonly entries: readonly FoldLogEntry[] }> {
+    this.readCount += 1;
     return { entries: [...this.entries] };
   }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +32,9 @@ describe("workspace SDK registry", () => {
     const firstRegistry = new JournalSdkRegistry(directory);
     const first = await firstRegistry.sdkFor("workspace-1");
     await first.append(access(), apiEvent({ id: "event-a", t: 1 }));
+    expect((await stat(directory)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(directory, workspaceJournalFilename("workspace-1")))).mode & 0o777)
+      .toBe(0o600);
     await firstRegistry.close();
 
     const reopenedRegistry = new JournalSdkRegistry(directory);
