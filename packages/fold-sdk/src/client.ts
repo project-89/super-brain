@@ -9,18 +9,28 @@ import {
 } from "@_89/fold";
 import {
   makeMemoryForgottenEvent,
+  makeMemoryCandidateAcceptedEvent,
+  makeMemoryCandidateProposedEvent,
+  makeMemoryCandidateRejectedEvent,
   makeMemoryRecordedEvent,
   makeMemoryRevisedEvent,
   memoryLogRecordsFromEvent,
+  memoryCandidateLogRecordsFromEvent,
   DEFAULT_RECALL_LIMIT,
   MAX_RECALL_LIMIT,
   rebuildMemories,
+  rebuildMemoryCandidates,
+  listMemoryCandidateViews,
   recallMemories as recallProjectedMemories,
+  recallMemoryCorpus,
   recallMemoryById as recallProjectedMemoryById,
   validateAccessContext,
+  validateMemoryCandidateEnvelope,
   type EpistemicEventContext,
   type EpistemicEventStamp,
   type MemoryInput,
+  type MemoryCandidateInput,
+  type MemoryCandidateProjection,
   type MemoryProjection,
   type MemoryRevisionPatch,
   type RecallRequest,
@@ -94,6 +104,11 @@ import type {
   ActivityMutationResult,
   FleetReadModel,
   MemoryForgetResult,
+  MemoryCandidateAcceptanceResult,
+  MemoryCandidateAcceptanceInput,
+  MemoryCandidateListOptions,
+  MemoryCandidateMutationResult,
+  MemoryCandidateRejectionResult,
   MemoryMutationResult,
   MemoryRanker,
   RankedMemoryRecallRequest,
@@ -117,6 +132,7 @@ const MEMORY_EVENT_KINDS = new Set([
   "memory.revised",
   "memory.forgotten",
 ]);
+const MAX_MEMORY_RANKING_CORPUS = 10_000;
 const TRAJECTORY_EVENT_KINDS = new Set([
   "trajectory.tree-recorded",
   "trajectory.recorded",
@@ -235,7 +251,10 @@ function transcriptCatalogCacheKey(access: FoldSdkAccessContext): string {
 export class FoldSdk {
   private queue: Promise<void> = Promise.resolve();
   private storedEntries: FoldLogEntry[] | undefined;
-  private readonly transcriptCatalogs = new Map<string, TranscriptCatalog>();
+  private storedRevision: string | undefined;
+  private readonly transcriptCatalogs = new Map<string, { readonly revision?: string; readonly catalog: TranscriptCatalog }>();
+  private readonly memoryProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }>();
+  private readonly candidateProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryCandidateProjection }>();
 
   constructor(private readonly store: FoldSdkStore) {}
 
@@ -248,15 +267,34 @@ export class FoldSdk {
     return run;
   }
 
+  private projectionCacheIsCurrent(revision: string | undefined): boolean {
+    return this.store.stableReads === true ||
+      (revision !== undefined && revision === this.storedRevision);
+  }
+
+  private clearProjectionCachesFor(event: FoldEvent): void {
+    if (event.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
+    if (event.kind.startsWith("memory.")) this.memoryProjections.clear();
+    if (event.kind.startsWith("memory.candidate-")) this.candidateProjections.clear();
+  }
+
   private async readStoredEntries(): Promise<FoldLogEntry[]> {
     if (this.store.stableReads === true && this.storedEntries !== undefined) {
       return this.storedEntries;
     }
     const read = await this.store.read({ missing: "empty" });
+    if (
+      read.revision !== undefined &&
+      this.storedEntries !== undefined &&
+      read.revision === this.storedRevision
+    ) {
+      return this.storedEntries;
+    }
     const entries = read.entries.map((entry) => {
       validateStatus(entry.status);
       const event = parseEvent(entry.event);
       validateMemoryEnvelope(event);
+      validateMemoryCandidateEnvelope(event);
       validateTrajectoryEnvelope(event);
       validateActivityEventEnvelope(event);
       validateIntentionEventEnvelope(event);
@@ -264,7 +302,8 @@ export class FoldSdk {
       return { event, status: entry.status };
     });
     validateProducerOrder(entries.map((entry) => entry.event));
-    if (this.store.stableReads === true) this.storedEntries = entries;
+    if (this.store.stableReads === true || read.revision !== undefined) this.storedEntries = entries;
+    this.storedRevision = read.revision;
     return entries;
   }
 
@@ -276,6 +315,7 @@ export class FoldSdk {
     validateStatus(status);
     const parsed = parseEvent(event);
     validateMemoryEnvelope(parsed);
+    validateMemoryCandidateEnvelope(parsed);
     validateTrajectoryEnvelope(parsed);
     validateActivityEventEnvelope(parsed);
     validateIntentionEventEnvelope(parsed);
@@ -286,7 +326,8 @@ export class FoldSdk {
     const entry = { event: parsed, status } as const;
     await this.store.append(entry);
     this.storedEntries?.push(entry);
-    if (parsed.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
+    if (this.store.revision !== undefined) this.storedRevision = await this.store.revision();
+    this.clearProjectionCachesFor(parsed);
     return entry;
   }
 
@@ -297,6 +338,7 @@ export class FoldSdk {
     const parsed = events.map((event) => {
       const candidate = parseEvent(event);
       validateMemoryEnvelope(candidate);
+      validateMemoryCandidateEnvelope(candidate);
       validateTrajectoryEnvelope(candidate);
       validateActivityEventEnvelope(candidate);
       validateIntentionEventEnvelope(candidate);
@@ -307,12 +349,17 @@ export class FoldSdk {
     if (parsed.length === 0) return parsed;
     const entries = await this.readStoredEntries();
     validateProducerOrder([...entries.map((entry) => entry.event), ...parsed]);
-    for (const event of parsed) {
-      const entry = { event, status: "canon" as const };
-      await this.store.append(entry);
-      this.storedEntries?.push(entry);
-      if (event.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
+    const appended = parsed.map((event) => ({ event, status: "canon" as const }));
+    if (this.store.appendMany === undefined) {
+      for (const entry of appended) await this.store.append(entry);
+    } else {
+      await this.store.appendMany(appended);
     }
+    for (const entry of appended) {
+      this.storedEntries?.push(entry);
+      this.clearProjectionCachesFor(entry.event);
+    }
+    if (this.store.revision !== undefined) this.storedRevision = await this.store.revision();
     return parsed;
   }
 
@@ -369,9 +416,31 @@ export class FoldSdk {
   private async memoryProjection(
     access: FoldSdkAccessContext,
   ): Promise<{ readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }> {
+    const cacheKey = transcriptCatalogCacheKey(access);
+    const cached = this.memoryProjections.get(cacheKey);
+    if (cached !== undefined && this.store.stableReads === true) return cached;
+    await this.readStoredEntries();
+    if (cached !== undefined && this.projectionCacheIsCurrent(cached.revision)) return cached;
     const entries = await this.entriesForAccess(access, { include: "canon" });
     const events = entries.map((entry) => entry.event);
-    return { events, projection: rebuildMemories(events) };
+    const result = { events, projection: rebuildMemories(events), ...(this.storedRevision === undefined ? {} : { revision: this.storedRevision }) };
+    this.memoryProjections.set(cacheKey, result);
+    return result;
+  }
+
+  private async memoryCandidateProjection(
+    access: FoldSdkAccessContext,
+  ): Promise<{ readonly events: readonly FoldEvent[]; readonly projection: MemoryCandidateProjection }> {
+    const cacheKey = transcriptCatalogCacheKey(access);
+    const cached = this.candidateProjections.get(cacheKey);
+    if (cached !== undefined && this.store.stableReads === true) return cached;
+    await this.readStoredEntries();
+    if (cached !== undefined && this.projectionCacheIsCurrent(cached.revision)) return cached;
+    const entries = await this.entriesForAccess(access, { include: "canon" });
+    const events = entries.map((entry) => entry.event);
+    const result = { events, projection: rebuildMemoryCandidates(events), ...(this.storedRevision === undefined ? {} : { revision: this.storedRevision }) };
+    this.candidateProjections.set(cacheKey, result);
+    return result;
   }
 
   private async trajectoryProjection(
@@ -385,10 +454,15 @@ export class FoldSdk {
   private async transcriptProjection(access: FoldSdkAccessContext): Promise<TranscriptCatalog> {
     const cacheKey = transcriptCatalogCacheKey(access);
     const cached = this.transcriptCatalogs.get(cacheKey);
-    if (this.store.stableReads === true && cached !== undefined) return cached;
+    if (this.store.stableReads === true && cached !== undefined) return cached.catalog;
+    await this.readStoredEntries();
+    if (cached !== undefined && this.projectionCacheIsCurrent(cached.revision)) return cached.catalog;
     const entries = await this.entriesForAccess(access, { include: "canon" });
     const catalog = rebuildTranscriptCatalog(entries.map((entry) => entry.event));
-    if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, catalog);
+    this.transcriptCatalogs.set(cacheKey, {
+      catalog,
+      ...(this.storedRevision === undefined ? {} : { revision: this.storedRevision }),
+    });
     return catalog;
   }
 
@@ -481,9 +555,9 @@ export class FoldSdk {
       const cacheKey = transcriptCatalogCacheKey(context.access);
       const cachedCatalog = this.transcriptCatalogs.get(cacheKey);
       const catalog = this.store.stableReads === true && cachedCatalog !== undefined
-        ? cachedCatalog
+        ? cachedCatalog.catalog
         : rebuildTranscriptCatalog(events);
-      if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, catalog);
+      if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, { catalog });
       const same = (left: unknown, right: unknown): boolean =>
         JSON.stringify(left) === JSON.stringify(right);
       const assertSame = <T>(existing: T | undefined, candidate: T, label: string): boolean => {
@@ -538,7 +612,7 @@ export class FoldSdk {
 
       const nextCatalog = extendTranscriptCatalog(catalog, newEvents);
       await this.appendSequenceInternal(context.access, newEvents);
-      if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, nextCatalog);
+      if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, { catalog: nextCatalog });
       return { events: newEvents, run: bundle.run };
     });
   }
@@ -784,6 +858,201 @@ export class FoldSdk {
     });
   }
 
+  proposeMemoryCandidate(
+    context: EpistemicEventContext,
+    stamp: EpistemicEventStamp,
+    input: MemoryCandidateInput,
+    causedBy?: readonly string[],
+  ): Promise<MemoryCandidateMutationResult> {
+    return this.enqueue(async () => {
+      const current = await this.memoryCandidateProjection(context.access);
+      if (current.projection.candidates.has(input.id)) {
+        throw new FoldSdkConflictError(`memory candidate already exists: ${input.id}`);
+      }
+      const event = makeMemoryCandidateProposedEvent(context, stamp, input, causedBy);
+      await this.appendInternal(context.access, event, "canon");
+      const record = memoryCandidateLogRecordsFromEvent(event)[0];
+      if (record?.recordType !== "proposed") {
+        throw new FoldSdkError(`candidate event ${event.id} did not contain a proposal`);
+      }
+      return { event, candidate: record.candidate };
+    });
+  }
+
+  proposeMemoryCandidates(
+    context: EpistemicEventContext,
+    proposals: readonly {
+      readonly stamp: EpistemicEventStamp;
+      readonly input: MemoryCandidateInput;
+      readonly causedBy?: readonly string[];
+    }[],
+  ): Promise<readonly MemoryCandidateMutationResult[]> {
+    return this.enqueue(async () => {
+      if (proposals.length === 0 || proposals.length > 100) {
+        throw new FoldSdkError("memory candidate batch must contain 1 to 100 proposals");
+      }
+      const current = await this.memoryCandidateProjection(context.access);
+      const ids = new Set(current.projection.candidates.keys());
+      const events = proposals.map((proposal) => {
+        if (ids.has(proposal.input.id)) {
+          throw new FoldSdkConflictError(`memory candidate already exists: ${proposal.input.id}`);
+        }
+        ids.add(proposal.input.id);
+        return makeMemoryCandidateProposedEvent(context, proposal.stamp, proposal.input, proposal.causedBy);
+      });
+      rebuildMemoryCandidates([...current.events, ...events]);
+      await this.appendSequenceInternal(context.access, events);
+      return events.map((event) => {
+        const record = memoryCandidateLogRecordsFromEvent(event)[0];
+        if (record?.recordType !== "proposed") {
+          throw new FoldSdkError(`candidate event ${event.id} did not contain a proposal`);
+        }
+        return { event, candidate: record.candidate };
+      });
+    });
+  }
+
+  memoryCandidates(
+    access: FoldSdkAccessContext,
+    options: MemoryCandidateListOptions = {},
+  ) {
+    return this.enqueue(async () => {
+      const { projection } = await this.memoryCandidateProjection(access);
+      const requestedProjects = new Set(options.projectIds ?? []);
+      const filtered = listMemoryCandidateViews(projection)
+        .filter((view) => options.status === undefined || view.status === options.status)
+        .filter((view) => requestedProjects.size === 0 || view.candidate.projectIds.length === 0 || view.candidate.projectIds.some((id) => requestedProjects.has(id)));
+      const offset = options.offset ?? 0;
+      return options.limit === undefined
+        ? filtered.slice(offset)
+        : filtered.slice(offset, offset + options.limit);
+    });
+  }
+
+  acceptMemoryCandidate(
+    context: EpistemicEventContext,
+    decisionStamp: EpistemicEventStamp,
+    memoryStamp: EpistemicEventStamp,
+    candidateId: string,
+    memoryId: string,
+  ): Promise<MemoryCandidateAcceptanceResult> {
+    return this.enqueue(async () => {
+      const current = await this.memoryCandidateProjection(context.access);
+      const candidate = current.projection.candidates.get(candidateId);
+      if (candidate === undefined || current.projection.decisions.has(candidateId)) {
+        throw new FoldSdkConflictError(`memory candidate is unavailable: ${candidateId}`);
+      }
+      const decisionEvent = makeMemoryCandidateAcceptedEvent(context, decisionStamp, candidate, memoryId);
+      const memoryEvent = makeMemoryRecordedEvent(context, memoryStamp, {
+        id: memoryId,
+        ...(candidate.spaceId === undefined ? {} : { spaceId: candidate.spaceId }),
+        audience: candidate.audience,
+        projectIds: candidate.projectIds,
+        source: candidate.source,
+        summary: candidate.summary,
+        content: candidate.content,
+        tags: candidate.tags,
+        entities: candidate.entities,
+      }, [candidate.proposalEventId, decisionEvent.id]);
+      rebuildMemoryCandidates([...current.events, decisionEvent]);
+      const memoryProjection = rebuildMemories([...current.events, decisionEvent, memoryEvent]);
+      await this.appendSequenceInternal(context.access, [decisionEvent, memoryEvent]);
+      const decisionRecord = memoryCandidateLogRecordsFromEvent(decisionEvent)[0];
+      const memory = memoryProjection.memories.get(memoryId);
+      if (decisionRecord?.recordType !== "accepted" || memory === undefined) {
+        throw new FoldSdkError(`candidate ${candidateId} acceptance did not produce a memory`);
+      }
+      return { decisionEvent, memoryEvent, decision: decisionRecord.decision as Extract<typeof decisionRecord.decision, { kind: "accepted" }>, memory };
+    });
+  }
+
+  acceptMemoryCandidates(
+    context: EpistemicEventContext,
+    acceptances: readonly MemoryCandidateAcceptanceInput[],
+  ): Promise<readonly MemoryCandidateAcceptanceResult[]> {
+    return this.enqueue(async () => {
+      if (acceptances.length === 0 || acceptances.length > 100) {
+        throw new FoldSdkError("memory candidate acceptance batch must contain 1 to 100 items");
+      }
+      const current = await this.memoryCandidateProjection(context.access);
+      const acceptedIds = new Set<string>();
+      const memoryIds = new Set<string>();
+      const generated = acceptances.map((acceptance) => {
+        const candidate = current.projection.candidates.get(acceptance.candidateId);
+        if (
+          candidate === undefined ||
+          current.projection.decisions.has(acceptance.candidateId) ||
+          acceptedIds.has(acceptance.candidateId)
+        ) {
+          throw new FoldSdkConflictError(`memory candidate is unavailable: ${acceptance.candidateId}`);
+        }
+        if (memoryIds.has(acceptance.memoryId)) {
+          throw new FoldSdkConflictError(`accepted memory ID is duplicated: ${acceptance.memoryId}`);
+        }
+        acceptedIds.add(acceptance.candidateId);
+        memoryIds.add(acceptance.memoryId);
+        const decisionEvent = makeMemoryCandidateAcceptedEvent(
+          context,
+          acceptance.decisionStamp,
+          candidate,
+          acceptance.memoryId,
+        );
+        const memoryEvent = makeMemoryRecordedEvent(context, acceptance.memoryStamp, {
+          id: acceptance.memoryId,
+          ...(candidate.spaceId === undefined ? {} : { spaceId: candidate.spaceId }),
+          audience: candidate.audience,
+          projectIds: candidate.projectIds,
+          source: candidate.source,
+          summary: candidate.summary,
+          content: candidate.content,
+          tags: candidate.tags,
+          entities: candidate.entities,
+        }, [candidate.proposalEventId, decisionEvent.id]);
+        return { candidate, memoryId: acceptance.memoryId, decisionEvent, memoryEvent };
+      });
+      const events = generated.flatMap(({ decisionEvent, memoryEvent }) => [decisionEvent, memoryEvent]);
+      rebuildMemoryCandidates([...current.events, ...generated.map(({ decisionEvent }) => decisionEvent)]);
+      const memoryProjection = rebuildMemories([...current.events, ...events]);
+      await this.appendSequenceInternal(context.access, events);
+      return generated.map(({ candidate, memoryId, decisionEvent, memoryEvent }) => {
+        const decisionRecord = memoryCandidateLogRecordsFromEvent(decisionEvent)[0];
+        const memory = memoryProjection.memories.get(memoryId);
+        if (decisionRecord?.recordType !== "accepted" || memory === undefined) {
+          throw new FoldSdkError(`candidate ${candidate.id} acceptance did not produce a memory`);
+        }
+        return {
+          decisionEvent,
+          memoryEvent,
+          decision: decisionRecord.decision as Extract<typeof decisionRecord.decision, { kind: "accepted" }>,
+          memory,
+        };
+      });
+    });
+  }
+
+  rejectMemoryCandidate(
+    context: EpistemicEventContext,
+    stamp: EpistemicEventStamp,
+    candidateId: string,
+    reason: string,
+  ): Promise<MemoryCandidateRejectionResult> {
+    return this.enqueue(async () => {
+      const current = await this.memoryCandidateProjection(context.access);
+      const candidate = current.projection.candidates.get(candidateId);
+      if (candidate === undefined || current.projection.decisions.has(candidateId)) {
+        throw new FoldSdkConflictError(`memory candidate is unavailable: ${candidateId}`);
+      }
+      const event = makeMemoryCandidateRejectedEvent(context, stamp, candidate, reason);
+      rebuildMemoryCandidates([...current.events, event]);
+      await this.appendInternal(context.access, event, "canon");
+      const record = memoryCandidateLogRecordsFromEvent(event)[0];
+      if (record?.recordType !== "rejected") {
+        throw new FoldSdkError(`candidate event ${event.id} did not contain a rejection`);
+      }
+      return { event, decision: record.decision as Extract<typeof record.decision, { kind: "rejected" }> };
+    });
+  }
+
   reviseMemory(
     context: EpistemicEventContext,
     stamp: EpistemicEventStamp,
@@ -854,14 +1123,12 @@ export class FoldSdk {
         throw new FoldSdkError(`memory ranking limit must be an integer within [1, ${MAX_RECALL_LIMIT}]`);
       }
       const { projection } = await this.memoryProjection(access);
-      const corpus = recallProjectedMemories(projection, access, {
-        ...filters,
-        limit: MAX_RECALL_LIMIT,
-      });
+      const corpus = recallMemoryCorpus(projection, access, filters).slice(0, MAX_MEMORY_RANKING_CORPUS);
       const candidates = await ranker.rank({
+        workspaceId: access.workspaceId,
         query,
         limit: requestedLimit,
-        documents: corpus.map(({ memory }) => ({
+        documents: corpus.map((memory) => ({
           memoryId: memory.id,
           source: memory.source,
           summary: memory.summary,
@@ -870,6 +1137,7 @@ export class FoldSdk {
           entities: memory.entities,
           createdAt: memory.createdAt,
           updatedAt: memory.updatedAt,
+          revision: memory.revision,
         })),
       });
       if (candidates.length > MAX_RECALL_LIMIT) {

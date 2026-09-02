@@ -1,30 +1,40 @@
-import { Edit3, ListFilter, Plus, Search, Sparkles, Trash2 } from "lucide-react";
+import { Check, Edit3, ListFilter, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
 import { formatDateTime, memoryContent, uniqueSorted } from "../format";
-import type { MemoryScope, PersonalMemory, RankedMemoryRecallResult, RecalledMemory } from "../types";
+import type { MemoryCandidate, MemoryCandidateView, MemoryScope, PersonalMemory, RankedMemoryRecallResult, RecalledMemory } from "../types";
 
 type RecallMode = "filter" | "ranked";
 
 export function MemoryPage({
   memories,
+  candidates,
   onRank,
   onCreate,
   onEdit,
   onForget,
+  onAcceptCandidate,
+  onRejectCandidate,
+  mutationPending,
 }: {
   readonly memories: readonly RecalledMemory[];
+  readonly candidates: readonly MemoryCandidateView[];
   readonly onRank: (options: {
     readonly query: string;
     readonly scope?: MemoryScope;
     readonly sources?: readonly string[];
+    readonly projectIds?: readonly string[];
     readonly limit?: number;
   }) => Promise<RankedMemoryRecallResult>;
   readonly onCreate: () => void;
   readonly onEdit: (memory: PersonalMemory) => void;
   readonly onForget: (memory: PersonalMemory) => void;
+  readonly onAcceptCandidate: (candidate: MemoryCandidate) => Promise<void>;
+  readonly onRejectCandidate: (candidate: MemoryCandidate, reason: string) => Promise<void>;
+  readonly mutationPending: boolean;
 }) {
+  const [view, setView] = useState<"memories" | "candidates">("memories");
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<RecallMode>("filter");
   const [source, setSource] = useState("all");
@@ -95,10 +105,15 @@ export function MemoryPage({
   return (
     <div className="page page--memory">
       <PageHeader
-        eyebrow="Private recall"
-        title="Personal memory"
+        eyebrow="Project-aware recall"
+        title="Memory"
         actions={<button className="button button--primary" type="button" onClick={onCreate} aria-label="New memory" title="New memory"><Plus aria-hidden="true" />New memory</button>}
       />
+      <div className="segmented-control memory-view" role="group" aria-label="Memory view">
+        <button type="button" aria-pressed={view === "memories"} onClick={() => setView("memories")}>Memories</button>
+        <button type="button" aria-pressed={view === "candidates"} onClick={() => setView("candidates")}>Proposals <span>{candidates.filter(({ status }) => status === "proposed").length}</span></button>
+      </div>
+      {view === "memories" ? <>
       <form className="filter-bar memory-filter-bar" onSubmit={(event) => { event.preventDefault(); if (mode === "ranked") void runRankedSearch(); }}>
         <div className="segmented-control memory-mode" role="group" aria-label="Recall mode">
           <button type="button" aria-pressed={mode === "filter"} onClick={() => setMode("filter")}><ListFilter aria-hidden="true" />Filter</button>
@@ -147,6 +162,8 @@ export function MemoryPage({
               <dl className="metadata-grid">
                 <div><dt>Source</dt><dd>{selected.source}</dd></div>
                 <div><dt>Scope</dt><dd>{selected.spaceId ?? "Workspace"}</dd></div>
+                <div><dt>Audience</dt><dd>{selected.audience === "workspace" ? "Workspace" : "Personal"}</dd></div>
+                <div><dt>Projects</dt><dd>{selected.projectIds.length > 0 ? selected.projectIds.join(", ") : "All projects"}</dd></div>
                 <div><dt>Created</dt><dd>{formatDateTime(selected.createdAt)}</dd></div>
                 <div><dt>Updated</dt><dd>{formatDateTime(selected.updatedAt)}</dd></div>
               </dl>
@@ -159,6 +176,82 @@ export function MemoryPage({
           )}
         </article>
       </section>
+      </> : (
+        <CandidateReview
+          candidates={candidates}
+          pending={mutationPending}
+          onAccept={onAcceptCandidate}
+          onReject={onRejectCandidate}
+        />
+      )}
     </div>
+  );
+}
+
+function CandidateReview({
+  candidates,
+  pending,
+  onAccept,
+  onReject,
+}: {
+  readonly candidates: readonly MemoryCandidateView[];
+  readonly pending: boolean;
+  readonly onAccept: (candidate: MemoryCandidate) => Promise<void>;
+  readonly onReject: (candidate: MemoryCandidate, reason: string) => Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState<string>();
+  const [reason, setReason] = useState("");
+  const filtered = candidates;
+
+  useEffect(() => {
+    if (filtered.length === 0) setSelectedId(undefined);
+    else if (!filtered.some(({ candidate }) => candidate.id === selectedId)) setSelectedId(filtered[0]!.candidate.id);
+  }, [filtered, selectedId]);
+
+  useEffect(() => setReason(""), [selectedId]);
+  const selected = filtered.find(({ candidate }) => candidate.id === selectedId);
+
+  return (
+    <>
+      <div className="filter-bar candidate-filter-bar">
+        <span className="eyebrow">Pending review</span>
+        <span className="result-count">{filtered.length} {filtered.length === 1 ? "proposal" : "proposals"}</span>
+      </div>
+      <section className="master-detail">
+        <div className="master-list" aria-label="Memory proposals">
+          {filtered.length === 0 ? <EmptyState title="No matching proposals" /> : filtered.map((view) => (
+            <button type="button" className={`memory-row${view.candidate.id === selectedId ? " memory-row--selected" : ""}`} key={view.candidate.id} onClick={() => setSelectedId(view.candidate.id)}>
+              <span className="memory-row__top"><strong>{view.candidate.summary}</strong><time>{formatDateTime(view.candidate.proposedAt)}</time></span>
+              <span className="memory-row__excerpt">{typeof view.candidate.content === "string" ? view.candidate.content : JSON.stringify(view.candidate.content)}</span>
+              <span className="memory-row__meta"><span>{view.status}</span><span>{view.candidate.audience}</span><span>{Math.round(view.candidate.confidence * 100)}% confidence</span></span>
+            </button>
+          ))}
+        </div>
+        <article className="detail-pane">
+          {selected === undefined ? <EmptyState title="Select a proposal" /> : (
+            <>
+              <header className="detail-pane__header"><div><span className="eyebrow">{selected.status} proposal</span><h2>{selected.candidate.summary}</h2></div></header>
+              <dl className="metadata-grid">
+                <div><dt>Audience</dt><dd>{selected.candidate.audience}</dd></div>
+                <div><dt>Projects</dt><dd>{selected.candidate.projectIds.length > 0 ? selected.candidate.projectIds.join(", ") : "All projects"}</dd></div>
+                <div><dt>Extractor</dt><dd>{selected.candidate.extractor.id} v{selected.candidate.extractor.version}</dd></div>
+                <div><dt>Confidence</dt><dd>{Math.round(selected.candidate.confidence * 100)}%</dd></div>
+                <div><dt>Salience</dt><dd>{Math.round(selected.candidate.salience * 100)}%</dd></div>
+                <div><dt>Proposer</dt><dd>{selected.candidate.proposerId}</dd></div>
+              </dl>
+              {selected.candidate.tags.length > 0 && <div className="tag-list" aria-label="Tags">{selected.candidate.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+              <div className="memory-content"><pre>{typeof selected.candidate.content === "string" ? selected.candidate.content : JSON.stringify(selected.candidate.content, null, 2)}</pre></div>
+              <section className="detail-section"><h3>Evidence</h3><ul className="candidate-evidence">{selected.candidate.evidence.map((evidence) => <li key={`${evidence.eventId}:${evidence.turnId ?? ""}`}><code>{evidence.eventId}</code>{evidence.runId !== undefined && <span>{evidence.runId}</span>}{evidence.turnId !== undefined && <span>{evidence.turnId}</span>}</li>)}</ul></section>
+              {selected.status === "proposed" && (
+                <div className="candidate-actions">
+                  <label className="field"><span>Rejection reason</span><input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Required to reject" maxLength={500} /></label>
+                  <div><button className="button button--danger" type="button" disabled={pending || !reason.trim()} onClick={() => void onReject(selected.candidate, reason.trim())}><X aria-hidden="true" />Reject</button><button className="button button--primary" type="button" disabled={pending} onClick={() => void onAccept(selected.candidate)}><Check aria-hidden="true" />Accept</button></div>
+                </div>
+              )}
+            </>
+          )}
+        </article>
+      </section>
+    </>
   );
 }

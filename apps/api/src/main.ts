@@ -1,11 +1,14 @@
 import { join } from "node:path";
 
+import { PostgresVectorMemoryRanker } from "@_89/fold-postgres";
+
 import { StaticIdentityDirectory } from "./auth.js";
-import { JournalSdkRegistry } from "./registry.js";
+import { JournalSdkRegistry, PostgresSdkRegistry } from "./registry.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
 import { LocalEvidenceReasoner } from "./reasoning.js";
 import { createApiServer } from "./server.js";
+import { HttpMemoryEmbeddingProvider } from "./embeddings.js";
 
 function portFromEnvironment(value: string | undefined): number {
   const port = value === undefined ? 3000 : Number(value);
@@ -43,7 +46,29 @@ async function main(): Promise<void> {
   }
   const directory = StaticIdentityDirectory.fromJson(credentials);
   const dataDirectory = process.env.FOLD_DATA_DIR ?? join(process.cwd(), ".data", "fold");
-  const registry = new JournalSdkRegistry(dataDirectory);
+  const databaseUrl = process.env.FOLD_DATABASE_URL;
+  const registry = databaseUrl === undefined || databaseUrl.trim().length === 0
+    ? new JournalSdkRegistry(dataDirectory)
+    : new PostgresSdkRegistry({ connectionString: databaseUrl });
+  const embeddingUrl = process.env.FOLD_EMBEDDING_URL;
+  let vectorRanker: PostgresVectorMemoryRanker | undefined;
+  if (embeddingUrl !== undefined) {
+    if (databaseUrl === undefined || databaseUrl.trim().length === 0) {
+      throw new TypeError("FOLD_EMBEDDING_URL requires FOLD_DATABASE_URL");
+    }
+    const model = process.env.FOLD_EMBEDDING_MODEL;
+    const dimensions = Number(process.env.FOLD_EMBEDDING_DIMENSIONS);
+    if (model === undefined) throw new TypeError("FOLD_EMBEDDING_MODEL is required when embeddings are enabled");
+    vectorRanker = new PostgresVectorMemoryRanker({
+      connectionString: databaseUrl,
+      provider: new HttpMemoryEmbeddingProvider({
+        url: embeddingUrl,
+        model,
+        dimensions,
+        ...(process.env.FOLD_EMBEDDING_TOKEN === undefined ? {} : { token: process.env.FOLD_EMBEDDING_TOKEN }),
+      }),
+    });
+  }
   const host = process.env.FOLD_API_HOST ?? "127.0.0.1";
   const port = portFromEnvironment(process.env.FOLD_API_PORT);
   const rateLimit = nonNegativeIntegerFromEnvironment(
@@ -59,7 +84,7 @@ async function main(): Promise<void> {
       authenticator: directory,
       memberships: directory,
       sdks: registry,
-      memoryRanker: new LocalLexicalMemoryRanker(),
+      memoryRanker: vectorRanker ?? new LocalLexicalMemoryRanker(),
       reasoner: new LocalEvidenceReasoner(),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),
       ...(corsOrigins === undefined ? {} : { corsOrigins }),
@@ -70,7 +95,7 @@ async function main(): Promise<void> {
       server.listen(port, host, resolve);
     });
   } catch (error) {
-    await registry.close();
+    await Promise.all([registry.close(), vectorRanker?.close()]);
     throw error;
   }
   console.log(`Fold API listening at http://${host}:${port}`);
@@ -83,7 +108,7 @@ async function main(): Promise<void> {
     forceClose.unref();
     server.close((error) => {
       clearTimeout(forceClose);
-      void registry.close().then(() => {
+      void Promise.all([registry.close(), vectorRanker?.close()]).then(() => {
         if (error !== undefined) {
           console.error(error);
           process.exitCode = 1;

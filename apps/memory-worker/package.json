@@ -1,0 +1,26 @@
+{
+  "name": "@_89/super-brain-memory-worker",
+  "version": "0.0.0",
+  "description": "Deterministic transcript-vault memory candidate extractor and subscriber",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "super-brain-memory-worker": "./dist/main.js" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup src/index.ts src/main.ts --format esm --dts --clean",
+    "start": "node --enable-source-maps dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@_89/fold-epistemic": "workspace:*",
+    "@_89/fold-transcript": "workspace:*",
+    "@_89/super-brain-client": "workspace:*"
+  }
+}

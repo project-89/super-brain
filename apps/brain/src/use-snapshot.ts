@@ -41,6 +41,7 @@ function emptySnapshot(): BrainSnapshot {
   return {
     events: [],
     memories: [],
+    memoryCandidates: [],
     trajectoryTasks: [],
     transcriptProjects: [],
     transcriptRuns: [],
@@ -63,8 +64,11 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
     return { ...snapshot, memories, transcriptProjects, transcriptRuns };
   }
   if (page === "memory") {
-    const memories = await client.recallMemories({ scope: { kind: "all" }, limit: 100 });
-    return { ...snapshot, memories };
+    const [memories, memoryCandidates] = await Promise.all([
+      client.recallMemories({ scope: { kind: "all" }, limit: 100 }),
+      client.listMemoryCandidates({ status: "proposed", limit: 1_000 }),
+    ]);
+    return { ...snapshot, memories, memoryCandidates };
   }
   if (page === "history") {
     const [transcriptProjects, transcriptRuns] = await Promise.all([

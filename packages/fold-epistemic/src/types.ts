@@ -16,11 +16,15 @@ export interface MemoryEntityRef {
   readonly name: string;
 }
 
+export type MemoryAudience = "personal" | "workspace";
+
 export interface PersonalMemory {
   readonly id: string;
   readonly workspaceId: string;
   readonly spaceId?: string;
   readonly creatorId: string;
+  readonly audience: MemoryAudience;
+  readonly projectIds: readonly string[];
   readonly source: string;
   readonly summary: string;
   readonly content: JsonValue;
@@ -34,6 +38,8 @@ export interface PersonalMemory {
 export interface MemoryInput {
   readonly id: string;
   readonly spaceId?: string;
+  readonly audience?: MemoryAudience;
+  readonly projectIds?: readonly string[];
   readonly source: string;
   readonly summary?: string;
   readonly content?: JsonValue;
@@ -52,6 +58,7 @@ export interface ForgottenMemory {
   readonly workspaceId: string;
   readonly spaceId?: string;
   readonly creatorId: string;
+  readonly audience: MemoryAudience;
   readonly forgottenAt: number;
   readonly reason: string;
 }
@@ -84,6 +91,7 @@ export interface RecallRequest {
   readonly scope?: RecallScope;
   readonly tags?: readonly string[];
   readonly sources?: readonly string[];
+  readonly projectIds?: readonly string[];
   readonly from?: number;
   readonly to?: number;
   readonly limit?: number;
@@ -98,6 +106,75 @@ export interface RecalledMemory {
 export interface MemoryCaptureIdentity extends Readonly<Record<string, string>> {
   readonly principal: string;
   readonly workspace: string;
+}
+
+export interface MemoryCandidateEvidence {
+  readonly eventId: string;
+  readonly projectId?: string;
+  readonly runId?: string;
+  readonly turnId?: string;
+}
+
+export interface MemoryCandidateExtractor {
+  readonly kind: "rule" | "model" | "human";
+  readonly id: string;
+  readonly version: string;
+}
+
+export interface MemoryCandidateInput {
+  readonly id: string;
+  readonly spaceId?: string;
+  readonly audience?: MemoryAudience;
+  readonly projectIds?: readonly string[];
+  readonly source: string;
+  readonly summary: string;
+  readonly content: JsonValue;
+  readonly tags?: readonly string[];
+  readonly entities?: readonly MemoryEntityRef[];
+  readonly evidence: readonly MemoryCandidateEvidence[];
+  readonly confidence: number;
+  readonly salience: number;
+  readonly extractor: MemoryCandidateExtractor;
+}
+
+export interface MemoryCandidate extends Omit<MemoryCandidateInput, "audience" | "projectIds" | "tags" | "entities"> {
+  readonly workspaceId: string;
+  readonly proposerId: string;
+  readonly audience: MemoryAudience;
+  readonly projectIds: readonly string[];
+  readonly tags: readonly string[];
+  readonly entities: readonly MemoryEntityRef[];
+  readonly proposedAt: number;
+  readonly proposalEventId: string;
+}
+
+export type MemoryCandidateDecision =
+  | {
+      readonly kind: "accepted";
+      readonly candidateId: string;
+      readonly actorId: string;
+      readonly atMs: number;
+      readonly eventId: string;
+      readonly memoryId: string;
+    }
+  | {
+      readonly kind: "rejected";
+      readonly candidateId: string;
+      readonly actorId: string;
+      readonly atMs: number;
+      readonly eventId: string;
+      readonly reason: string;
+    };
+
+export interface MemoryCandidateView {
+  readonly candidate: MemoryCandidate;
+  readonly status: "proposed" | "accepted" | "rejected";
+  readonly decision?: MemoryCandidateDecision;
+}
+
+export interface MemoryCandidateProjection {
+  readonly candidates: ReadonlyMap<string, MemoryCandidate>;
+  readonly decisions: ReadonlyMap<string, MemoryCandidateDecision>;
 }
 
 export type MemoryCaptureEnvelope = Omit<CaptureEnvelope, "identity"> & {

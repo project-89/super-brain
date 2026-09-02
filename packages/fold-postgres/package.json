@@ -1,0 +1,35 @@
+{
+  "name": "@_89/fold-postgres",
+  "version": "0.0.0",
+  "description": "Transactional PostgreSQL persistence for Fold events and consumers",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup src/index.ts src/migrate.ts --format esm,cjs --dts --clean",
+    "migrate": "node --enable-source-maps dist/migrate.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@_89/fold": "workspace:*",
+    "@_89/fold-epistemic": "workspace:*",
+    "@_89/fold-sdk": "workspace:*",
+    "@_89/fold-storage": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.5"
+  }
+}

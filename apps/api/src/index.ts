@@ -5,3 +5,4 @@ export * from "./reasoning.js";
 export * from "./rate-limit.js";
 export * from "./server.js";
 export * from "./types.js";
+export * from "./embeddings.js";

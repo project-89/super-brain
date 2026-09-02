@@ -12,6 +12,7 @@ const documents = [
     entities: [],
     createdAt: 100,
     updatedAt: 100,
+    revision: 0,
   },
   {
     memoryId: "memory-layout",
@@ -22,19 +23,20 @@ const documents = [
     entities: [],
     createdAt: 101,
     updatedAt: 101,
+    revision: 0,
   },
 ] as const;
 
 describe("local lexical memory ranker", () => {
   it("returns bounded normalized matches in relevance order", async () => {
     const ranker = new LocalLexicalMemoryRanker();
-    const ranked = await ranker.rank({ query: "expired access token", documents, limit: 5 });
+    const ranked = await ranker.rank({ workspaceId: "workspace-1", query: "expired access token", documents, limit: 5 });
     expect(ranked).toEqual([{ memoryId: "memory-refresh", score: 1 }]);
     expect(ranker.descriptor).toEqual({ id: "local-bm25-v1", kind: "lexical" });
   });
 
   it("returns no candidates for a query without matching terms", async () => {
     const ranker = new LocalLexicalMemoryRanker();
-    expect(await ranker.rank({ query: "trajectory", documents, limit: 5 })).toEqual([]);
+    expect(await ranker.rank({ workspaceId: "workspace-1", query: "trajectory", documents, limit: 5 })).toEqual([]);
   });
 });

@@ -21,6 +21,7 @@ interface ContextOptions {
   readonly workspaceRole?: EpistemicAccessContext["workspaceRole"];
   readonly spaceId?: string;
   readonly spaceRoles?: EpistemicAccessContext["spaceRoles"];
+  readonly audience?: PersonalMemory["audience"];
 }
 
 export function context(options: ContextOptions = {}): EpistemicEventContext {
@@ -40,7 +41,7 @@ export function context(options: ContextOptions = {}): EpistemicEventContext {
       scope: {
         workspace: workspaceId,
         ...(options.spaceId === undefined ? {} : { space: options.spaceId }),
-        creator: principalId,
+        ...(options.audience === "workspace" ? {} : { creator: principalId }),
       },
       identity: { principal: principalId, workspace: workspaceId },
     },
@@ -62,6 +63,8 @@ interface MemoryOptions {
   readonly workspaceId?: string;
   readonly creatorId?: string;
   readonly spaceId?: string;
+  readonly audience?: PersonalMemory["audience"];
+  readonly projectIds?: readonly string[];
   readonly source?: string;
   readonly summary?: string;
   readonly content?: JsonValue;
@@ -76,6 +79,8 @@ export function memory(options: MemoryOptions = {}): PersonalMemory {
     workspaceId: options.workspaceId ?? "workspace-1",
     ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }),
     creatorId: options.creatorId ?? "user-a",
+    audience: options.audience ?? "personal",
+    projectIds: options.projectIds ?? [],
     source: options.source ?? "conversation",
     summary: options.summary ?? "A remembered fact",
     content: options.content ?? { fact: true },
@@ -98,6 +103,8 @@ export function recordEvent(
   const input: MemoryInput = {
     id: options.id ?? MEMORY_A,
     ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }),
+    audience: options.audience ?? "personal",
+    projectIds: options.projectIds ?? [],
     source: options.source ?? "conversation",
     summary: options.summary ?? "A remembered fact",
     content: options.content ?? { fact: true },

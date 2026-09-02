@@ -4,6 +4,7 @@ import type {
   FoldLogEntry,
   FleetResponse,
   MemoryDraft,
+  MemoryCandidateView,
   MemoryScope,
   PersonalMemory,
   ProjectionResponse,
@@ -252,6 +253,7 @@ export class FoldApiClient {
     readonly scope?: MemoryScope;
     readonly tags?: readonly string[];
     readonly sources?: readonly string[];
+    readonly projectIds?: readonly string[];
     readonly from?: number;
     readonly to?: number;
     readonly limit?: number;
@@ -263,6 +265,7 @@ export class FoldApiClient {
     }
     appendRepeated(params, "tag", options.tags);
     appendRepeated(params, "source", options.sources);
+    appendRepeated(params, "projectId", options.projectIds);
     if (options.from !== undefined) params.set("from", options.from.toString());
     if (options.to !== undefined) params.set("to", options.to.toString());
     if (options.limit !== undefined) params.set("limit", options.limit.toString());
@@ -277,6 +280,7 @@ export class FoldApiClient {
     readonly query: string;
     readonly scope?: MemoryScope;
     readonly sources?: readonly string[];
+    readonly projectIds?: readonly string[];
     readonly limit?: number;
   }): Promise<RankedMemoryRecallResult> {
     return this.request<RankedMemoryRecallResult>(this.workspacePath("memories/search"), {
@@ -295,6 +299,8 @@ export class FoldApiClient {
           stamp,
           input: {
             id: uuidV7(stamp.t),
+            audience: draft.audience,
+            projectIds: draft.projectIds,
             source: draft.source,
             summary: draft.summary,
             content: draft.content,
@@ -305,6 +311,41 @@ export class FoldApiClient {
       },
     );
     return response.memory;
+  }
+
+  async listMemoryCandidates(options: {
+    readonly status?: MemoryCandidateView["status"];
+    readonly offset?: number;
+    readonly limit?: number;
+  } = {}): Promise<readonly MemoryCandidateView[]> {
+    const query = new URLSearchParams();
+    if (options.status !== undefined) query.set("status", options.status);
+    if (options.offset !== undefined) query.set("offset", options.offset.toString());
+    if (options.limit !== undefined) query.set("limit", options.limit.toString());
+    const response = await this.request<{ readonly candidates: readonly MemoryCandidateView[] }>(
+      `${this.workspacePath("memory-candidates")}${query.size === 0 ? "" : `?${query}`}`,
+    );
+    return response.candidates;
+  }
+
+  async acceptMemoryCandidate(candidateId: string): Promise<PersonalMemory> {
+    const stamp = nextEventStamp();
+    const memoryStamp = nextEventStamp(stamp.t + 1);
+    const response = await this.request<{ readonly memory: PersonalMemory }>(
+      `${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/accept`,
+      {
+        method: "POST",
+        body: JSON.stringify({ stamp, memoryStamp, memoryId: uuidV7(memoryStamp.t) }),
+      },
+    );
+    return response.memory;
+  }
+
+  async rejectMemoryCandidate(candidateId: string, reason: string): Promise<void> {
+    await this.request(
+      `${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/reject`,
+      { method: "POST", body: JSON.stringify({ stamp: nextEventStamp(), reason }) },
+    );
   }
 
   async reviseMemory(memoryId: string, draft: MemoryDraft): Promise<PersonalMemory> {

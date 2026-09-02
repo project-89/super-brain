@@ -294,6 +294,73 @@ describe("Fold HTTP API", () => {
     }
   });
 
+  it("streams filtered events after a resumable exclusive cursor", async () => {
+    const api = await startApi({ eventStreamPollMs: 10 });
+    const controller = new AbortController();
+    try {
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", {
+        method: "POST",
+        token: "token-a",
+        body: { event: apiEvent({ id: "event-a", t: 1, kind: "alpha" }) },
+      });
+      const response = await fetch(
+        `${api.baseUrl}/v1/workspaces/workspace-1/event-stream?afterT=1&afterEventId=event-a&kind=alpha`,
+        {
+          headers: { authorization: "Bearer token-a" },
+          signal: controller.signal,
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", {
+        method: "POST",
+        token: "token-a",
+        body: { event: apiEvent({ id: "event-b", t: 2, kind: "alpha" }) },
+      });
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let received = "";
+      while (!received.includes('"eventId":"event-b"')) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        received += decoder.decode(chunk.value, { stream: true });
+      }
+      expect(received).not.toContain('"eventId":"event-a"');
+      expect(received).toContain('"eventId":"event-b"');
+      expect(received).toContain('"id":"event-b"');
+    } finally {
+      controller.abort();
+      await api.close();
+    }
+  });
+
+  it("persists consumer cursors separately for each principal", async () => {
+    const api = await startApi();
+    try {
+      const path = "/v1/workspaces/workspace-1/consumers/hermes-main";
+      expect((await apiRequest(api.baseUrl, path, { token: "token-a" })).body.cursor).toBeNull();
+      const committed = await apiRequest(api.baseUrl, path, {
+        method: "POST",
+        token: "token-a",
+        body: { cursor: { t: 12, eventId: "event-12" } },
+      });
+      expect(committed.body.cursor).toEqual({ t: 12, eventId: "event-12" });
+      expect((await apiRequest(api.baseUrl, path, { token: "token-a" })).body.cursor)
+        .toEqual({ t: 12, eventId: "event-12" });
+      expect((await apiRequest(api.baseUrl, path, { token: "token-b" })).body.cursor).toBeNull();
+
+      const backward = await apiRequest(api.baseUrl, path, {
+        method: "POST",
+        token: "token-a",
+        body: { cursor: { t: 11, eventId: "event-11" } },
+      });
+      expect(backward).toMatchObject({ status: 409, body: { error: { code: "fold_conflict" } } });
+    } finally {
+      await api.close();
+    }
+  });
+
   it("binds generic event authorship to the bearer credential", async () => {
     const api = await startApi();
     try {
@@ -481,6 +548,85 @@ describe("Fold HTTP API", () => {
         status: 404,
         body: { error: { code: "memory_unavailable", message: "Personal memory is unavailable" } },
       });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("reviews workspace memory candidates and exposes accepted project memory", async () => {
+    const api = await startApi();
+    try {
+      const proposed = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memory-candidates", {
+        method: "POST",
+        token: "token-a",
+        body: {
+          stamp: { id: "candidate-event", t: 100, worldDate: "2026-08-17" },
+          input: {
+            id: MEMORY_A,
+            audience: "workspace",
+            projectIds: ["project-a"],
+            source: "transcript",
+            summary: "Use Postgres for canonical events",
+            content: { decision: "postgres" },
+            tags: ["architecture", "decision"],
+            evidence: [{ eventId: "transcript-chunk-1", runId: "run-a", projectId: "project-a" }],
+            confidence: 0.92,
+            salience: 0.84,
+            extractor: { kind: "rule", id: "durable-decision", version: "1" },
+          },
+        },
+      });
+      expect(proposed).toMatchObject({ status: 201, body: { candidate: { audience: "workspace", proposerId: "user-a" } } });
+
+      const denied = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/memory-candidates/${MEMORY_A}/accept`,
+        {
+          method: "POST",
+          token: "token-a",
+          body: {
+            stamp: { id: "denied-event", t: 101, worldDate: "2026-08-17" },
+            memoryStamp: { id: "denied-memory-event", t: 102, worldDate: "2026-08-17" },
+            memoryId: MEMORY_B,
+          },
+        },
+      );
+      expect(denied).toMatchObject({ status: 403, body: { error: { code: "shared_memory_review_access_denied" } } });
+
+      const accepted = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/memory-candidates/${MEMORY_A}/accept`,
+        {
+          method: "POST",
+          token: "token-b",
+          body: {
+            stamp: { id: "accept-event", t: 103, worldDate: "2026-08-17" },
+            memoryStamp: { id: "memory-event", t: 104, worldDate: "2026-08-17" },
+            memoryId: MEMORY_B,
+          },
+        },
+      );
+      expect(accepted).toMatchObject({
+        status: 201,
+        body: { memory: { id: MEMORY_B, audience: "workspace", projectIds: ["project-a"] } },
+      });
+
+      const recalled = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/memories?projectId=project-a",
+        { token: "token-a" },
+      );
+      expect(recalled.body.memories).toEqual([
+        expect.objectContaining({ memory: expect.objectContaining({ id: MEMORY_B }) }),
+      ]);
+      const candidates = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/memory-candidates?status=accepted&projectId=project-a",
+        { token: "token-a" },
+      );
+      expect(candidates.body.candidates).toEqual([
+        expect.objectContaining({ status: "accepted", candidate: expect.objectContaining({ id: MEMORY_A }) }),
+      ]);
     } finally {
       await api.close();
     }

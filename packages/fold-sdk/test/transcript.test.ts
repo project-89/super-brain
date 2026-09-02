@@ -101,13 +101,15 @@ function context(workspaceId = "workspace-1"): FoldSdkTranscriptContext {
 
 describe("Fold SDK transcript imports", () => {
   it("imports an immutable bundle and exposes project and run queries", async () => {
-    const sdk = new FoldSdk(new MemoryStore());
+    const store = new MemoryStore();
+    const sdk = new FoldSdk(store);
     const imported = await sdk.importTranscript(context(), bundle, {
       importId: "import-a",
       importedAt: Date.parse("2026-08-20T13:00:00.000Z"),
     });
 
     expect(imported.events).toHaveLength(4);
+    expect(store.appendManyCount).toBe(1);
     expect(await sdk.transcriptProjects(access())).toEqual([{
       project,
       runCount: 1,

@@ -3,12 +3,12 @@
 Implementation workspace for the Fold Platform described in
 [`Fold_Platform_Super_Brain_Unified_Reference_v8.md`](./Fold_Platform_Super_Brain_Unified_Reference_v8.md).
 
-The first milestone is the risk-retirement gate from the reference document:
-
-- preserve the verified v0.6 Change Record baseline;
-- define the normative v0.7 F1/F2/F3 amendments;
-- implement those rules in `@_89/fold`;
-- make the required conformance cases executable.
+The repository now contains the complete local vertical slice: authenticated
+harness ingestion, a transactional PostgreSQL Fold, resumable event
+subscriptions, historical transcript capture, automatic project-aware memory
+formation, reviewed promotion, full-corpus recall, and an operator UI. The
+original v0.7 risk-retirement gate remains covered by executable conformance
+tests.
 
 ## Packages
 
@@ -42,19 +42,31 @@ The first milestone is the risk-retirement gate from the reference document:
   declined, acted, and ended intentions without performing host cognition. The
   SDK and API expose that lifecycle as replayed human steering.
 - `@_89/fold-epistemic` records, revises, forgets, and recalls personal memory
-  with mandatory workspace and creator identity, current space access, durable
-  tombstones, and post-ranking authorization for external semantic candidates.
+  plus immutable memory proposals and decisions. Memory is explicitly scoped
+  by workspace, optional space, audience, and projects; access is reapplied
+  after external ranking.
 - `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
   capture-scope enforcement, canonical ordering, access-filtered projection,
   personal-memory lifecycle and authorized ranker orchestration, trajectory
   task/report facades, replay-built fleet reads over validated activity signals,
   and idempotent transcript import/catalog queries.
+- `@_89/fold-postgres` is the transactional production store for canonical
+  events, durable consumer offsets, and rebuildable projection checkpoints. Its
+  optional pgvector ranker is derived from authorized memory and never becomes
+  canonical state.
+- `@_89/super-brain-client` is the harness-neutral authenticated client for
+  append, recall, candidate review, resumable SSE, and principal-scoped durable
+  consumer offsets. Codex, Claude, Hermes, or another harness can use the same
+  boundary without a repository-specific adapter.
 - `@_89/super-brain-api` serves those SDK operations over authenticated HTTP,
   derives authorship and personal-memory capture identity from credentials,
   resolves membership on every request, supplies a pluggable memory-ranker port
   with a deterministic local lexical provider, supplies a pull-reasoner port
-  with an explicitly extractive local provider, gates canonical steering, and
-  persists one fsynced journal per workspace behind a single-host writer lease.
+  with an explicitly extractive local provider, and gates canonical steering.
+  It uses transactional PostgreSQL for multi-process canonical persistence,
+  durable consumer offsets, and projection checkpoints when
+  `FOLD_DATABASE_URL` is configured; the fsynced JSONL store remains the local
+  fallback and migration source.
   Owner-authorized transcript imports and workspace-readable history queries use
   dedicated routes that cannot be bypassed through generic event append.
   Its runtime adds exact-origin CORS, bounded per-address request limiting,
@@ -69,6 +81,11 @@ The first milestone is the risk-retirement gate from the reference document:
   metadata-only dry runs, writes explicitly requested redacted artifacts to a
   restrictive local vault, and delivers confirmed canonical bundles through
   the authenticated API without modifying source histories.
+- `@_89/super-brain-memory-worker` reads only the redacted transcript vault,
+  proposes deterministic project-aware memories, and consumes future run
+  events from a durable cursor. A narrow opt-in policy automatically promotes
+  high-confidence structured observations only when their project is resolved;
+  global and rule-derived proposals remain reviewable.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,
@@ -101,6 +118,8 @@ Local client setup and proxy configuration are documented in
 [`apps/brain/README.md`](./apps/brain/README.md).
 Historical transcript identity, privacy, import, and query behavior is recorded
 in [`docs/TRANSCRIPT_INGESTION.md`](./docs/TRANSCRIPT_INGESTION.md).
+The live architecture, memory lifecycle, harness contract, and PostgreSQL
+operations are documented in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
 The repository remains private. New Fold packages are `UNLICENSED` until package
 ownership and release terms are settled; the imported confidence kernel retains

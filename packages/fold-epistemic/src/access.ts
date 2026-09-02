@@ -33,14 +33,16 @@ export function canAccessSpace(access: EpistemicAccessContext, spaceId: string):
 }
 
 export function authorizeRecall(
-  memory: Pick<PersonalMemory, "workspaceId" | "spaceId" | "creatorId">,
+  memory: Pick<PersonalMemory, "workspaceId" | "spaceId" | "creatorId"> & {
+    readonly audience?: PersonalMemory["audience"];
+  },
   access: EpistemicAccessContext,
 ): RecallDecision {
   validateAccessContext(access);
   if (memory.workspaceId !== access.workspaceId) {
     return { allowed: false, reason: "workspace-mismatch" };
   }
-  if (memory.creatorId !== access.principalId) {
+  if ((memory.audience ?? "personal") === "personal" && memory.creatorId !== access.principalId) {
     return { allowed: false, reason: "creator-mismatch" };
   }
   if (memory.spaceId !== undefined && !canAccessSpace(access, memory.spaceId)) {
@@ -50,9 +52,17 @@ export function authorizeRecall(
 }
 
 export function assertCanWritePersonalMemory(
-  scope: { readonly workspaceId: string; readonly spaceId?: string; readonly creatorId: string },
+  scope: {
+    readonly workspaceId: string;
+    readonly spaceId?: string;
+    readonly creatorId: string;
+    readonly audience?: PersonalMemory["audience"];
+  },
   access: EpistemicAccessContext,
 ): void {
+  if (scope.creatorId !== access.principalId) {
+    throw new EpistemicAccessError("creator-mismatch: memory writes require the originating creator");
+  }
   const decision = authorizeRecall(scope, access);
   if (!decision.allowed) {
     throw new EpistemicAccessError(`personal memory access denied: ${decision.reason}`);

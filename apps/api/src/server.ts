@@ -14,12 +14,18 @@ import {
   serializeFoldState,
   type Author,
   type FoldEvent,
+  type FoldLogEntry,
 } from "@_89/fold";
 import type {
   EpistemicEventContext,
+  MemoryCandidateInput,
   MemoryInput,
   MemoryRevisionPatch,
   RecallRequest,
+} from "@_89/fold-epistemic";
+import {
+  MEMORY_CANDIDATE_DECISION_NODE_KIND,
+  MEMORY_CANDIDATE_NODE_KIND,
 } from "@_89/fold-epistemic";
 import {
   FoldSdkAccessError,
@@ -70,12 +76,23 @@ const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
 const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+const DEFAULT_EVENT_STREAM_POLL_MS = 1_000;
+const EVENT_STREAM_HEARTBEAT_MS = 15_000;
 
 const stampSchema = z
   .object({
     id: z.string().min(1),
     t: z.number().finite().nonnegative(),
     worldDate: z.string().regex(/^\d{4,6}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?$/),
+  })
+  .strict();
+
+const consumerCursorSchema = z
+  .object({
+    cursor: z.object({
+      t: z.number().finite().nonnegative(),
+      eventId: z.string().trim().min(1).max(500),
+    }).strict(),
   })
   .strict();
 
@@ -91,6 +108,8 @@ const memoryInputSchema = z
   .object({
     id: z.string().min(1),
     spaceId: z.string().min(1).optional(),
+    audience: z.enum(["personal", "workspace"]).optional(),
+    projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
     source: z.string().min(1).max(200),
     summary: z.string().max(500).optional(),
     content: jsonValueSchema.optional(),
@@ -107,6 +126,33 @@ const memoryPatchSchema = z
   })
   .strict();
 
+const memoryCandidateEvidenceSchema = z.object({
+  eventId: z.string().trim().min(1).max(500),
+  projectId: z.string().trim().min(1).max(300).optional(),
+  runId: z.string().trim().min(1).max(500).optional(),
+  turnId: z.string().trim().min(1).max(500).optional(),
+}).strict();
+
+const memoryCandidateInputSchema = z.object({
+  id: z.string().min(1),
+  spaceId: z.string().trim().min(1).max(300).optional(),
+  audience: z.enum(["personal", "workspace"]).optional(),
+  projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
+  source: z.string().trim().min(1).max(200),
+  summary: z.string().trim().min(1).max(500),
+  content: jsonValueSchema,
+  tags: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
+  entities: z.array(entitySchema).max(100).optional(),
+  evidence: z.array(memoryCandidateEvidenceSchema).min(1).max(100),
+  confidence: z.number().finite().min(0).max(1),
+  salience: z.number().finite().min(0).max(1),
+  extractor: z.object({
+    kind: z.enum(["rule", "model", "human"]),
+    id: z.string().trim().min(1).max(200),
+    version: z.string().trim().min(1).max(100),
+  }).strict(),
+}).strict();
+
 const recallScopeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }).strict(),
   z.object({ kind: z.literal("workspace") }).strict(),
@@ -118,6 +164,7 @@ const recallRequestSchema = z
     scope: recallScopeSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
     sources: z.array(z.string().min(1)).optional(),
+    projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
     from: z.number().finite().optional(),
     to: z.number().finite().optional(),
     limit: z.number().int().min(1).max(100).optional(),
@@ -172,6 +219,37 @@ const memoryForgetSchema = z
     ...causedByField,
   })
   .strict();
+
+const memoryCandidateProposalSchema = z.object({
+  stamp: stampSchema,
+  input: memoryCandidateInputSchema,
+  ...causedByField,
+}).strict();
+
+const memoryCandidateImportSchema = z.object({
+  audience: z.enum(["personal", "workspace"]),
+  spaceId: z.string().trim().min(1).max(300).optional(),
+  proposals: z.array(memoryCandidateProposalSchema).min(1).max(100),
+}).strict();
+
+const memoryCandidateAcceptSchema = z.object({
+  stamp: stampSchema,
+  memoryStamp: stampSchema,
+  memoryId: z.string().min(1),
+}).strict();
+
+const memoryCandidatePromotionSchema = z.object({
+  audience: z.enum(["personal", "workspace"]),
+  spaceId: z.string().trim().min(1).max(300).optional(),
+  acceptances: z.array(memoryCandidateAcceptSchema.extend({
+    candidateId: z.string().min(1),
+  })).min(1).max(100),
+}).strict();
+
+const memoryCandidateRejectSchema = z.object({
+  stamp: stampSchema,
+  reason: z.string().trim().min(1).max(500),
+}).strict();
 
 const trajectoryTreeRecordSchema = z
   .object({
@@ -384,6 +462,9 @@ function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof FoldSdkConflictError) {
     return new ApiHttpError(409, "fold_conflict", error.message);
   }
+  if (error instanceof Error && error.name === "PostgresFoldConflictError") {
+    return new ApiHttpError(409, "fold_conflict", error.message);
+  }
   if (error instanceof EventOrderError || error instanceof FoldValidationError) {
     return new ApiHttpError(409, "fold_conflict", error.message);
   }
@@ -396,6 +477,7 @@ function asHttpError(error: unknown): ApiHttpError {
     (error instanceof Error && [
       "EpistemicAccessError",
       "MemoryEventError",
+      "MemoryCandidateError",
       "ProjectionValidationError",
       "TraceValidationError",
       "TrajectoryEventError",
@@ -472,9 +554,13 @@ function assertGenericAppendRoute(event: FoldEvent): void {
   if (
     event.kind.startsWith("intention.") ||
     event.kind.startsWith("transcript.") ||
+    event.kind.startsWith("memory.candidate-") ||
     event.changes.some(
       (change) => "nodeKind" in change &&
-        (change.nodeKind === INTENTION_EVENT_NODE_KIND || transcriptNodeKinds.has(change.nodeKind)),
+        (change.nodeKind === INTENTION_EVENT_NODE_KIND ||
+          change.nodeKind === MEMORY_CANDIDATE_NODE_KIND ||
+          change.nodeKind === MEMORY_CANDIDATE_DECISION_NODE_KIND ||
+          transcriptNodeKinds.has(change.nodeKind)),
     )
   ) {
     throw new ApiHttpError(
@@ -544,12 +630,143 @@ function positiveIntegerQuery(url: URL, key: string, maximum: number): number | 
   return value;
 }
 
+function afterCursorFromUrl(url: URL): FoldSdkCursor | undefined {
+  const rawT = url.searchParams.get("afterT");
+  const eventId = url.searchParams.get("afterEventId");
+  if (rawT === null && eventId === null) return undefined;
+  if (rawT === null || eventId === null) {
+    throw new ApiHttpError(
+      400,
+      "invalid_cursor",
+      "afterT and afterEventId must be provided together",
+    );
+  }
+  const t = Number(rawT);
+  if (!Number.isFinite(t) || t < 0 || eventId.trim().length === 0) {
+    throw new ApiHttpError(400, "invalid_cursor", "Event stream cursor is invalid");
+  }
+  return { t, eventId };
+}
+
+function replayFromUrl(url: URL): "tail" | "all" {
+  const replay = url.searchParams.get("replay") ?? "tail";
+  if (replay !== "tail" && replay !== "all") {
+    throw new ApiHttpError(400, "invalid_replay", "replay must be tail or all");
+  }
+  return replay;
+}
+
+function isAfterCursor(entry: FoldLogEntry, cursor: FoldSdkCursor): boolean {
+  return entry.event.at.t > cursor.t ||
+    (entry.event.at.t === cursor.t && entry.event.id > cursor.eventId);
+}
+
+async function streamBatch(
+  dependencies: ApiDependencies,
+  sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
+  workspaceId: string,
+  access: FoldSdkAccessContext,
+  options: {
+    readonly after?: FoldSdkCursor;
+    readonly includeDrafts?: boolean;
+    readonly kinds?: readonly string[];
+    readonly limit: number;
+  },
+): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly scannedThrough?: FoldSdkCursor }> {
+  if (dependencies.sdks.streamEntries !== undefined) {
+    return dependencies.sdks.streamEntries(workspaceId, access, options);
+  }
+  const entries = await sdk.listEntries(access, {
+    ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
+    ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
+  });
+  const page = (options.after === undefined
+    ? entries
+    : entries.filter((entry) => isAfterCursor(entry, options.after!)))
+    .slice(0, options.limit);
+  const last = page.at(-1);
+  return {
+    entries: page,
+    ...(last === undefined ? {} : { scannedThrough: { t: last.event.at.t, eventId: last.event.id } }),
+  };
+}
+
+function startEventStream(
+  request: IncomingMessage,
+  response: ServerResponse,
+  dependencies: ApiDependencies,
+  sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
+  workspaceId: string,
+  access: FoldSdkAccessContext,
+  initialCursor: FoldSdkCursor | undefined,
+  includeDrafts: boolean,
+  kinds: readonly string[] | undefined,
+): void {
+  response.writeHead(200, {
+    "cache-control": "no-store, no-transform",
+    "connection": "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no",
+    "x-content-type-options": "nosniff",
+  });
+  response.write(": connected\n\n");
+
+  let cursor = initialCursor;
+  let closed = false;
+  let polling = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(pollTimer);
+    clearInterval(heartbeatTimer);
+  };
+  const fail = (error: unknown) => {
+    dependencies.reportError?.(error);
+    if (!closed) {
+      response.write(`event: stream-error\ndata: ${JSON.stringify({ code: "stream_failed" })}\n\n`);
+      response.end();
+    }
+    close();
+  };
+  const poll = async () => {
+    if (closed || polling) return;
+    polling = true;
+    try {
+      const batch = await streamBatch(dependencies, sdk, workspaceId, access, {
+        ...(cursor === undefined ? {} : { after: cursor }),
+        ...(includeDrafts ? { includeDrafts: true } : {}),
+        ...(kinds === undefined ? {} : { kinds }),
+        limit: 500,
+      });
+      for (const entry of batch.entries) {
+        const next = { t: entry.event.at.t, eventId: entry.event.id };
+        response.write(`event: fold-event\ndata: ${JSON.stringify({ entry, cursor: next })}\n\n`);
+      }
+      if (batch.scannedThrough !== undefined) cursor = batch.scannedThrough;
+    } catch (error) {
+      fail(error);
+    } finally {
+      polling = false;
+    }
+  };
+  const pollTimer = setInterval(() => void poll(), dependencies.eventStreamPollMs ?? DEFAULT_EVENT_STREAM_POLL_MS);
+  const heartbeatTimer = setInterval(() => {
+    if (!closed) response.write(`: heartbeat ${Date.now()}\n\n`);
+  }, EVENT_STREAM_HEARTBEAT_MS);
+  pollTimer.unref();
+  heartbeatTimer.unref();
+  request.once("close", close);
+  response.once("close", close);
+  void poll();
+}
+
 function parsedRecallRequest(input: unknown): RecallRequest {
   const parsed = recallRequestSchema.parse(input);
   return {
     ...(parsed.scope === undefined ? {} : { scope: parsed.scope }),
     ...(parsed.tags === undefined ? {} : { tags: parsed.tags }),
     ...(parsed.sources === undefined ? {} : { sources: parsed.sources }),
+    ...(parsed.projectIds === undefined ? {} : { projectIds: parsed.projectIds }),
     ...(parsed.from === undefined ? {} : { from: parsed.from }),
     ...(parsed.to === undefined ? {} : { to: parsed.to }),
     ...(parsed.limit === undefined ? {} : { limit: parsed.limit }),
@@ -566,11 +783,17 @@ function parsedMemoryInput(input: z.infer<typeof memoryInputSchema>): MemoryInpu
     id: input.id,
     source: input.source,
     ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
+    ...(input.audience === undefined ? {} : { audience: input.audience }),
+    ...(input.projectIds === undefined ? {} : { projectIds: input.projectIds }),
     ...(input.summary === undefined ? {} : { summary: input.summary }),
     ...(input.content === undefined ? {} : { content: input.content }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
     ...(input.entities === undefined ? {} : { entities: input.entities }),
   };
+}
+
+function parsedMemoryCandidateInput(input: z.infer<typeof memoryCandidateInputSchema>): MemoryCandidateInput {
+  return input as MemoryCandidateInput;
 }
 
 function parsedMemoryPatch(input: z.infer<typeof memoryPatchSchema>): MemoryRevisionPatch {
@@ -604,6 +827,7 @@ function recallFromUrl(url: URL): RecallRequest {
     ...(scope === undefined ? {} : { scope }),
     ...(url.searchParams.has("tag") ? { tags: url.searchParams.getAll("tag") } : {}),
     ...(url.searchParams.has("source") ? { sources: url.searchParams.getAll("source") } : {}),
+    ...(url.searchParams.has("projectId") ? { projectIds: url.searchParams.getAll("projectId") } : {}),
     ...(finiteQueryNumber(url, "from") === undefined ? {} : { from: finiteQueryNumber(url, "from") }),
     ...(finiteQueryNumber(url, "to") === undefined ? {} : { to: finiteQueryNumber(url, "to") }),
     ...(limit === undefined ? {} : { limit }),
@@ -614,6 +838,7 @@ function memoryContext(
   subject: AuthenticatedSubject,
   access: FoldSdkAccessContext,
   spaceId: string | undefined,
+  audience: "personal" | "workspace" = "personal",
 ): EpistemicEventContext {
   return {
     access,
@@ -622,7 +847,7 @@ function memoryContext(
       scope: {
         workspace: access.workspaceId,
         ...(spaceId === undefined ? {} : { space: spaceId }),
-        creator: access.principalId,
+        ...(audience === "personal" ? { creator: access.principalId } : {}),
       },
       identity: { principal: access.principalId, workspace: access.workspaceId },
     },
@@ -740,6 +965,70 @@ async function handleRequest(
   const resource = segments[3];
   const resourceId = segments[4] === undefined ? undefined : decodeSegment(segments[4], "resourceId");
   const maxBodyBytes = dependencies.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+
+  if (resource === "event-stream" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const include = includeFromUrl(url);
+    const includeDrafts = include === "canon+draft";
+    const kinds = url.searchParams.has("kind") ? url.searchParams.getAll("kind") : undefined;
+    let after = afterCursorFromUrl(url);
+    if (after === undefined && replayFromUrl(url) === "tail") {
+      if (dependencies.sdks.latestEventCursor !== undefined) {
+        after = await dependencies.sdks.latestEventCursor(workspaceId, access, {
+          ...(includeDrafts ? { includeDrafts: true } : {}),
+          ...(kinds === undefined ? {} : { kinds }),
+        });
+      } else {
+        const entries = await sdk.listEntries(access, {
+          ...(includeDrafts ? { include: "canon+draft" } : {}),
+          ...(kinds === undefined ? {} : { kinds }),
+        });
+        const last = entries.at(-1);
+        if (last !== undefined) after = { t: last.event.at.t, eventId: last.event.id };
+      }
+    }
+    startEventStream(
+      request,
+      response,
+      dependencies,
+      sdk,
+      workspaceId,
+      access,
+      after,
+      includeDrafts,
+      kinds,
+    );
+    return;
+  }
+
+  if (resource === "consumers" && resourceId !== undefined) {
+    if (resourceId.length > 200) {
+      throw new ApiHttpError(400, "invalid_consumer", "consumerId must be at most 200 characters");
+    }
+    if (
+      dependencies.sdks.consumerCursor === undefined ||
+      dependencies.sdks.commitConsumerCursor === undefined
+    ) {
+      throw new ApiHttpError(
+        501,
+        "durable_consumers_unavailable",
+        "The configured Fold store does not persist consumer cursors",
+      );
+    }
+    const scopedConsumerId = JSON.stringify([subject.principalId, resourceId]);
+    if (method === "GET") {
+      const cursor = await dependencies.sdks.consumerCursor(workspaceId, scopedConsumerId);
+      sendJson(response, 200, { consumerId: resourceId, cursor: cursor ?? null });
+      return;
+    }
+    if (method === "POST") {
+      const body = consumerCursorSchema.parse(await readJsonBody(request, maxBodyBytes));
+      await dependencies.sdks.commitConsumerCursor(workspaceId, scopedConsumerId, body.cursor);
+      sendJson(response, 200, { consumerId: resourceId, cursor: body.cursor });
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
 
   if (resource === "events" && resourceId === undefined) {
     if (method === "GET") {
@@ -928,6 +1217,7 @@ async function handleRequest(
       ...(body.scope === undefined ? {} : { scope: body.scope }),
       ...(body.tags === undefined ? {} : { tags: body.tags }),
       ...(body.sources === undefined ? {} : { sources: body.sources }),
+      ...(body.projectIds === undefined ? {} : { projectIds: body.projectIds }),
       ...(body.from === undefined ? {} : { from: body.from }),
       ...(body.to === undefined ? {} : { to: body.to }),
       limit: body.limit ?? 5,
@@ -987,6 +1277,124 @@ async function handleRequest(
     return;
   }
 
+  if (resource === "memory-candidates" && resourceId === undefined) {
+    if (method === "GET") {
+      const rawStatus = url.searchParams.get("status");
+      const status = rawStatus === null
+        ? undefined
+        : z.enum(["proposed", "accepted", "rejected"]).parse(rawStatus);
+      const limit = positiveIntegerQuery(url, "limit", 1_000);
+      const rawOffset = finiteQueryNumber(url, "offset");
+      if (rawOffset !== undefined && (!Number.isInteger(rawOffset) || rawOffset < 0)) {
+        throw new ApiHttpError(400, "invalid_query", "offset must be a non-negative integer");
+      }
+      sendJson(response, 200, {
+        candidates: await sdk.memoryCandidates(access, {
+          ...(status === undefined ? {} : { status }),
+          ...(url.searchParams.has("projectId") ? { projectIds: url.searchParams.getAll("projectId") } : {}),
+          ...(limit === undefined ? {} : { limit }),
+          ...(rawOffset === undefined ? {} : { offset: rawOffset }),
+        }),
+      });
+      return;
+    }
+    if (method === "POST") {
+      const body = memoryCandidateProposalSchema.parse(await readJsonBody(request, maxBodyBytes));
+      const input = parsedMemoryCandidateInput(body.input);
+      sendJson(response, 201, await sdk.proposeMemoryCandidate(
+        memoryContext(subject, access, input.spaceId, input.audience),
+        body.stamp,
+        input,
+        body.causedBy,
+      ));
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+
+  if (resource === "memory-candidate-imports" && resourceId === undefined) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = memoryCandidateImportSchema.parse(await readJsonBody(request, maxBodyBytes));
+    for (const proposal of body.proposals) {
+      if ((proposal.input.audience ?? "personal") !== body.audience || proposal.input.spaceId !== body.spaceId) {
+        throw new ApiHttpError(400, "candidate_batch_scope_mismatch", "Every candidate must match the batch audience and space");
+      }
+    }
+    const candidates = await sdk.proposeMemoryCandidates(
+      memoryContext(subject, access, body.spaceId, body.audience),
+      body.proposals.map((proposal) => ({
+        stamp: proposal.stamp,
+        input: parsedMemoryCandidateInput(proposal.input),
+        ...(proposal.causedBy === undefined ? {} : { causedBy: proposal.causedBy }),
+      })),
+    );
+    sendJson(response, 201, { candidates });
+    return;
+  }
+
+  if (resource === "memory-candidate-promotions" && resourceId === undefined) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = memoryCandidatePromotionSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const views = new Map((await sdk.memoryCandidates(access)).map((view) => [view.candidate.id, view]));
+    for (const acceptance of body.acceptances) {
+      const view = views.get(acceptance.candidateId);
+      if (view === undefined || view.status !== "proposed") {
+        throw new ApiHttpError(404, "memory_candidate_unavailable", `Memory candidate ${acceptance.candidateId} is unavailable`);
+      }
+      if (view.candidate.audience !== body.audience || view.candidate.spaceId !== body.spaceId) {
+        throw new ApiHttpError(400, "candidate_batch_scope_mismatch", "Every candidate must match the batch audience and space");
+      }
+    }
+    if (body.audience === "workspace" && !canSteer(access)) {
+      throw new ApiHttpError(403, "shared_memory_review_access_denied", "Workspace memory review requires an owner or admin role");
+    }
+    const accepted = await sdk.acceptMemoryCandidates(
+      memoryContext(subject, access, body.spaceId, body.audience),
+      body.acceptances.map((acceptance) => ({
+        decisionStamp: acceptance.stamp,
+        memoryStamp: acceptance.memoryStamp,
+        candidateId: acceptance.candidateId,
+        memoryId: acceptance.memoryId,
+      })),
+    );
+    sendJson(response, 201, { accepted });
+    return;
+  }
+
+  if (resource === "memory-candidates" && resourceId !== undefined && segments.length === 6) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const action = decodeSegment(segments[5]!, "candidate action");
+    if (action !== "accept" && action !== "reject") {
+      throw new ApiHttpError(404, "not_found", "Route not found");
+    }
+    const view = (await sdk.memoryCandidates(access)).find(({ candidate }) => candidate.id === resourceId);
+    if (view === undefined || view.status !== "proposed") {
+      throw new ApiHttpError(404, "memory_candidate_unavailable", "Memory candidate is unavailable");
+    }
+    if (view.candidate.audience === "workspace" && !canSteer(access)) {
+      throw new ApiHttpError(
+        403,
+        "shared_memory_review_access_denied",
+        "Workspace memory review requires an owner or admin role",
+      );
+    }
+    const context = memoryContext(subject, access, view.candidate.spaceId, view.candidate.audience);
+    if (action === "accept") {
+      const body = memoryCandidateAcceptSchema.parse(await readJsonBody(request, maxBodyBytes));
+      sendJson(response, 201, await sdk.acceptMemoryCandidate(
+        context,
+        body.stamp,
+        body.memoryStamp,
+        resourceId,
+        body.memoryId,
+      ));
+    } else {
+      const body = memoryCandidateRejectSchema.parse(await readJsonBody(request, maxBodyBytes));
+      sendJson(response, 201, await sdk.rejectMemoryCandidate(context, body.stamp, resourceId, body.reason));
+    }
+    return;
+  }
+
   if (resource === "memories" && resourceId === "recall") {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const recall = parsedRecallRequest(await readJsonBody(request, maxBodyBytes));
@@ -1010,8 +1418,15 @@ async function handleRequest(
     if (method === "POST") {
       const body = memoryRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
       const input = parsedMemoryInput(body.input);
+      if (input.audience === "workspace" && !canSteer(access)) {
+        throw new ApiHttpError(
+          403,
+          "shared_memory_access_denied",
+          "Workspace memory writes require an owner or admin role",
+        );
+      }
       const result = await sdk.recordMemory(
-        memoryContext(subject, access, input.spaceId),
+        memoryContext(subject, access, input.spaceId, input.audience),
         body.stamp,
         input,
         body.causedBy,
@@ -1034,7 +1449,7 @@ async function handleRequest(
     }
     const current = await sdk.memoryById(access, resourceId);
     if (current === undefined) throw new PersonalMemoryUnavailableError(resourceId);
-    const context = memoryContext(subject, access, current.spaceId);
+    const context = memoryContext(subject, access, current.spaceId, current.audience);
     if (method === "PATCH") {
       const body = memoryRevisionSchema.parse(await readJsonBody(request, maxBodyBytes));
       sendJson(
@@ -1076,6 +1491,12 @@ export function createApiServer(dependencies: ApiDependencies): Server {
     (!Number.isInteger(dependencies.maxBodyBytes) || dependencies.maxBodyBytes <= 0)
   ) {
     throw new TypeError("maxBodyBytes must be a positive integer");
+  }
+  if (
+    dependencies.eventStreamPollMs !== undefined &&
+    (!Number.isInteger(dependencies.eventStreamPollMs) || dependencies.eventStreamPollMs < 10)
+  ) {
+    throw new TypeError("eventStreamPollMs must be an integer of at least 10 milliseconds");
   }
   const allowedOrigins = corsOriginSet(dependencies.corsOrigins);
   const server = createServer((request, response) => {

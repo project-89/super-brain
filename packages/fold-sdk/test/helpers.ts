@@ -1,5 +1,5 @@
 import { parseEvent, type FoldEvent, type FoldLogEntry } from "@_89/fold";
-import type { EpistemicEventContext } from "@_89/fold-epistemic";
+import type { EpistemicEventContext, MemoryAudience } from "@_89/fold-epistemic";
 
 import type { FoldSdkAccessContext, FoldSdkStore } from "../src/index.js";
 
@@ -9,6 +9,7 @@ export const MEMORY_B = "01890f47-7c01-7000-8000-000000000002";
 export class MemoryStore implements FoldSdkStore {
   readonly entries: FoldLogEntry[] = [];
   readCount = 0;
+  appendManyCount = 0;
 
   constructor(readonly stableReads = false) {}
 
@@ -19,6 +20,11 @@ export class MemoryStore implements FoldSdkStore {
 
   async append(entry: FoldLogEntry): Promise<void> {
     this.entries.push(entry);
+  }
+
+  async appendMany(entries: readonly FoldLogEntry[]): Promise<void> {
+    this.appendManyCount += 1;
+    this.entries.push(...entries);
   }
 }
 
@@ -82,6 +88,7 @@ export function event(options: EventOptions): FoldEvent {
 
 interface MemoryContextOptions extends AccessOptions {
   readonly spaceId?: string;
+  readonly audience?: MemoryAudience;
 }
 
 export function memoryContext(options: MemoryContextOptions = {}): EpistemicEventContext {
@@ -97,7 +104,7 @@ export function memoryContext(options: MemoryContextOptions = {}): EpistemicEven
       scope: {
         workspace: currentAccess.workspaceId,
         ...(options.spaceId === undefined ? {} : { space: options.spaceId }),
-        creator: currentAccess.principalId,
+        ...(options.audience === "workspace" ? {} : { creator: currentAccess.principalId }),
       },
       identity: {
         principal: currentAccess.principalId,

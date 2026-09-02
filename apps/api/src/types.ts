@@ -2,8 +2,10 @@ import type { Author } from "@_89/fold";
 import type {
   FoldSdk,
   FoldSdkAccessContext,
+  FoldSdkCursor,
   MemoryRanker,
 } from "@_89/fold-sdk";
+import type { FoldLogEntry } from "@_89/fold";
 import type { ReasoningProvider } from "./reasoning.js";
 import type { RequestRateLimiter } from "./rate-limit.js";
 
@@ -26,6 +28,33 @@ export interface MembershipResolver {
 
 export interface FoldSdkRegistry {
   sdkFor(workspaceId: string): Promise<FoldSdk>;
+  streamEntries?(
+    workspaceId: string,
+    access: FoldSdkAccessContext,
+    options: {
+      readonly after?: FoldSdkCursor;
+      readonly includeDrafts?: boolean;
+      readonly kinds?: readonly string[];
+      readonly limit: number;
+    },
+  ): Promise<{
+    readonly entries: readonly FoldLogEntry[];
+    readonly scannedThrough?: FoldSdkCursor;
+  }>;
+  latestEventCursor?(
+    workspaceId: string,
+    access: FoldSdkAccessContext,
+    options: {
+      readonly includeDrafts?: boolean;
+      readonly kinds?: readonly string[];
+    },
+  ): Promise<FoldSdkCursor | undefined>;
+  consumerCursor?(workspaceId: string, consumerId: string): Promise<FoldSdkCursor | undefined>;
+  commitConsumerCursor?(
+    workspaceId: string,
+    consumerId: string,
+    cursor: FoldSdkCursor,
+  ): Promise<void>;
 }
 
 export interface ApiDependencies {
@@ -38,6 +67,7 @@ export interface ApiDependencies {
   readonly rateLimiter?: RequestRateLimiter;
   readonly corsOrigins?: readonly string[];
   readonly reportError?: (error: unknown) => void;
+  readonly eventStreamPollMs?: number;
 }
 
 export interface StaticWorkspaceMembership {

@@ -139,6 +139,28 @@ describe("SDK personal memory API", () => {
     });
   });
 
+  it("ranks the complete authorized corpus beyond the response limit", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    for (let index = 0; index < 125; index += 1) {
+      const memoryId = `01890f47-7d00-7000-8000-${index.toString(16).padStart(12, "0")}`;
+      await sdk.recordMemory(memoryContext(), stamp(`event-${index.toString().padStart(3, "0")}`, 1_000 + index), {
+        id: memoryId,
+        source: "archive",
+        summary: `Memory ${index}`,
+      });
+    }
+    let corpusSize = 0;
+    const result = await sdk.rankMemories(access(), { query: "memory", limit: 5 }, {
+      descriptor: { id: "complete-corpus-test", kind: "lexical" },
+      async rank({ documents }) {
+        corpusSize = documents.length;
+        return [];
+      },
+    });
+    expect(corpusSize).toBe(125);
+    expect(result.ranking.corpusSize).toBe(125);
+  });
+
   it("rejects empty ranked recall queries before calling the provider", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     let called = false;
@@ -167,5 +189,115 @@ describe("SDK personal memory API", () => {
     await expect(
       sdk.forgetMemory(otherContext, stamp("event-c", 120), MEMORY_B, "remove"),
     ).rejects.toThrow(`personal memory is unavailable: ${MEMORY_B}`);
+  });
+
+  it("promotes a workspace candidate and its memory atomically with provenance", async () => {
+    const store = new MemoryStore();
+    const sdk = new FoldSdk(store);
+    const proposed = await sdk.proposeMemoryCandidate(
+      memoryContext({ principalId: "agent-a", audience: "workspace" }),
+      stamp("candidate-event", 100),
+      {
+        id: MEMORY_A,
+        audience: "workspace",
+        projectIds: ["project-a"],
+        source: "transcript",
+        summary: "Use Postgres for canonical events",
+        content: { decision: "postgres" },
+        tags: ["decision"],
+        evidence: [{ eventId: "transcript-chunk-1", projectId: "project-a", runId: "run-a" }],
+        confidence: 0.9,
+        salience: 0.8,
+        extractor: { kind: "rule", id: "decision-rule", version: "1" },
+      },
+    );
+    expect(proposed.candidate.proposerId).toBe("agent-a");
+
+    const result = await sdk.acceptMemoryCandidate(
+      memoryContext({ principalId: "owner-a", workspaceRole: "owner", audience: "workspace" }),
+      stamp("accept-event", 110),
+      stamp("memory-event", 111),
+      MEMORY_A,
+      MEMORY_B,
+    );
+    expect(result.memory).toMatchObject({
+      id: MEMORY_B,
+      audience: "workspace",
+      projectIds: ["project-a"],
+      creatorId: "owner-a",
+    });
+    expect(result.memoryEvent.causedBy).toEqual(["candidate-event", "accept-event"]);
+    expect(store.appendManyCount).toBe(1);
+    expect((await sdk.memoryCandidates(access({ principalId: "user-b" })))[0]?.status).toBe("accepted");
+    expect((await sdk.recallMemories(access({ principalId: "user-b" }), { projectIds: ["project-a"] }))[0]?.memory.id).toBe(MEMORY_B);
+  });
+
+  it("does not expose personal candidates to another principal", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    await sdk.proposeMemoryCandidate(memoryContext(), stamp("candidate-event", 100), {
+      id: MEMORY_A,
+      source: "transcript",
+      summary: "Private preference",
+      content: "Use compact output",
+      evidence: [{ eventId: "transcript-chunk-1" }],
+      confidence: 0.8,
+      salience: 0.5,
+      extractor: { kind: "rule", id: "preference-rule", version: "1" },
+    });
+    expect(await sdk.memoryCandidates(access({ principalId: "user-b", workspaceRole: "owner" }))).toEqual([]);
+  });
+
+  it("atomically appends bounded candidate batches", async () => {
+    const store = new MemoryStore();
+    const sdk = new FoldSdk(store);
+    const context = memoryContext({ audience: "workspace" });
+    const results = await sdk.proposeMemoryCandidates(context, [MEMORY_A, MEMORY_B].map((id, index) => ({
+      stamp: stamp(`candidate-event-${index}`, 100 + index),
+      input: {
+        id,
+        audience: "workspace" as const,
+        source: "transcript",
+        summary: `Candidate ${index}`,
+        content: { index },
+        evidence: [{ eventId: `run-event-${index}` }],
+        confidence: 0.8,
+        salience: 0.7,
+        extractor: { kind: "rule" as const, id: "batch-rule", version: "1" },
+      },
+    })));
+    expect(results).toHaveLength(2);
+    expect(store.appendManyCount).toBe(1);
+    expect(await sdk.memoryCandidates(access())).toHaveLength(2);
+  });
+
+  it("atomically promotes a bounded candidate batch into active memory", async () => {
+    const store = new MemoryStore();
+    const sdk = new FoldSdk(store);
+    const context = memoryContext({ audience: "workspace" });
+    const memoryC = "01890f47-7c02-7000-8000-000000000003";
+    const memoryD = "01890f47-7c03-7000-8000-000000000004";
+    await sdk.proposeMemoryCandidates(context, [MEMORY_A, MEMORY_B].map((id, index) => ({
+      stamp: stamp(`candidate-event-${index}`, 100 + index),
+      input: {
+        id,
+        audience: "workspace" as const,
+        projectIds: ["project-a"],
+        source: "claude-mem-observation",
+        summary: `Candidate ${index}`,
+        content: { index },
+        evidence: [{ eventId: `run-event-${index}` }],
+        confidence: 0.96,
+        salience: 0.9,
+        extractor: { kind: "rule" as const, id: "batch-rule", version: "1" },
+      },
+    })));
+    const promoted = await sdk.acceptMemoryCandidates(context, [
+      { decisionStamp: stamp("accept-a", 110), memoryStamp: stamp("memory-a", 111), candidateId: MEMORY_A, memoryId: memoryC },
+      { decisionStamp: stamp("accept-b", 112), memoryStamp: stamp("memory-b", 113), candidateId: MEMORY_B, memoryId: memoryD },
+    ]);
+    expect(promoted.map(({ memory }) => memory.id)).toEqual([memoryC, memoryD]);
+    expect((await sdk.memoryCandidates(access())).every(({ status }) => status === "accepted")).toBe(true);
+    expect(await sdk.recallMemories(access(), { projectIds: ["project-a"] })).toHaveLength(2);
+    expect(store.appendManyCount).toBe(2);
   });
 });

@@ -156,6 +156,7 @@ export default function App() {
       return (
         <MemoryPage
           memories={snapshot.memories}
+          candidates={snapshot.memoryCandidates}
           onRank={(options) => api.rankMemories(options)}
           onCreate={() => setMemoryDialog({ open: true })}
           onEdit={(memory) => setMemoryDialog({ open: true, memory })}
@@ -163,6 +164,33 @@ export default function App() {
             setForgetMemory(memory);
             setForgetReason("no longer needed");
           }}
+          onAcceptCandidate={async (candidate) => {
+            setMutationPending(true);
+            setMutationError(undefined);
+            try {
+              await api.acceptMemoryCandidate(candidate.id);
+              setNotice("Memory candidate accepted");
+              await refresh(true);
+            } catch (caught) {
+              setMutationError(caught instanceof Error ? caught.message : "Candidate acceptance failed");
+            } finally {
+              setMutationPending(false);
+            }
+          }}
+          onRejectCandidate={async (candidate, reason) => {
+            setMutationPending(true);
+            setMutationError(undefined);
+            try {
+              await api.rejectMemoryCandidate(candidate.id, reason);
+              setNotice("Memory candidate rejected");
+              await refresh(true);
+            } catch (caught) {
+              setMutationError(caught instanceof Error ? caught.message : "Candidate rejection failed");
+            } finally {
+              setMutationPending(false);
+            }
+          }}
+          mutationPending={mutationPending}
         />
       );
     }

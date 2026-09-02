@@ -71,6 +71,8 @@ describe("Fold API client", () => {
 
     await expect(
       client.createMemory({
+        audience: "personal",
+        projectIds: ["project-a"],
         source: "conversation",
         summary: "Decision",
         content: { decision: "Ship the client" },

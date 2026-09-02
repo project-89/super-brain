@@ -46,6 +46,12 @@ function matchesFilters(memory: PersonalMemory, request: RecallRequest): boolean
   if (request.sources !== undefined && request.sources.length > 0 && !request.sources.includes(memory.source)) {
     return false;
   }
+  if (request.projectIds !== undefined && request.projectIds.length > 0) {
+    const requested = new Set(request.projectIds);
+    if (memory.projectIds.length > 0 && !memory.projectIds.some((projectId) => requested.has(projectId))) {
+      return false;
+    }
+  }
   if (request.from !== undefined && memory.createdAt < request.from) return false;
   if (request.to !== undefined && memory.createdAt > request.to) return false;
   return true;
@@ -63,6 +69,23 @@ function candidateScores(request: RecallRequest): ReadonlyMap<string, number> | 
     if (current === undefined || candidate.score > current) scores.set(candidate.memoryId, candidate.score);
   }
   return scores;
+}
+
+export function recallMemoryCorpus(
+  projection: MemoryProjection,
+  access: EpistemicAccessContext,
+  request: Omit<RecallRequest, "limit" | "candidates"> = {},
+): PersonalMemory[] {
+  validateAccessContext(access);
+  validateRequest({ ...request, limit: DEFAULT_RECALL_LIMIT });
+  const scope = request.scope;
+  if (scope?.kind === "space" && !canAccessSpace(access, scope.spaceId)) return [];
+  return [...projection.memories.values()]
+    .filter((memory) => authorizeRecall(memory, access).allowed && matchesFilters(memory, request))
+    .sort((left, right) => {
+      const timeOrder = right.createdAt - left.createdAt;
+      return timeOrder !== 0 ? timeOrder : compareUuidV7(left.id, right.id);
+    });
 }
 
 export function recallMemories(

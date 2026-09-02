@@ -36,7 +36,8 @@ export function rebuildMemories(events: readonly FoldEvent[]): MemoryProjection 
         if (
           current.creatorId !== record.actorId ||
           current.workspaceId !== record.workspaceId ||
-          current.spaceId !== record.spaceId
+          current.spaceId !== record.spaceId ||
+          current.audience !== record.audience
         ) {
           throw new MemoryProjectionError(`${record.recordType} principal does not own memory ${record.memoryId}`);
         }

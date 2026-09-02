@@ -6,6 +6,7 @@ import type {
   EpistemicEventStamp,
   ForgottenMemory,
   MemoryEntityRef,
+  MemoryAudience,
   MemoryInput,
   MemoryRevisionPatch,
   PersonalMemory,
@@ -24,6 +25,7 @@ export type MemoryLogRecord =
       readonly actorId: string;
       readonly workspaceId: string;
       readonly spaceId?: string;
+      readonly audience: MemoryAudience;
       readonly atMs: number;
       readonly memory: PersonalMemory;
     }
@@ -32,6 +34,7 @@ export type MemoryLogRecord =
       readonly actorId: string;
       readonly workspaceId: string;
       readonly spaceId?: string;
+      readonly audience: MemoryAudience;
       readonly atMs: number;
       readonly memoryId: string;
       readonly patch: MemoryRevisionPatch;
@@ -41,6 +44,7 @@ export type MemoryLogRecord =
       readonly actorId: string;
       readonly workspaceId: string;
       readonly spaceId?: string;
+      readonly audience: MemoryAudience;
       readonly atMs: number;
       readonly memoryId: string;
       readonly reason: string;
@@ -88,6 +92,16 @@ export function normalizeMemoryTags(tags: readonly string[] = []): string[] {
   return [...normalized].sort(compareCodeUnits);
 }
 
+export function normalizeMemoryProjectIds(projectIds: readonly string[] = []): string[] {
+  const normalized = new Set<string>();
+  for (const projectId of projectIds) {
+    const value = projectId.trim();
+    nonEmpty(value, "memory project id", 300);
+    normalized.add(value);
+  }
+  return [...normalized].sort(compareCodeUnits);
+}
+
 function validateEntity(entity: MemoryEntityRef): void {
   nonEmpty(entity.id, "entity id", 200);
   nonEmpty(entity.type, "entity type", 200);
@@ -114,10 +128,19 @@ function validateContext(context: EpistemicEventContext): void {
   }
 }
 
-function validateMemoryScope(context: EpistemicEventContext, spaceId: string | undefined): void {
+function validateMemoryScope(
+  context: EpistemicEventContext,
+  spaceId: string | undefined,
+  audience: MemoryAudience,
+): void {
   validateContext(context);
-  if (context.capture.scope.creator !== context.access.principalId) {
-    throw new MemoryEventError("capture.scope.creator must match personal memory creator");
+  const expectedCreator = audience === "personal" ? context.access.principalId : undefined;
+  if (context.capture.scope.creator !== expectedCreator) {
+    throw new MemoryEventError(
+      audience === "personal"
+        ? "capture.scope.creator must match personal memory creator"
+        : "workspace memory capture must not be creator-scoped",
+    );
   }
   if (context.capture.scope.space !== spaceId) {
     throw new MemoryEventError("capture.scope.space must match memory spaceId");
@@ -180,6 +203,8 @@ function memoryJson(memory: PersonalMemory): Record<string, JsonValue> {
     workspaceId: memory.workspaceId,
     ...(memory.spaceId === undefined ? {} : { spaceId: memory.spaceId }),
     creatorId: memory.creatorId,
+    audience: memory.audience,
+    projectIds: [...memory.projectIds],
     source: memory.source,
     summary: memory.summary,
     content: memory.content,
@@ -205,7 +230,8 @@ export function makeMemoryRecordedEvent(
   input: MemoryInput,
   causedBy?: readonly string[],
 ): FoldEvent {
-  validateMemoryScope(context, input.spaceId);
+  const audience = input.audience ?? "personal";
+  validateMemoryScope(context, input.spaceId, audience);
   assertUuidV7(input.id, "memory id");
   nonEmpty(input.source, "memory source", 200);
   if (input.summary !== undefined && input.summary.length > 500) {
@@ -217,6 +243,7 @@ export function makeMemoryRecordedEvent(
       workspaceId: context.access.workspaceId,
       ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
       creatorId: context.access.principalId,
+      audience,
     },
     context.access,
   );
@@ -226,6 +253,8 @@ export function makeMemoryRecordedEvent(
     workspaceId: context.access.workspaceId,
     ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
     creatorId: context.access.principalId,
+    audience,
+    projectIds: normalizeMemoryProjectIds(input.projectIds),
     source: input.source,
     summary: input.summary ?? summarizeMemoryContent(content),
     content,
@@ -237,7 +266,7 @@ export function makeMemoryRecordedEvent(
   };
   return makeEvent(context, stamp, {
     kind: "memory.recorded",
-    title: `Personal memory recorded from ${input.source}`,
+    title: `${audience === "personal" ? "Personal" : "Workspace"} memory recorded from ${input.source}`,
     nodeKind: MEMORY_NODE_KIND,
     subject: input.id,
     after: {
@@ -245,6 +274,7 @@ export function makeMemoryRecordedEvent(
       actorId: context.access.principalId,
       workspaceId: context.access.workspaceId,
       ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
+      audience,
       atMs: stamp.t,
       memory: memoryJson(memory),
     },
@@ -259,7 +289,7 @@ export function makeMemoryRevisedEvent(
   patch: MemoryRevisionPatch,
   causedBy?: readonly string[],
 ): FoldEvent {
-  validateMemoryScope(context, memory.spaceId);
+  validateMemoryScope(context, memory.spaceId, memory.audience);
   assertUuidV7(memory.id, "memory id");
   assertCanWritePersonalMemory(memory, context.access);
   if (stamp.t < memory.updatedAt) {
@@ -282,7 +312,7 @@ export function makeMemoryRevisedEvent(
   }
   return makeEvent(context, stamp, {
     kind: "memory.revised",
-    title: `Personal memory ${memory.id} revised`,
+    title: `${memory.audience === "personal" ? "Personal" : "Workspace"} memory ${memory.id} revised`,
     nodeKind: MEMORY_REVISION_NODE_KIND,
     subject: `urn:fold-record:${stamp.id}`,
     after: {
@@ -290,6 +320,7 @@ export function makeMemoryRevisedEvent(
       actorId: context.access.principalId,
       workspaceId: context.access.workspaceId,
       ...(memory.spaceId === undefined ? {} : { spaceId: memory.spaceId }),
+      audience: memory.audience,
       atMs: stamp.t,
       memoryId: memory.id,
       patch: patchJson(normalizedPatch),
@@ -305,7 +336,7 @@ export function makeMemoryForgottenEvent(
   reason: string,
   causedBy?: readonly string[],
 ): FoldEvent {
-  validateMemoryScope(context, memory.spaceId);
+  validateMemoryScope(context, memory.spaceId, memory.audience);
   assertUuidV7(memory.id, "memory id");
   assertCanWritePersonalMemory(memory, context.access);
   if (stamp.t < memory.updatedAt) {
@@ -314,7 +345,7 @@ export function makeMemoryForgottenEvent(
   nonEmpty(reason, "forget reason");
   return makeEvent(context, stamp, {
     kind: "memory.forgotten",
-    title: `Personal memory ${memory.id} forgotten`,
+    title: `${memory.audience === "personal" ? "Personal" : "Workspace"} memory ${memory.id} forgotten`,
     nodeKind: MEMORY_FORGET_NODE_KIND,
     subject: `urn:fold-record:${stamp.id}`,
     after: {
@@ -322,6 +353,7 @@ export function makeMemoryForgottenEvent(
       actorId: context.access.principalId,
       workspaceId: context.access.workspaceId,
       ...(memory.spaceId === undefined ? {} : { spaceId: memory.spaceId }),
+      audience: memory.audience,
       atMs: stamp.t,
       memoryId: memory.id,
       reason,
@@ -377,11 +409,20 @@ function optionalString(value: JsonValue | undefined, label: string): string | u
   return value === undefined ? undefined : stringValue(value, label);
 }
 
+function memoryAudience(value: JsonValue | undefined): MemoryAudience {
+  if (value === undefined) return "personal";
+  if (value !== "personal" && value !== "workspace") {
+    throw new MemoryEventError("memory audience must be personal or workspace");
+  }
+  return value;
+}
+
 function validateEnvelope(
   event: FoldEvent,
   actorId: string,
   workspaceId: string,
   spaceId: string | undefined,
+  audience: MemoryAudience,
   atMs: number,
 ): void {
   if (event.participants?.includes(actorId) !== true) {
@@ -393,8 +434,9 @@ function validateEnvelope(
   if (event.capture.scope.space !== spaceId) {
     throw new MemoryEventError(`event ${event.id} space does not match capture scope`);
   }
-  if (event.capture.scope.creator !== actorId) {
-    throw new MemoryEventError(`event ${event.id} principal does not match capture scope`);
+  const expectedCreator = audience === "personal" ? actorId : undefined;
+  if (event.capture.scope.creator !== expectedCreator) {
+    throw new MemoryEventError(`event ${event.id} audience does not match capture scope`);
   }
   if (event.capture.identity?.principal !== actorId) {
     throw new MemoryEventError(`event ${event.id} principal does not match capture identity`);
@@ -430,6 +472,10 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
     workspaceId: stringValue(memory.workspaceId, "memory workspaceId"),
     ...(memory.spaceId === undefined ? {} : { spaceId: stringValue(memory.spaceId, "memory spaceId") }),
     creatorId: stringValue(memory.creatorId, "memory creatorId"),
+    audience: memoryAudience(memory.audience),
+    projectIds: normalizeMemoryProjectIds(
+      memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds"),
+    ),
     source,
     summary,
     content: memory.content,
@@ -477,8 +523,9 @@ export function memoryLogRecordsFromEvent(event: FoldEvent): MemoryLogRecord[] {
     const actorId = stringValue(payload.actorId, "memory actorId");
     const workspaceId = stringValue(payload.workspaceId, "memory workspaceId");
     const spaceId = optionalString(payload.spaceId, "memory spaceId");
+    const audience = memoryAudience(payload.audience);
     const atMs = numberValue(payload.atMs, "memory atMs");
-    validateEnvelope(event, actorId, workspaceId, spaceId, atMs);
+    validateEnvelope(event, actorId, workspaceId, spaceId, audience, atMs);
     if (change.provenance?.basis !== "authored") {
       throw new MemoryEventError(`event ${event.id} memory record must have authored provenance`);
     }
@@ -493,10 +540,13 @@ export function memoryLogRecordsFromEvent(event: FoldEvent): MemoryLogRecord[] {
       if (memory.spaceId !== spaceId) {
         throw new MemoryEventError("recorded memory space does not match event");
       }
+      if (memory.audience !== audience) {
+        throw new MemoryEventError("recorded memory audience does not match event");
+      }
       if (memory.createdAt !== atMs || memory.updatedAt !== atMs) {
         throw new MemoryEventError("recorded memory timestamps must match event t");
       }
-      records.push({ recordType, actorId, workspaceId, ...(spaceId === undefined ? {} : { spaceId }), atMs, memory });
+      records.push({ recordType, actorId, workspaceId, ...(spaceId === undefined ? {} : { spaceId }), audience, atMs, memory });
     } else if (recordType === "revised" && change.nodeKind === MEMORY_REVISION_NODE_KIND) {
       if (event.kind !== "memory.revised" || change.subject !== `urn:fold-record:${event.id}`) {
         throw new MemoryEventError(`memory record type ${recordType} does not match event envelope`);
@@ -508,6 +558,7 @@ export function memoryLogRecordsFromEvent(event: FoldEvent): MemoryLogRecord[] {
         actorId,
         workspaceId,
         ...(spaceId === undefined ? {} : { spaceId }),
+        audience,
         atMs,
         memoryId,
         patch: parsePatch(payload.patch),
@@ -523,6 +574,7 @@ export function memoryLogRecordsFromEvent(event: FoldEvent): MemoryLogRecord[] {
         actorId,
         workspaceId,
         ...(spaceId === undefined ? {} : { spaceId }),
+        audience,
         atMs,
         memoryId,
         reason: stringValue(payload.reason, "forget reason"),
@@ -542,6 +594,7 @@ export function forgottenMemoryFromRecord(
     workspaceId: record.workspaceId,
     ...(record.spaceId === undefined ? {} : { spaceId: record.spaceId }),
     creatorId: record.actorId,
+    audience: record.audience,
     forgottenAt: record.atMs,
     reason: record.reason,
   };

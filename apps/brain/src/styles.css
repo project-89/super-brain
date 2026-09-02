@@ -741,6 +741,57 @@ p {
   flex-wrap: wrap;
 }
 
+.memory-view {
+  margin: -8px 0 14px;
+}
+
+.candidate-filter-bar {
+  min-height: 36px;
+}
+
+.candidate-evidence {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.candidate-evidence li {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 10px;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+.candidate-evidence code,
+.candidate-evidence span {
+  overflow-wrap: anywhere;
+  font-size: 9px;
+}
+
+.candidate-evidence span {
+  color: var(--text-muted);
+}
+
+.candidate-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.candidate-actions > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .memory-mode {
   height: 36px;
   padding: 2px;
@@ -2572,7 +2623,8 @@ textarea::placeholder {
   .page-header h1 { font-size: 22px; line-height: 28px; }
   .filter-bar { align-items: stretch; flex-wrap: wrap; }
   .filter-bar .search-field { width: 100%; }
-  .compact-field { flex: 1 1 130px; }
+  .compact-field { min-width: 0; flex: 1 1 130px; }
+  .compact-field select, .compact-field input { width: 100%; }
   .result-count { width: 100%; margin: 0; text-align: right; }
   .master-detail, .event-layout, .state-layout, .trajectory-workspace, .history-workspace, .fleet-workspace, .steering-workspace { height: auto; min-height: 0; grid-template-columns: minmax(0, 1fr); }
   .master-list, .event-table-pane, .state-list { max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -2606,6 +2658,11 @@ textarea::placeholder {
 
 @media (max-width: 560px) {
   .topbar__actions { gap: 1px; }
+  .memory-filter-bar { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .memory-filter-bar > * { width: 100%; min-width: 0; }
+  .memory-filter-bar .memory-mode { justify-self: stretch; }
+  .memory-filter-bar .result-count { text-align: right; }
+  .page--memory .master-detail { margin-bottom: 20px; }
   .metrics-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric { gap: 9px; padding: 13px 10px; }
   .metric__icon { flex-basis: 30px; width: 30px; height: 30px; }

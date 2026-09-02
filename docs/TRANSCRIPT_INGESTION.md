@@ -12,6 +12,8 @@ turning source directories or private reasoning into canonical state.
   -> optional redacted local artifact vault
   -> owner-authorized API import
   -> Fold project/artifact/run/chunk events
+  -> durable transcript-memory subscriber
+  -> project-aware proposal and optional trusted promotion
   -> workspace-authorized SDK/API catalog
   -> Brain History view
 ```
@@ -102,6 +104,21 @@ work after interruption. The bearer token is never written to CLI output.
 The routes are under `/v1/workspaces/:workspace`. Reads use current workspace
 authorization. Transcript event kinds and node kinds are rejected by generic
 event append.
+
+## Memory Formation
+
+`@_89/super-brain-memory-worker` reads only the redacted vault after metadata
+has entered Fold. It recognizes structured ClaudeMem observations and explicit
+durable transcript statements, attaches immutable run/turn/event evidence, and
+resolves project roots from the transcript catalog. Candidate IDs are
+deterministic, so a confirmed backfill is resumable and duplicate-safe.
+
+Every extraction first becomes a `memory.candidate-proposed` event. With
+`--auto-promote`, only structured observations at confidence `>= 0.95` with a
+resolved project are accepted automatically. Acceptance appends a decision and
+active memory atomically. Rule-derived and unresolved global observations stay
+pending for explicit review. The `watch` command uses a principal-scoped durable
+consumer cursor and resumes after API or network interruption.
 
 ## Current Limits
 

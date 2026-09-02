@@ -6,7 +6,11 @@ import type {
 } from "@_89/fold";
 import type {
   EpistemicAccessContext,
+  EpistemicEventStamp,
   ForgottenMemory,
+  MemoryCandidate,
+  MemoryCandidateDecision,
+  MemoryCandidateView,
   PersonalMemory,
   RecallRequest,
   RecalledMemory,
@@ -42,8 +46,11 @@ export interface FoldSdkStore {
   readonly stableReads?: boolean;
   read(options?: { readonly missing?: "error" | "empty" }): Promise<{
     readonly entries: readonly FoldLogEntry[];
+    readonly revision?: string;
   }>;
   append(entry: FoldLogEntry): Promise<void>;
+  appendMany?(entries: readonly FoldLogEntry[]): Promise<void>;
+  revision?(): Promise<string>;
 }
 
 export interface FoldSdkCursor {
@@ -88,6 +95,37 @@ export interface MemoryForgetResult {
   readonly forgotten: ForgottenMemory;
 }
 
+export interface MemoryCandidateMutationResult {
+  readonly event: FoldEvent;
+  readonly candidate: MemoryCandidate;
+}
+
+export interface MemoryCandidateAcceptanceResult {
+  readonly decisionEvent: FoldEvent;
+  readonly memoryEvent: FoldEvent;
+  readonly decision: Extract<MemoryCandidateDecision, { readonly kind: "accepted" }>;
+  readonly memory: PersonalMemory;
+}
+
+export interface MemoryCandidateAcceptanceInput {
+  readonly decisionStamp: EpistemicEventStamp;
+  readonly memoryStamp: EpistemicEventStamp;
+  readonly candidateId: string;
+  readonly memoryId: string;
+}
+
+export interface MemoryCandidateRejectionResult {
+  readonly event: FoldEvent;
+  readonly decision: Extract<MemoryCandidateDecision, { readonly kind: "rejected" }>;
+}
+
+export interface MemoryCandidateListOptions {
+  readonly status?: MemoryCandidateView["status"];
+  readonly projectIds?: readonly string[];
+  readonly offset?: number;
+  readonly limit?: number;
+}
+
 export type MemoryRankingKind = "lexical" | "semantic";
 
 export interface MemoryRankerDescriptor {
@@ -104,9 +142,19 @@ export interface MemoryRankingDocument {
   readonly entities: PersonalMemory["entities"];
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly revision: number;
+}
+
+export interface MemoryEmbeddingProvider {
+  readonly descriptor: {
+    readonly id: string;
+    readonly dimensions: number;
+  };
+  embed(inputs: readonly string[]): Promise<readonly (readonly number[])[]>;
 }
 
 export interface MemoryRankingRequest {
+  readonly workspaceId: string;
   readonly query: string;
   readonly documents: readonly MemoryRankingDocument[];
   readonly limit: number;

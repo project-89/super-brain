@@ -1,7 +1,13 @@
 import type { AddressInfo } from "node:net";
 
 import { parseEvent, type FoldEvent, type FoldLogEntry } from "@_89/fold";
-import { FoldSdk, type FoldSdkAccessContext, type FoldSdkStore } from "@_89/fold-sdk";
+import {
+  FoldSdk,
+  FoldSdkConflictError,
+  type FoldSdkAccessContext,
+  type FoldSdkCursor,
+  type FoldSdkStore,
+} from "@_89/fold-sdk";
 
 import {
   StaticIdentityDirectory,
@@ -26,6 +32,7 @@ class MemoryStore implements FoldSdkStore {
 
 export class MemorySdkRegistry implements FoldSdkRegistry {
   private readonly sdks = new Map<string, FoldSdk>();
+  private readonly cursors = new Map<string, FoldSdkCursor>();
 
   async sdkFor(workspaceId: string): Promise<FoldSdk> {
     let sdk = this.sdks.get(workspaceId);
@@ -34,6 +41,22 @@ export class MemorySdkRegistry implements FoldSdkRegistry {
       this.sdks.set(workspaceId, sdk);
     }
     return sdk;
+  }
+
+  async consumerCursor(workspaceId: string, consumerId: string) {
+    return this.cursors.get(JSON.stringify([workspaceId, consumerId]));
+  }
+
+  async commitConsumerCursor(workspaceId: string, consumerId: string, cursor: FoldSdkCursor) {
+    const key = JSON.stringify([workspaceId, consumerId]);
+    const current = this.cursors.get(key);
+    if (
+      current !== undefined &&
+      (cursor.t < current.t || (cursor.t === current.t && cursor.eventId < current.eventId))
+    ) {
+      throw new FoldSdkConflictError("consumer cursor cannot move backward");
+    }
+    this.cursors.set(key, cursor);
   }
 }
 

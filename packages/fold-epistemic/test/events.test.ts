@@ -161,6 +161,7 @@ describe("personal memory evidence", () => {
     expect(memoryLogRecordsFromEvent(revision)[0]).toEqual({
       recordType: "revised",
       actorId: "user-a",
+      audience: "personal",
       workspaceId: "workspace-1",
       spaceId: "space-a",
       atMs: 110,

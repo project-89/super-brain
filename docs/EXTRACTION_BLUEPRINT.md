@@ -35,8 +35,9 @@ The intended dependency direction is:
 @_89/fold-activity --> fold-fleet
 @_89/fold-trace + fold-eval + fold-epistemic --> fold-trajectory
 @_89/fold + fold-activity + fold-fleet + fold-epistemic + fold-trajectory + fold-transcript --> fold-sdk
-@_89/fold-sdk + fold-storage --> apps/api --> apps/brain
+@_89/fold-sdk + fold-storage + fold-postgres --> apps/api --> apps/brain
 fold-transcript --> apps/importer --> apps/api
+apps/api --> super-brain-client --> memory-worker and external harnesses
 ```
 
 The diagram shows allowed direction, not a requirement that every pack depend on
@@ -58,7 +59,10 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
 | `@_89/fold-trajectory` | Scoped tree/run lifecycle and task analysis | Local `fold-trace` and `fold-eval` contracts | Implemented; empirical runs pending |
 | `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log, memory, trajectory, activity, fleet, and transcript core implemented |
+| `@_89/fold-postgres` | Transactional Fold events, durable offsets/checkpoints, optional pgvector projection | Local SDK contracts and PostgreSQL | Implemented and migrated with real pgvector integration coverage |
+| `@_89/super-brain-client` | Harness-neutral authenticated producer and resumable consumer | Local API contract | Implemented with SSE reconnect and durable cursor semantics |
 | `apps/importer` | Read-only historical source adapters and local redacted vault | Local Claude Code and Codex JSONL | Scan and confirmed API delivery implemented |
+| `apps/memory-worker` | Project-aware transcript extraction, proposal, policy promotion, durable subscription | Redacted vault, transcript catalog, local client | Implemented and backfilled |
 | `apps/api` | Authenticated service over the local SDK | Local packages only | Event, projection, memory, trajectory, transcript, fleet, steering, and reasoning HTTP core implemented |
 | `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Memory, history, event, state, trajectory, fleet, steering, and reasoning workflows implemented |
 
@@ -104,9 +108,9 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
    reconstruction, orphan planning, scoped SDK/API delivery,
    and the operator view are implemented. Authenticated external sensor wiring
    and runtime actuation remain host integrations.
-7. **Domain completion:** drive, wear, intention, personal memory, tombstone,
-   and recall-time access cores are implemented. Raven vector search and UI stay
-   host concerns rather than core dependencies.
+7. **Domain completion:** drive, wear, intention, project-aware memory,
+   candidate/decision ledger, tombstone, recall-time access, pgvector derived
+   ranking, and proposal review are implemented.
 8. **Delivery:** `@_89/fold-sdk` exposes scoped journal, projection,
    personal-memory, trajectory, activity, fleet, and transcript APIs. `apps/api` serves that boundary with
    authenticated authors, fresh membership, and durable per-workspace journals.
@@ -180,8 +184,9 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
    catalog reads remain workspace-authorized.
 
 One SDK instance serializes its read-check-append operations. Authentication,
-membership resolution, and HTTP transport now live in `apps/api`;
-cross-process transactionality and ranker infrastructure remain follow-on work.
+membership resolution, and HTTP transport live in `apps/api`. PostgreSQL adds
+cross-process workspace transactions, durable consumer offsets, projection
+checkpoints, and an optional real pgvector ranker.
 
 ## API Delivery Status
 
@@ -219,10 +224,11 @@ cross-process transactionality and ranker infrastructure remain follow-on work.
     replay validation, and idempotent retries; project/run history is readable to
     authorized workspace members and reserved from generic append.
 
-Multi-host writer coordination, external identity providers, authenticated
-external sensor credentials, recovery actuation, deployment TLS, distributed
-proxy rate limiting, production embedding/vector/model infrastructure, and
-automated salience producers remain explicit follow-on work.
+External identity providers, authenticated external sensor credentials,
+recovery actuation, deployment TLS, distributed proxy rate limiting,
+multi-host failover, and production embedding/model sidecars remain explicit
+deployment work. Automated transcript salience and policy promotion are local
+operational features.
 
 ## Brain Delivery Status
 
@@ -252,7 +258,7 @@ automated salience producers remain explicit follow-on work.
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
 Real two-model capture, production semantic embeddings/model reasoning,
-automated salience producers, general graph layout, event authoring,
+general graph layout, event authoring,
 identity-provider login, and deployment-specific secret delivery remain
 follow-on product work.
 

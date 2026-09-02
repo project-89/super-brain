@@ -3,8 +3,10 @@
 Work-focused browser client for the authenticated Fold API. It provides:
 
 - workspace activity and projection totals;
-- private personal-memory record, local filter, provider-ranked recall,
-  revision, and forget workflows;
+- personal and workspace memory record, project-aware filter,
+  provider-ranked full-corpus recall, revision, and forget workflows;
+- pending memory proposal review with evidence, extractor identity,
+  confidence, salience, and explicit accept/reject decisions;
 - shared trajectory task import, coverage, route, divergence, review, and
   per-step projection inspection;
 - imported project and source-qualified run history with context, turn, action,

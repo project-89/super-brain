@@ -6,6 +6,8 @@ import type { JsonValue, MemoryDraft, PersonalMemory } from "../types";
 import { Modal } from "./Modal";
 
 const EMPTY_DRAFT: MemoryDraft = {
+  audience: "personal",
+  projectIds: [],
   source: "conversation",
   summary: "",
   content: "",
@@ -23,6 +25,7 @@ interface MemoryDialogProps {
 export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryDialogProps) {
   const [draft, setDraft] = useState<MemoryDraft>(EMPTY_DRAFT);
   const [tags, setTags] = useState("");
+  const [projects, setProjects] = useState("");
   const [contentText, setContentText] = useState("");
   const [contentMode, setContentMode] = useState<"text" | "json">("text");
   const [contentError, setContentError] = useState<string>();
@@ -32,6 +35,8 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
       ? EMPTY_DRAFT
       : {
           source: memory.source,
+          audience: memory.audience,
+          projectIds: memory.projectIds,
           summary: memory.summary,
           content: memoryContent(memory),
           tags: memory.tags,
@@ -39,6 +44,7 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
         };
     setDraft(next);
     setTags(next.tags.join(", "));
+    setProjects(next.projectIds.join(", "));
     setContentText(next.content as string);
     setContentMode(memory !== undefined && typeof memory.content !== "string" ? "json" : "text");
     setContentError(undefined);
@@ -60,13 +66,33 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
       .split(",")
       .map((tag) => tag.trim())
       .filter(Boolean);
-    void onSave({ ...draft, content, tags: [...new Set(parsedTags)] });
+    const parsedProjects = projects
+      .split(",")
+      .map((project) => project.trim())
+      .filter(Boolean);
+    void onSave({
+      ...draft,
+      content,
+      tags: [...new Set(parsedTags)],
+      projectIds: [...new Set(parsedProjects)],
+    });
   };
 
   return (
     <Modal open={open} title={memory === undefined ? "New memory" : "Revise memory"} width="wide" onClose={onClose}>
       <form className="form-stack" onSubmit={submit}>
         <div className="form-grid">
+          <label className="field">
+            <span>Audience</span>
+            <select
+              value={draft.audience}
+              onChange={(event) => setDraft({ ...draft, audience: event.target.value as MemoryDraft["audience"] })}
+              disabled={memory !== undefined}
+            >
+              <option value="personal">Personal</option>
+              <option value="workspace">Workspace</option>
+            </select>
+          </label>
           <label className="field">
             <span>Source</span>
             <input
@@ -88,6 +114,15 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
             />
           </label>
         </div>
+        <label className="field">
+          <span>Projects</span>
+          <input
+            value={projects}
+            onChange={(event) => setProjects(event.target.value)}
+            disabled={memory !== undefined}
+            placeholder="Project IDs, comma separated"
+          />
+        </label>
         <label className="field">
           <span>Summary</span>
           <input

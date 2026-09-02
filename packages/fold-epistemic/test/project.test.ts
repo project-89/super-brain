@@ -77,6 +77,7 @@ describe("memory projection", () => {
       workspaceId: "workspace-1",
       spaceId: "space-a",
       creatorId: "user-a",
+      audience: "personal",
       forgottenAt: 120,
       reason: "user request",
     });

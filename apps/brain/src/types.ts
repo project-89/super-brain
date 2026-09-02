@@ -66,6 +66,8 @@ export interface PersonalMemory {
   readonly workspaceId: string;
   readonly spaceId?: string;
   readonly creatorId: string;
+  readonly audience: "personal" | "workspace";
+  readonly projectIds: readonly string[];
   readonly source: string;
   readonly summary: string;
   readonly content: JsonValue;
@@ -83,6 +85,37 @@ export interface PersonalMemory {
 export interface RecalledMemory {
   readonly memory: PersonalMemory;
   readonly score?: number;
+}
+
+export interface MemoryCandidate {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly spaceId?: string;
+  readonly proposerId: string;
+  readonly audience: "personal" | "workspace";
+  readonly projectIds: readonly string[];
+  readonly source: string;
+  readonly summary: string;
+  readonly content: JsonValue;
+  readonly tags: readonly string[];
+  readonly entities: PersonalMemory["entities"];
+  readonly evidence: readonly {
+    readonly eventId: string;
+    readonly projectId?: string;
+    readonly runId?: string;
+    readonly turnId?: string;
+  }[];
+  readonly confidence: number;
+  readonly salience: number;
+  readonly extractor: { readonly kind: "rule" | "model" | "human"; readonly id: string; readonly version: string };
+  readonly proposedAt: number;
+  readonly proposalEventId: string;
+}
+
+export interface MemoryCandidateView {
+  readonly candidate: MemoryCandidate;
+  readonly status: "proposed" | "accepted" | "rejected";
+  readonly decision?: Readonly<Record<string, JsonValue>>;
 }
 
 export interface RankedMemoryRecallResult {
@@ -129,6 +162,7 @@ export type BrainPage = "overview" | "memory" | "history" | "trajectories" | "fl
 export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
   readonly memories: readonly RecalledMemory[];
+  readonly memoryCandidates: readonly MemoryCandidateView[];
   readonly trajectoryTasks: readonly TrajectoryTaskSummary[];
   readonly transcriptProjects: readonly TranscriptProjectSummary[];
   readonly transcriptRuns: readonly TranscriptRun[];
@@ -247,6 +281,8 @@ export type MemoryScope =
   | { readonly kind: "space"; readonly spaceId: string };
 
 export interface MemoryDraft {
+  readonly audience: "personal" | "workspace";
+  readonly projectIds: readonly string[];
   readonly source: string;
   readonly summary: string;
   readonly content: JsonValue;

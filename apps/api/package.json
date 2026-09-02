@@ -24,6 +24,7 @@
     "@_89/fold": "workspace:*",
     "@_89/fold-drives": "workspace:*",
     "@_89/fold-epistemic": "workspace:*",
+    "@_89/fold-postgres": "workspace:*",
     "@_89/fold-sdk": "workspace:*",
     "@_89/fold-storage": "workspace:*",
     "@_89/fold-transcript": "workspace:*",
