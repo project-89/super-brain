@@ -6,6 +6,7 @@ import type {
   EpistemicEventStamp,
   ForgottenMemory,
   MemoryEntityRef,
+  MemoryCandidateEvidence,
   MemoryAudience,
   MemoryInput,
   MemoryRevisionPatch,
@@ -210,10 +211,29 @@ function memoryJson(memory: PersonalMemory): Record<string, JsonValue> {
     content: memory.content,
     tags: [...memory.tags],
     entities: entityJson(memory.entities),
+    ...(memory.evidence === undefined ? {} : { evidence: evidenceJson(memory.evidence) }),
     createdAt: memory.createdAt,
     updatedAt: memory.updatedAt,
     revision: memory.revision,
   };
+}
+
+function evidenceJson(evidence: readonly MemoryCandidateEvidence[]): JsonValue[] {
+  return evidence.map((item) => ({
+    eventId: item.eventId,
+    ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
+    ...(item.runId === undefined ? {} : { runId: item.runId }),
+    ...(item.turnId === undefined ? {} : { turnId: item.turnId }),
+  }));
+}
+
+function validateEvidence(evidence: readonly MemoryCandidateEvidence[]): void {
+  for (const [index, item] of evidence.entries()) {
+    nonEmpty(item.eventId, `memory evidence ${index} eventId`, 500);
+    if (item.projectId !== undefined) nonEmpty(item.projectId, `memory evidence ${index} projectId`, 300);
+    if (item.runId !== undefined) nonEmpty(item.runId, `memory evidence ${index} runId`, 500);
+    if (item.turnId !== undefined) nonEmpty(item.turnId, `memory evidence ${index} turnId`, 500);
+  }
 }
 
 function patchJson(patch: MemoryRevisionPatch): Record<string, JsonValue> {
@@ -221,6 +241,7 @@ function patchJson(patch: MemoryRevisionPatch): Record<string, JsonValue> {
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: [...patch.tags] }),
+    ...(patch.evidence === undefined ? {} : { evidence: evidenceJson(patch.evidence) }),
   };
 }
 
@@ -238,6 +259,7 @@ export function makeMemoryRecordedEvent(
     throw new MemoryEventError("memory summary must be at most 500 characters");
   }
   for (const entity of input.entities ?? []) validateEntity(entity);
+  validateEvidence(input.evidence ?? []);
   assertCanWritePersonalMemory(
     {
       workspaceId: context.access.workspaceId,
@@ -260,6 +282,7 @@ export function makeMemoryRecordedEvent(
     content,
     tags: normalizeMemoryTags(input.tags),
     entities: [...(input.entities ?? [])],
+    ...(input.evidence === undefined ? {} : { evidence: [...input.evidence] }),
     createdAt: stamp.t,
     updatedAt: stamp.t,
     revision: 0,
@@ -295,17 +318,19 @@ export function makeMemoryRevisedEvent(
   if (stamp.t < memory.updatedAt) {
     throw new MemoryEventError("memory revision must not predate the current memory");
   }
-  const allowed = new Set(["summary", "content", "tags"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
   if (patch.summary !== undefined && patch.summary.length > 500) {
     throw new MemoryEventError("memory summary must be at most 500 characters");
   }
+  validateEvidence(patch.evidence ?? []);
   const normalizedPatch: MemoryRevisionPatch = {
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: normalizeMemoryTags(patch.tags) }),
+    ...(patch.evidence === undefined ? {} : { evidence: [...patch.evidence] }),
   };
   if (Object.keys(normalizedPatch).length === 0) {
     throw new MemoryEventError("memory revision patch must not be empty");
@@ -405,6 +430,22 @@ function parseEntities(value: JsonValue | undefined): MemoryEntityRef[] {
   });
 }
 
+function parseEvidence(value: JsonValue | undefined): MemoryCandidateEvidence[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new MemoryEventError("memory evidence must be an array");
+  const evidence = value.map((item, index) => {
+    const record = objectValue(item, `memory evidence ${index}`);
+    return {
+      eventId: stringValue(record.eventId, `memory evidence ${index} eventId`),
+      ...(record.projectId === undefined ? {} : { projectId: stringValue(record.projectId, `memory evidence ${index} projectId`) }),
+      ...(record.runId === undefined ? {} : { runId: stringValue(record.runId, `memory evidence ${index} runId`) }),
+      ...(record.turnId === undefined ? {} : { turnId: stringValue(record.turnId, `memory evidence ${index} turnId`) }),
+    };
+  });
+  validateEvidence(evidence);
+  return evidence;
+}
+
 function optionalString(value: JsonValue | undefined, label: string): string | undefined {
   return value === undefined ? undefined : stringValue(value, label);
 }
@@ -466,6 +507,7 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
     throw new MemoryEventError("memory summary must be at most 500 characters");
   }
   const entities = parseEntities(memory.entities);
+  const evidence = parseEvidence(memory.evidence);
   for (const entity of entities) validateEntity(entity);
   return {
     id,
@@ -481,6 +523,7 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
     content: memory.content,
     tags: normalizeMemoryTags(stringArray(memory.tags, "memory tags")),
     entities,
+    ...(evidence === undefined ? {} : { evidence }),
     createdAt,
     updatedAt,
     revision,
@@ -489,7 +532,7 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
 
 function parsePatch(value: JsonValue | undefined): MemoryRevisionPatch {
   const patch = objectValue(value, "memory revision patch");
-  const allowed = new Set(["summary", "content", "tags"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
@@ -500,6 +543,7 @@ function parsePatch(value: JsonValue | undefined): MemoryRevisionPatch {
       : { summary: textValue(patch.summary, "summary") }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: normalizeMemoryTags(stringArray(patch.tags, "tags")) }),
+    ...(patch.evidence === undefined ? {} : { evidence: parseEvidence(patch.evidence)! }),
   };
   if (parsed.summary !== undefined && parsed.summary.length > 500) {
     throw new MemoryEventError("memory summary must be at most 500 characters");

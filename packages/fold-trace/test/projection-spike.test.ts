@@ -166,7 +166,21 @@ describe("two-model projection feasibility spike", () => {
       traversals: 2,
       successes: 1,
       failures: 0,
+      unknowns: 1,
+      classifiedSamples: 1,
       successRate: 1,
+    });
+  });
+
+  it("does not claim a consensus path from unknown-only outcomes", () => {
+    const unknown = projectTrajectory({ ...modelA, id: "trace_unknown", outcome: "unknown" }, tree, assignmentsA);
+    const analysis = analyzeProjectedTrajectories([unknown], tree);
+    expect(analysis.routes[0]).toMatchObject({ samples: 1, classifiedSamples: 0, unknowns: 1 });
+    expect(analysis.mostSuccessfulPath).toEqual([]);
+    expect(firstDivergentEdge(unknown, analysis.mostSuccessfulPath, tree)).toEqual({
+      kind: "indeterminate",
+      comparedEdges: 0,
+      reason: "no-consensus",
     });
   });
 

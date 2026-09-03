@@ -16,12 +16,26 @@ Raw exposed reasoning is excluded from transcript artifacts by default. Setting
 never copied into canonical events automatically. Encrypted reasoning is always
 discarded by the importer.
 
+New configurations encrypt redacted vault artifacts with a separate AES-256-GCM
+key. Existing configurations can enable future encrypted writes with
+`enable-vault-encryption`, followed by a daemon restart.
+
 ```sh
 SUPER_BRAIN_CAPTURE_TOKEN=... super-brain-capture init
 super-brain-capture install-hooks
 super-brain-capture install-service
 super-brain-capture status
 ```
+
+Integrity-manifest exports use `SUPER_BRAIN_EXPORT_TOKEN` when the capture
+sensor credential is intentionally write-only. Raw-hook retention is dry-run by
+default and never removes canonical events or redacted transcript artifacts.
+Quarantined permanent failures can be reviewed with `retry-failed` and returned
+to the durable delivery queue only with `retry-failed --confirm` after their
+underlying compatibility or authorization issue has been corrected. If newer
+events already made the original timestamp impossible to append, use the
+additional explicit `--rebase-events`; the reissued event retains its original
+ID in capture identity.
 
 Agents can publish deliberate, concise reasoning and operator verdicts without
 exposing private transcript content:

@@ -10,7 +10,7 @@ import {
 import type { JsonValue } from "@_89/fold";
 import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
 
-import { resolveProject } from "./project.js";
+import { refreshProject, resolveProject } from "./project.js";
 import { DurableSpool, HookVault, StateStore } from "./storage.js";
 import type {
   CaptureConfig,
@@ -123,7 +123,9 @@ function eventStamp(artifact: VaultArtifact, index: number, label: string) {
 }
 
 function stepFor(session: CaptureSession, input: Omit<CapturedStep, "id" | "stepNumber">): CaptureSession {
-  if (session.steps.length >= 2_000) return session;
+  if (session.steps.length >= 2_000) {
+    return { ...session, truncatedStepCount: (session.truncatedStepCount ?? 0) + 1 };
+  }
   const stepNumber = session.steps.length + 1;
   return {
     ...session,
@@ -138,7 +140,43 @@ function traceStep(step: CapturedStep): TrajectoryInput["steps"][number] {
     role: step.role,
     content: step.content,
     ...(step.toolName === undefined ? {} : { toolName: step.toolName }),
+    ...(step.artifactId === undefined ? {} : { artifactId: step.artifactId }),
+    ...(step.eventId === undefined ? {} : { eventId: step.eventId }),
+    ...(step.turnId === undefined ? {} : { turnId: step.turnId }),
+    ...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
+    ...(step.durationMs === undefined ? {} : { durationMs: step.durationMs }),
   };
+}
+
+function pendingToolKey(payload: Record<string, unknown>): string {
+  return toolUseId(payload) ?? `${toolName(payload)}:unpaired`;
+}
+
+function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
+  const {
+    lastVerification: _lastVerification,
+    explicitOutcome: _explicitOutcome,
+    reviewText: _reviewText,
+    ...remaining
+  } = session;
+  return remaining;
+}
+
+function trajectoryTaskId(session: CaptureSession): string {
+  return session.comparisonKey === undefined
+    ? `capture-session:${session.source}:${session.sessionId}`
+    : `capture-task:${session.project.id}:${session.comparisonKey}`;
+}
+
+function sharedNodeId(step: {
+  readonly stepNumber: number;
+  readonly nodeKind: CapturedStep["nodeKind"] | "outcome";
+  readonly role: CapturedStep["role"];
+  readonly content: string;
+  readonly toolName?: string;
+}): string {
+  const semantic = hash(JSON.stringify([step.nodeKind, step.role, step.toolName ?? "", step.content])).slice(0, 16);
+  return `node-${step.stepNumber.toString().padStart(4, "0")}-${semantic}`;
 }
 
 export class CaptureEngine {
@@ -154,12 +192,47 @@ export class CaptureEngine {
 
   async initialize(): Promise<void> {
     this.state = await this.stateStore.load();
+    const sessions = { ...this.state.sessions };
+    let changed = false;
+    for (const [key, session] of Object.entries(sessions)) {
+      if (session.source !== "unknown") continue;
+      const concrete = Object.values(sessions).filter((candidate) =>
+        candidate.source !== "unknown" && candidate.sessionId === session.sessionId
+      );
+      if (concrete.length === 1) {
+        delete sessions[key];
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.state = { ...this.state, sessions };
+      await this.stateStore.save(this.state);
+    }
     await this.spool.initialize();
   }
 
-  snapshot(): { readonly activeSessions: number; readonly knownSessions: number } {
+  snapshot(): {
+    readonly activeSessions: number;
+    readonly knownSessions: number;
+    readonly unfinishedSessions: number;
+    readonly staleSessions: number;
+    readonly receivedHooks: number;
+    readonly lastHookAt?: string;
+    readonly truncatedSteps: number;
+  } {
     const sessions = Object.values(this.state.sessions);
-    return { activeSessions: sessions.filter((session) => session.active).length, knownSessions: sessions.length };
+    const now = Date.now();
+    return {
+      activeSessions: sessions.filter((session) => session.active).length,
+      knownSessions: sessions.length,
+      unfinishedSessions: sessions.filter((session) => !session.finalized).length,
+      staleSessions: sessions.filter((session) =>
+        !session.finalized && now - Date.parse(session.lastSeenAt) >= this.config.orphanAfterMs
+      ).length,
+      receivedHooks: this.state.receivedHooks ?? 0,
+      ...(this.state.lastHookAt === undefined ? {} : { lastHookAt: this.state.lastHookAt }),
+      truncatedSteps: sessions.reduce((total, session) => total + (session.truncatedStepCount ?? 0), 0),
+    };
   }
 
   ingest(source: HookSource, payloadInput: unknown): Promise<{ readonly artifactId: string }> {
@@ -168,8 +241,8 @@ export class CaptureEngine {
     return operation;
   }
 
-  heartbeat(): Promise<void> {
-    const operation = this.chain.then(() => this.heartbeatInternal());
+  heartbeat(nowMs = Date.now()): Promise<void> {
+    const operation = this.chain.then(() => this.heartbeatInternal(nowMs));
     this.chain = operation.catch(() => undefined);
     return operation;
   }
@@ -197,6 +270,12 @@ export class CaptureEngine {
           runtime: session.source,
           project: session.project.name,
           ...(session.comparisonKey === undefined ? {} : { comparison: session.comparisonKey }),
+          ...(session.model === undefined ? {} : { model: session.model }),
+          ...(session.harnessVersion === undefined ? {} : { harnessVersion: session.harnessVersion }),
+          ...(session.permissionMode === undefined ? {} : { permissionMode: session.permissionMode }),
+          ...(session.currentTurnId === undefined ? {} : { turn: session.currentTurnId }),
+          ...(session.project.head === undefined ? {} : { gitHead: session.project.head }),
+          ...(session.project.worktreeDigest === undefined ? {} : { worktree: session.project.worktreeDigest }),
         },
       },
     };
@@ -218,32 +297,62 @@ export class CaptureEngine {
     artifact: VaultArtifact,
     index: number,
     observation: TerminalObservation,
-  ): Promise<void> {
-    await this.enqueueEvent(makeTerminalObservationEvent(this.context(session), stamp(artifact, index, "observation"), observation));
+    causedBy: readonly string[] | undefined = session.lastEventId === undefined ? undefined : [session.lastEventId],
+  ): Promise<CaptureSession> {
+    const event = makeTerminalObservationEvent(
+      this.context(session),
+      stamp(artifact, index, "observation"),
+      observation,
+      causedBy,
+    );
+    await this.enqueueEvent(event);
+    return { ...session, lastEventId: event.id };
   }
 
   private async ensureSession(
     source: HookSource,
     payload: Record<string, unknown>,
     artifact: VaultArtifact,
-  ): Promise<{ readonly key: string; readonly session: CaptureSession; readonly resumed: boolean }> {
+  ): Promise<{
+    readonly key: string;
+    readonly session: CaptureSession;
+    readonly resumed: boolean;
+    readonly created: boolean;
+  }> {
     const sessionId = nativeSessionId(payload);
     if (sessionId === undefined) throw new TypeError("hook payload requires session_id");
     const key = sessionKey(source, sessionId);
-    const existing = this.state.sessions[key];
+    let existing = this.state.sessions[key];
+    if (existing === undefined && source !== "unknown") {
+      const provisionalKey = sessionKey("unknown", sessionId);
+      const provisional = this.state.sessions[provisionalKey];
+      if (provisional !== undefined && !provisional.finalized) {
+        const sessions = { ...this.state.sessions };
+        delete sessions[provisionalKey];
+        existing = { ...provisional, source, agent: agentName(source) };
+        this.state = { ...this.state, sessions };
+      }
+    }
     const observedTranscriptPath = transcriptPath(payload);
     const observedModel = text(payload.model);
+    const observedHarnessVersion = text(payload.client_version) ?? text(payload.clientVersion) ?? text(payload.harness_version);
+    const observedPermissionMode = text(payload.permission_mode) ?? text(payload.permissionMode);
+    const observedTurnId = text(payload.turn_id) ?? text(payload.turnId);
     if (existing !== undefined) {
       const resumed = !existing.active && !existing.finalized;
       return {
         key,
         resumed,
+        created: false,
         session: {
           ...existing,
           active: !existing.finalized,
           lastSeenAt: artifact.receivedAt,
           ...(observedTranscriptPath === undefined ? {} : { transcriptPath: observedTranscriptPath }),
           ...(observedModel === undefined ? {} : { model: observedModel }),
+          ...(observedHarnessVersion === undefined ? {} : { harnessVersion: observedHarnessVersion }),
+          ...(observedPermissionMode === undefined ? {} : { permissionMode: observedPermissionMode }),
+          ...(observedTurnId === undefined ? {} : { currentTurnId: observedTurnId }),
         },
       };
     }
@@ -256,6 +365,9 @@ export class CaptureEngine {
       project,
       ...(observedTranscriptPath === undefined ? {} : { transcriptPath: observedTranscriptPath }),
       ...(observedModel === undefined ? {} : { model: observedModel }),
+      ...(observedHarnessVersion === undefined ? {} : { harnessVersion: observedHarnessVersion }),
+      ...(observedPermissionMode === undefined ? {} : { permissionMode: observedPermissionMode }),
+      ...(observedTurnId === undefined ? {} : { currentTurnId: observedTurnId }),
       steps: [],
       finalized: false,
       active: true,
@@ -266,17 +378,23 @@ export class CaptureEngine {
       role: "decision",
       content: "Coding-agent session started",
     });
-    return { key, session, resumed: false };
+    return { key, session, resumed: false, created: true };
   }
 
   private async ingestInternal(source: HookSource, payloadInput: unknown): Promise<{ readonly artifactId: string }> {
     const payload = object(payloadInput);
     if (payload === undefined) throw new TypeError("hook payload must be a JSON object");
     const artifact = await this.nextArtifact(source, payload);
+    this.state = {
+      ...this.state,
+      receivedHooks: (this.state.receivedHooks ?? 0) + 1,
+      lastHookAt: artifact.receivedAt,
+    };
+    await this.stateStore.save(this.state);
     const ensured = await this.ensureSession(source, payload, artifact);
     let session = ensured.session;
     let index = 0;
-    if (ensured.resumed || hookName(payload) === "SessionStart") {
+    if (ensured.created || ensured.resumed || hookName(payload) === "SessionStart") {
       await this.enqueueEvent(makeSensorLifecycleEvent(
         this.context(session),
         stamp(artifact, index++, "lifecycle"),
@@ -288,16 +406,24 @@ export class CaptureEngine {
     const name = hookName(payload);
     if (name === "UserPromptSubmit") {
       const prompt = text(payload.prompt) ?? text(payload.user_prompt) ?? "";
-      const comparisonKey = prompt.length === 0 ? undefined : `prompt-${hash(prompt.trim()).slice(0, 24)}`;
+      const explicitTaskKey = text(payload.task_key) ?? text(payload.taskId) ?? text(payload.comparison_key);
+      const normalizedPrompt = prompt.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+      const comparisonKey = explicitTaskKey !== undefined
+        ? `task-${hash(explicitTaskKey).slice(0, 24)}`
+        : normalizedPrompt.length === 0
+          ? undefined
+          : `prompt-${hash(normalizedPrompt).slice(0, 24)}`;
       session = {
         ...session,
         ...(session.comparisonKey !== undefined || comparisonKey === undefined ? {} : { comparisonKey }),
+        ...(session.taskKey !== undefined || explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
       };
-      await this.observe(session, artifact, index++, {
+      session = await this.observe(session, artifact, index++, {
         kind: "prompt_submitted",
         data: {
           artifactId: artifact.id,
           characters: prompt.length,
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
           ...(comparisonKey === undefined ? {} : { comparisonKey }),
         },
       });
@@ -305,53 +431,145 @@ export class CaptureEngine {
         nodeKind: "observation",
         role: "decision",
         content: "User submitted a task prompt",
+        artifactId: artifact.id,
+        eventId: session.lastEventId!,
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
     } else if (name === "PreToolUse") {
       const tool = toolName(payload);
       const verification = verificationKind(payload);
-      await this.observe(session, artifact, index++, {
+      session = await this.observe(session, artifact, index++, {
         kind: "tool_running",
         data: {
           toolName: tool,
+          artifactId: artifact.id,
+          startedAt: artifact.receivedAt,
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
           ...(toolUseId(payload) === undefined ? {} : { toolUseId: toolUseId(payload)! }),
           ...(verification === undefined ? {} : { category: verification }),
         },
       });
+      session = {
+        ...session,
+        pendingTools: {
+          ...(session.pendingTools ?? {}),
+          [pendingToolKey(payload)]: {
+            artifactId: artifact.id,
+            startedAt: artifact.receivedAt,
+            eventTime: artifact.eventTime,
+            toolName: tool,
+            eventId: session.lastEventId!,
+          },
+        },
+      };
       session = stepFor(session, {
         nodeKind: "action",
         role: "tool_call",
         content: `Invoke ${tool}`,
         toolName: tool,
+        artifactId: artifact.id,
+        eventId: session.lastEventId!,
+        startedAt: artifact.receivedAt,
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
+    } else if (name === "HermesStep") {
+      const tools = Array.isArray(payload.tool_names)
+        ? payload.tool_names.filter((value): value is string => typeof value === "string" && value.trim().length > 0).slice(0, 50)
+        : [];
+      const iteration = typeof payload.iteration === "number" && Number.isFinite(payload.iteration)
+        ? payload.iteration
+        : undefined;
+      for (const rawTool of tools) {
+        const tool = bounded(rawTool.trim(), 200);
+        session = await this.observe(session, artifact, index++, {
+          kind: "tool_running",
+          data: {
+            toolName: tool,
+            source: "hermes-agent-step",
+            artifactId: artifact.id,
+            ...(iteration === undefined ? {} : { iteration }),
+          },
+        });
+        session = stepFor(session, {
+          nodeKind: "action",
+          role: "tool_call",
+          content: `Hermes invoked ${tool}`,
+          toolName: tool,
+          artifactId: artifact.id,
+          eventId: session.lastEventId!,
+        });
+      }
     } else if (name === "PostToolUse" || name === "PostToolUseFailure") {
       const tool = toolName(payload);
       const success = toolSucceeded(name, payload);
       const verification = verificationKind(payload);
-      await this.observe(session, artifact, index++, {
+      const key = pendingToolKey(payload);
+      const pending = session.pendingTools?.[key];
+      const durationMs = pending === undefined ? undefined : Math.max(0, artifact.eventTime - pending.eventTime);
+      session = await this.observe(session, artifact, index++, {
         kind: "tool_result",
         data: {
           toolName: tool,
           status: success ? "completed" : "failed",
+          artifactId: artifact.id,
+          ...(durationMs === undefined ? {} : { durationMs }),
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
           ...(toolUseId(payload) === undefined ? {} : { toolUseId: toolUseId(payload)! }),
         },
-      });
+      }, pending === undefined ? undefined : [pending.eventId]);
+      if (session.pendingTools !== undefined) {
+        const { [key]: _completed, ...remaining } = session.pendingTools;
+        session = { ...session, pendingTools: remaining };
+      }
       session = stepFor(session, {
         nodeKind: "observation",
         role: "tool_call_response",
         content: `${tool} ${success ? "completed" : "failed"}`,
         toolName: tool,
+        artifactId: artifact.id,
+        eventId: session.lastEventId!,
+        ...(pending === undefined ? {} : { startedAt: pending.startedAt }),
+        ...(durationMs === undefined ? {} : { durationMs }),
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
-      const paths = changedPaths(payload, session.project.root);
-      if (paths.length > 0 && /edit|write|patch|notebook/i.test(tool)) {
-        await this.observe(session, artifact, index++, {
-          kind: "file_changed",
-          data: { toolName: tool, paths },
+      const beforeProject = session.project;
+      const refreshedProject = await refreshProject(beforeProject);
+      const repositoryChanged = refreshedProject.head !== beforeProject.head ||
+        refreshedProject.worktreeDigest !== beforeProject.worktreeDigest;
+      session = { ...session, project: refreshedProject };
+      const paths = [...new Set([
+        ...changedPaths(payload, session.project.root),
+        ...(repositoryChanged ? refreshedProject.changedPaths ?? [] : []),
+      ])].slice(0, 200);
+      const mutatingTool = /edit|write|patch|notebook/i.test(tool) || repositoryChanged;
+      if (success && mutatingTool) session = withoutVerifiedOutcome(session);
+      if (success && mutatingTool) {
+        session = await this.observe(session, artifact, index++, {
+          kind: repositoryChanged ? "repository_changed" : "file_changed",
+          data: {
+            toolName: tool,
+            paths,
+            artifactId: artifact.id,
+            ...(beforeProject.head === undefined ? {} : { headBefore: beforeProject.head }),
+            ...(refreshedProject.head === undefined ? {} : { headAfter: refreshedProject.head }),
+            ...(beforeProject.worktreeDigest === undefined ? {} : { worktreeBefore: beforeProject.worktreeDigest }),
+            ...(refreshedProject.worktreeDigest === undefined ? {} : { worktreeAfter: refreshedProject.worktreeDigest }),
+            ...(refreshedProject.dirty === undefined ? {} : { dirty: refreshedProject.dirty }),
+            ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+          },
         });
       }
       if (verification !== undefined) {
-        await this.observe(session, artifact, index++, {
+        session = await this.observe(session, artifact, index++, {
           kind: "verification_result",
-          data: { category: verification, status: success ? "success" : "failure", toolName: tool },
+          data: {
+            category: verification,
+            status: success ? "success" : "failure",
+            toolName: tool,
+            artifactId: artifact.id,
+            ...(durationMs === undefined ? {} : { durationMs }),
+            ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+          },
         });
         session = {
           ...stepFor(session, {
@@ -359,12 +577,17 @@ export class CaptureEngine {
             role: "tool_call_response",
             content: `${verification} verification ${success ? "passed" : "failed"}`,
             toolName: tool,
+            artifactId: artifact.id,
+            eventId: session.lastEventId!,
+            ...(pending === undefined ? {} : { startedAt: pending.startedAt }),
+            ...(durationMs === undefined ? {} : { durationMs }),
+            ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
           }),
           lastVerification: success ? "success" : "failure",
         };
       }
     } else if (name === "PermissionRequest" || name === "Notification") {
-      await this.observe(session, artifact, index++, {
+      session = await this.observe(session, artifact, index++, {
         kind: "blocking_prompt",
         data: {
           requestType: name,
@@ -376,6 +599,9 @@ export class CaptureEngine {
         nodeKind: "observation",
         role: "decision",
         content: "Agent requested operator attention",
+        artifactId: artifact.id,
+        eventId: session.lastEventId!,
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
     } else if (name === "ReasoningCheckpoint") {
       const summary = text(payload.summary);
@@ -392,17 +618,20 @@ export class CaptureEngine {
         const value = text(payload[field]);
         if (value !== undefined) data[field] = bounded(value, 2_000);
       }
-      await this.observe(session, artifact, index++, { kind: "reasoning_checkpoint", data });
+      session = await this.observe(session, artifact, index++, { kind: "reasoning_checkpoint", data });
       session = stepFor(session, {
         nodeKind: "decision",
         role: "model_thought",
         content: bounded(summary, 2_000),
+        artifactId: artifact.id,
+        eventId: session.lastEventId!,
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
     } else if (name === "HumanDecision") {
       const summary = text(payload.summary);
       const verdict = payload.verdict === "success" || payload.verdict === "failure" ? payload.verdict : undefined;
       if (summary === undefined) throw new TypeError("human decision requires summary");
-      await this.observe(session, artifact, index++, {
+      session = await this.observe(session, artifact, index++, {
         kind: "human_decision",
         data: {
           summary: bounded(summary, 2_000),
@@ -421,6 +650,9 @@ export class CaptureEngine {
           nodeKind: "decision",
           role: "decision",
           content: bounded(summary, 2_000),
+          artifactId: artifact.id,
+          eventId: session.lastEventId!,
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
         }),
         ...(verdict === undefined ? {} : {
           explicitOutcome: verdict,
@@ -428,14 +660,23 @@ export class CaptureEngine {
         }),
       };
     } else if (name === "Stop") {
-      await this.observe(session, artifact, index++, {
+      const assistantMessage = text(payload.last_assistant_message) ?? text(payload.lastAssistantMessage) ?? "";
+      session = await this.observe(session, artifact, index++, {
         kind: "task_complete",
-        data: { artifactId: artifact.id },
+        data: {
+          artifactId: artifact.id,
+          outputCharacters: assistantMessage.length,
+          ...(assistantMessage.length === 0 ? {} : { outputHash: hash(assistantMessage) }),
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+        },
       });
       session = stepFor(session, {
         nodeKind: "observation",
         role: "model_output",
         content: "Agent completed a response",
+        artifactId: artifact.id,
+        eventId: session.lastEventId!,
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
     } else if (name === "SessionEnd") {
       await this.enqueueEvent(makeSensorLifecycleEvent(
@@ -461,7 +702,7 @@ export class CaptureEngine {
           await this.spool.enqueue(transcriptJob);
         }
       }
-      session = { ...session, active: false, finalized: true };
+      session = { ...session, active: false, finalized: true, finalizationReason: "session-end" };
     }
 
     this.state = {
@@ -474,7 +715,7 @@ export class CaptureEngine {
   }
 
   private async enqueueTrajectory(session: CaptureSession, artifact: VaultArtifact, index: number): Promise<void> {
-    const taskId = `capture-session:${session.source}:${session.sessionId}`;
+    const taskId = trajectoryTaskId(session);
     const steps = session.steps.length > 0 ? session.steps : [{
       id: "step-1",
       stepNumber: 1,
@@ -484,7 +725,6 @@ export class CaptureEngine {
     }];
     const outcome = session.explicitOutcome ?? session.lastVerification ?? "unknown";
     const finalStepId = `step-${steps.length + 1}`;
-    const finalNodeId = `node-${steps.length + 1}`;
     const allSteps: TrajectoryInput["steps"] = [
       ...steps.map(traceStep),
       {
@@ -492,26 +732,33 @@ export class CaptureEngine {
         stepNumber: steps.length + 1,
         role: "model_output",
         content: outcome === "unknown" ? "Session ended without a verified outcome" : `Session outcome: ${outcome}`,
+        artifactId: artifact.id,
+        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+      },
+    ];
+    const projectedSteps = [
+      ...steps,
+      {
+        id: finalStepId,
+        stepNumber: steps.length + 1,
+        nodeKind: "outcome" as const,
+        role: "model_output" as const,
+        content: outcome === "unknown" ? "Outcome not verified" : `Outcome ${outcome}`,
       },
     ];
     const nodes: TrajectoryTreeRecord["tree"]["nodes"] = [
-      ...steps.map((step, stepIndex) => ({
-        id: `node-${stepIndex + 1}`,
+      ...projectedSteps.map((step) => ({
+        id: sharedNodeId(step),
         kind: step.nodeKind,
         label: bounded(step.content),
       })),
-      {
-        id: finalNodeId,
-        kind: "outcome",
-        label: outcome === "unknown" ? "Outcome not verified" : `Outcome ${outcome}`,
-      },
     ];
     const tree: TrajectoryTreeRecord["tree"] = {
       taskId,
-      rootNodeId: "node-1",
+      rootNodeId: nodes[0]!.id,
       nodes,
       edges: nodes.slice(1).map((node, edgeIndex) => ({
-        id: `edge-${edgeIndex + 1}`,
+        id: `edge-${hash(`${nodes[edgeIndex]!.id}\0${node.id}`).slice(0, 20)}`,
         sourceId: nodes[edgeIndex]!.id,
         targetId: node.id,
         label: "next observed step",
@@ -520,7 +767,7 @@ export class CaptureEngine {
     const assignments: TrajectoryInput["assignments"] = Object.fromEntries(
       allSteps.map((step, stepIndex) => [step.id, {
         kind: "mapped" as const,
-        nodeId: `node-${stepIndex + 1}`,
+        nodeId: nodes[stepIndex]!.id,
         method: { kind: "rule" as const, id: "super-brain-capture/v1", confidence: 1 },
       }]),
     );
@@ -542,6 +789,11 @@ export class CaptureEngine {
       branch: session.project.branch,
       runtime: session.source,
       project: session.project.name,
+      ...(session.project.head === undefined ? {} : { gitHead: session.project.head }),
+      ...(session.project.worktreeDigest === undefined ? {} : { worktree: session.project.worktreeDigest }),
+      ...(session.harnessVersion === undefined ? {} : { harnessVersion: session.harnessVersion }),
+      ...((session.truncatedStepCount ?? 0) === 0 ? {} : { truncatedSteps: String(session.truncatedStepCount) }),
+      ...(session.finalizationReason === undefined ? {} : { finalizationReason: session.finalizationReason }),
       ...(session.comparisonKey === undefined ? {} : { comparison: session.comparisonKey }),
     };
     const job: SpoolJob = {
@@ -558,10 +810,16 @@ export class CaptureEngine {
     await this.spool.enqueue(job);
   }
 
-  private async heartbeatInternal(): Promise<void> {
+  private async heartbeatInternal(nowMs: number): Promise<void> {
     for (const [key, session] of Object.entries(this.state.sessions)) {
-      if (!session.active || session.finalized) continue;
-      const eventTime = Math.max(Date.now(), this.state.lastEventTime + 1);
+      if (session.finalized) continue;
+      const lastSeen = Date.parse(session.lastSeenAt);
+      if (Number.isFinite(lastSeen) && nowMs - lastSeen >= this.config.orphanAfterMs) {
+        await this.finalizeOrphan(key, session, nowMs);
+        continue;
+      }
+      if (!session.active) continue;
+      const eventTime = Math.max(nowMs, this.state.lastEventTime + 1);
       const receivedAt = new Date(eventTime).toISOString();
       const artifact: VaultArtifact = {
         id: hash(`heartbeat:${key}:${eventTime}`),
@@ -577,5 +835,43 @@ export class CaptureEngine {
       ));
     }
     await this.stateStore.save(this.state);
+  }
+
+  private async finalizeOrphan(key: string, sessionInput: CaptureSession, nowMs: number): Promise<void> {
+    const eventTime = Math.max(nowMs, this.state.lastEventTime + 1);
+    const receivedAt = new Date(eventTime).toISOString();
+    const artifact: VaultArtifact = {
+      id: hash(`orphan:${key}:${sessionInput.lastSeenAt}`),
+      receivedAt,
+      eventTime,
+      path: "",
+    };
+    const session = {
+      ...withoutVerifiedOutcome(sessionInput),
+      active: false,
+      finalized: true,
+      finalizationReason: "orphan-timeout" as const,
+    };
+    this.state = { ...this.state, lastEventTime: eventTime };
+    await this.enqueueEvent(makeSensorLifecycleEvent(
+      this.context(session),
+      stamp(artifact, 0, "orphan"),
+      "offline",
+      `Capture finalized after ${this.config.orphanAfterMs}ms without a hook`,
+    ));
+    await this.enqueueTrajectory(session, artifact, 1);
+    if (session.transcriptPath !== undefined && (session.source === "claude-code" || session.source === "codex")) {
+      await this.spool.enqueue({
+        version: 1,
+        kind: "transcript",
+        id: `capture-${artifact.eventTime.toString().padStart(13, "0")}-950-transcript-${artifact.id.slice(0, 12)}`,
+        createdAt: receivedAt,
+        notBefore: new Date(eventTime + 2_000).toISOString(),
+        deadlineAt: new Date(eventTime + 30 * 60_000).toISOString(),
+        source: session.source,
+        path: session.transcriptPath,
+      });
+    }
+    this.state = { ...this.state, sessions: { ...this.state.sessions, [key]: session } };
   }
 }

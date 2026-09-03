@@ -19,8 +19,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@_89/fold": "workspace:*",
     "@_89/fold-epistemic": "workspace:*",
     "@_89/fold-transcript": "workspace:*",
+    "@_89/fold-trajectory": "workspace:*",
+    "@_89/super-brain-importer": "workspace:*",
     "@_89/super-brain-client": "workspace:*"
   }
 }

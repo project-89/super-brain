@@ -15,8 +15,10 @@ export interface CaptureConfig {
   readonly port: number;
   readonly heartbeatWindowMs: number;
   readonly heartbeatIntervalMs: number;
+  readonly orphanAfterMs: number;
   readonly stateRoot: string;
   readonly vaultRoot: string;
+  readonly vaultKeyPath?: string;
   readonly reasoningPolicy: ReasoningPolicy;
 }
 
@@ -26,6 +28,10 @@ export interface ProjectIdentity {
   readonly root: string;
   readonly branch: string;
   readonly remote?: string;
+  readonly head?: string;
+  readonly worktreeDigest?: string;
+  readonly changedPaths?: readonly string[];
+  readonly dirty?: boolean;
 }
 
 export type CapturedStep = TrajectoryInput["steps"][number] & {
@@ -40,19 +46,35 @@ export interface CaptureSession {
   readonly project: ProjectIdentity;
   readonly transcriptPath?: string;
   readonly model?: string;
+  readonly harnessVersion?: string;
+  readonly permissionMode?: string;
+  readonly currentTurnId?: string;
   readonly comparisonKey?: string;
+  readonly taskKey?: string;
   readonly steps: readonly CapturedStep[];
+  readonly truncatedStepCount?: number;
+  readonly pendingTools?: Readonly<Record<string, {
+    readonly artifactId: string;
+    readonly startedAt: string;
+    readonly eventTime: number;
+    readonly toolName: string;
+    readonly eventId: string;
+  }>>;
   readonly lastVerification?: "success" | "failure";
   readonly explicitOutcome?: "success" | "failure";
   readonly reviewText?: string;
+  readonly lastEventId?: string;
   readonly finalized: boolean;
   readonly active: boolean;
   readonly lastSeenAt: string;
+  readonly finalizationReason?: "session-end" | "orphan-timeout";
 }
 
 export interface CaptureState {
   readonly version: 1;
   readonly lastEventTime: number;
+  readonly lastHookAt?: string;
+  readonly receivedHooks?: number;
   readonly seenArtifacts: readonly string[];
   readonly sessions: Readonly<Record<string, CaptureSession>>;
 }

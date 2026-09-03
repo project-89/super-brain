@@ -17,8 +17,9 @@ tests.
   freshness.
 - `@_89/fold-trace` implements the projection feasibility contract, coverage,
   mapped-edge aggregation, first-divergent-edge analysis, tool-call divergence
-  mining, and support-based structural merge. Its current two-model experiment
-  is a structural fixture, not empirical model evidence.
+  mining, support-based structural merge, and explicit verified/unknown outcome
+  accounting. Its two-model test experiment remains a structural fixture, not
+  empirical model evidence.
 - `@_89/fold-trajectory` records shared decision trees and projected runs as
   scoped canonical Fold events, then rebuilds task coverage, observed routes,
   first divergence, and review-oracle results without hiding projection gaps.
@@ -42,9 +43,9 @@ tests.
   declined, acted, and ended intentions without performing host cognition. The
   SDK and API expose that lifecycle as replayed human steering.
 - `@_89/fold-epistemic` records, revises, forgets, and recalls personal memory
-  plus immutable memory proposals and decisions. Memory is explicitly scoped
-  by workspace, optional space, audience, and projects; access is reapplied
-  after external ranking.
+  plus immutable memory proposals, decisions, evidence revisions, and usefulness
+  feedback. Memory is explicitly scoped by workspace, optional space, audience,
+  and projects; access is reapplied after external ranking.
 - `@_89/fold-sdk` provides journal-compatible producer and consumer APIs with
   capture-scope enforcement, canonical ordering, access-filtered projection,
   personal-memory lifecycle and authorized ranker orchestration, trajectory
@@ -87,10 +88,14 @@ tests.
   final transcript-import work before acknowledging a hook. Raw prompt and tool
   bodies stay in its secret-redacted private vault rather than canonical Fold.
 - `@_89/super-brain-memory-worker` reads only the redacted transcript vault,
-  proposes deterministic project-aware memories, and consumes future run
-  events from a durable cursor. A narrow opt-in policy automatically promotes
-  high-confidence structured observations only when their project is resolved;
-  global and rule-derived proposals remain reviewable.
+  proposes deterministic project-aware memories, consolidates repeated evidence,
+  and consumes transcript, live-checkpoint, decision, and trajectory events from
+  a durable cursor. A narrow opt-in policy automatically promotes high-confidence
+  structured observations, explicit human decisions, and reasoning checkpoints
+  cited by a verified successful trajectory; ambiguous proposals remain reviewable.
+- `@_89/super-brain-mcp-server` gives any MCP-compatible harness authenticated
+  memory search, cited context assembly, structured checkpoint and proposal
+  capture, and immutable helpful/unhelpful/superseded feedback tools.
 - `@_89/confidence-kernel` is the pinned 0.2.0 history-scoring, drift, pooling,
   oracle, and journal implementation imported under its MIT license.
 - `@_89/fold-narrative` projects canonical Fold events into arc state,
@@ -125,6 +130,8 @@ Historical transcript identity, privacy, import, and query behavior is recorded
 in [`docs/TRANSCRIPT_INGESTION.md`](./docs/TRANSCRIPT_INGESTION.md).
 The live architecture, memory lifecycle, harness contract, and PostgreSQL
 operations are documented in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+The implemented critical-path ledger and remaining deployment choices are in
+[`docs/ROADMAP.md`](./docs/ROADMAP.md).
 
 The repository remains private. New Fold packages are `UNLICENSED` until package
 ownership and release terms are settled; the imported confidence kernel retains

@@ -25,6 +25,20 @@ describe("SuperBrainClient", () => {
     expect(JSON.parse(String(init.body))).toEqual({ projectIds: ["project-a"], limit: 5 });
   });
 
+  it("records auditable memory feedback through the dedicated route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ event: {}, feedback: { signal: "helpful" } })) as unknown as typeof fetch;
+    await client(fetchMock).recordMemoryFeedback("memory/a", {
+      signal: "helpful",
+      query: "Which store is canonical?",
+      taskId: "task-a",
+    });
+    const [url, init] = (fetchMock as any).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://brain.example/v1/workspaces/workspace%2Fone/memories/memory%2Fa/feedback");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      input: { signal: "helpful", query: "Which store is canonical?", taskId: "task-a" },
+    });
+  });
+
   it("parses resumable SSE frames split across chunks", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({

@@ -43,6 +43,20 @@ describe("static identity directory", () => {
     });
   });
 
+  it("binds optional least-privilege capabilities to the authenticated subject", async () => {
+    const directory = new StaticIdentityDirectory({
+      sensor: {
+        principalId: "user-a",
+        capabilities: ["events:write", "trajectories:write", "events:write"],
+        workspaces: { "workspace-1": { role: "admin" } },
+      },
+    });
+    const subject = await directory.authenticate("sensor");
+    expect(subject?.capabilities).toEqual(["events:write", "trajectories:write"]);
+    expect(await directory.resolveAccess({ ...subject!, capabilities: ["memories:read"] }, "workspace-1"))
+      .toBeUndefined();
+  });
+
   it("returns no identity or membership for unknown and forged credentials", async () => {
     const directory = new StaticIdentityDirectory({
       secret: {

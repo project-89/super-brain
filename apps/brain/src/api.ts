@@ -371,4 +371,14 @@ export class FoldApiClient {
       },
     );
   }
+
+  async recordMemoryFeedback(memoryId: string, signal: "helpful" | "unhelpful"): Promise<void> {
+    await this.request(
+      `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/feedback`,
+      {
+        method: "POST",
+        body: JSON.stringify({ stamp: nextEventStamp(), input: { signal } }),
+      },
+    );
+  }
 }

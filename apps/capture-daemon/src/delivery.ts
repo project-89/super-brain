@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 
 import { SuperBrainApiError, SuperBrainClient } from "@_89/super-brain-client";
+import { mergeSharedDecisionTrees } from "@_89/fold-trace";
 import {
   deliverTranscriptBundle,
   parseClaudeTranscript,
@@ -33,6 +34,7 @@ export class SpoolProcessor {
   constructor(
     private readonly config: CaptureConfig,
     private readonly spool: DurableSpool,
+    private readonly vaultEncryptionKey?: Uint8Array,
   ) {
     this.client = new SuperBrainClient({
       baseUrl: config.apiUrl,
@@ -67,7 +69,15 @@ export class SpoolProcessor {
     }
     if (job.kind === "trajectory") {
       const options = { captureIdentity: job.captureIdentity };
-      await this.client.recordTrajectoryTree(job.treeStamp, job.tree, options);
+      const existing = (await this.client.trajectoryTasks()).find(({ taskId }) => taskId === job.tree.taskId);
+      if (existing === undefined) {
+        await this.client.recordTrajectoryTree(job.treeStamp, job.tree, options);
+      } else {
+        const merged = mergeSharedDecisionTrees(existing.tree, job.tree);
+        if (JSON.stringify(merged) !== JSON.stringify(existing.tree)) {
+          await this.client.recordTrajectoryTree(job.treeStamp, merged, options);
+        }
+      }
       await this.client.recordTrajectory(job.runStamp, job.input, options);
       return;
     }
@@ -80,6 +90,7 @@ export class SpoolProcessor {
     if (parsed === undefined) throw new Error(`unsupported transcript source: ${job.source}`);
     const stored = await storeRedactedArtifact(parsed, this.config.vaultRoot, {
       reasoningPolicy: this.config.reasoningPolicy,
+      ...(this.vaultEncryptionKey === undefined ? {} : { encryptionKey: this.vaultEncryptionKey }),
     });
     await deliverTranscriptBundle(stored.bundle, {
       apiUrl: this.config.apiUrl,

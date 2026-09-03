@@ -3,12 +3,14 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CaptureEngine } from "./capture.js";
-import { defaultConfigPath, initializeCaptureConfig, readCaptureConfig } from "./config.js";
+import { defaultConfigPath, enableCaptureVaultEncryption, initializeCaptureConfig, readCaptureConfig } from "./config.js";
 import { SpoolProcessor } from "./delivery.js";
-import { installHooks, installLaunchAgent } from "./install.js";
+import { installHermesHook, installHooks, installLaunchAgent } from "./install.js";
 import { CaptureHttpServer } from "./server.js";
-import { DurableSpool, HookVault, StateStore } from "./storage.js";
+import { exportCaptureData, pruneHookArtifacts, verifyCaptureExport } from "./maintenance.js";
+import { DurableSpool, HookVault, recordRelayFailure, StateStore } from "./storage.js";
 import type { HookSource, ReasoningPolicy } from "./types.js";
+import { readVaultKey } from "@_89/super-brain-importer";
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -61,20 +63,27 @@ async function relay(args: readonly string[], path = "/hook"): Promise<void> {
   } catch (error) {
     if (path !== "/hook") throw error;
     // Lifecycle hooks must never block or break the coding-agent host.
+    try {
+      const config = await readCaptureConfig(configPath(args));
+      await recordRelayFailure(config.stateRoot, source, path, error);
+    } catch {
+      // Capture diagnostics must not break the host either.
+    }
   }
 }
 
 async function run(args: readonly string[]): Promise<void> {
   const config = await readCaptureConfig(configPath(args));
+  const vaultEncryptionKey = config.vaultKeyPath === undefined ? undefined : await readVaultKey(config.vaultKeyPath);
   const spool = new DurableSpool(config.stateRoot);
   const engine = new CaptureEngine(
     config,
     new StateStore(config.stateRoot),
-    new HookVault(config.vaultRoot),
+    new HookVault(config.vaultRoot, vaultEncryptionKey),
     spool,
   );
   await engine.initialize();
-  const processor = new SpoolProcessor(config, spool);
+  const processor = new SpoolProcessor(config, spool, vaultEncryptionKey);
   const server = new CaptureHttpServer(config, engine, spool);
   await server.start();
   processor.start();
@@ -91,7 +100,8 @@ async function run(args: readonly string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const args = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs;
   const command = args[0] ?? "help";
   if (command === "relay") {
     await relay(args);
@@ -122,6 +132,7 @@ async function main(): Promise<void> {
       ...(option(args, "--workspace") === undefined ? {} : { workspaceId: option(args, "--workspace")! }),
       ...(option(args, "--state-root") === undefined ? {} : { stateRoot: option(args, "--state-root")! }),
       ...(option(args, "--vault") === undefined ? {} : { vaultRoot: option(args, "--vault")! }),
+      ...(option(args, "--vault-key") === undefined ? {} : { vaultKeyPath: option(args, "--vault-key")! }),
       ...(reasoning === undefined ? {} : { reasoningPolicy: reasoning }),
       force: args.includes("--force"),
     });
@@ -135,6 +146,53 @@ async function main(): Promise<void> {
   }
   if (command === "install-service") {
     process.stdout.write(`${await installLaunchAgent(executablePath(), configPath(args))}\n`);
+    return;
+  }
+  if (command === "install-hermes-hook") {
+    process.stdout.write(`${(await installHermesHook(configPath(args))).join("\n")}\n`);
+    return;
+  }
+  if (command === "enable-vault-encryption") {
+    const result = await enableCaptureVaultEncryption(configPath(args), option(args, "--vault-key"));
+    process.stdout.write(`Enabled encrypted vault writes using ${result.keyPath}\n`);
+    return;
+  }
+  if (command === "export") {
+    const output = option(args, "--output");
+    if (output === undefined) throw new TypeError("export requires --output PATH");
+    const config = await readCaptureConfig(configPath(args));
+    const manifest = await exportCaptureData(config, output, {
+      includeVaultKey: args.includes("--include-vault-key"),
+      ...(process.env.SUPER_BRAIN_EXPORT_TOKEN === undefined
+        ? {}
+        : { apiToken: process.env.SUPER_BRAIN_EXPORT_TOKEN }),
+    });
+    process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+    return;
+  }
+  if (command === "verify-export") {
+    const input = option(args, "--input");
+    if (input === undefined) throw new TypeError("verify-export requires --input PATH");
+    process.stdout.write(`${JSON.stringify(await verifyCaptureExport(input), null, 2)}\n`);
+    return;
+  }
+  if (command === "prune") {
+    const before = option(args, "--before");
+    if (before === undefined) throw new TypeError("prune requires --before ISO_DATE");
+    const beforeMs = Date.parse(before);
+    if (!Number.isFinite(beforeMs)) throw new TypeError("--before must be an ISO date or timestamp");
+    const config = await readCaptureConfig(configPath(args));
+    const result = await pruneHookArtifacts(config, beforeMs, args.includes("--confirm"));
+    process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "delete" : "dry-run", ...result }, null, 2)}\n`);
+    return;
+  }
+  if (command === "retry-failed") {
+    const config = await readCaptureConfig(configPath(args));
+    const result = await new DurableSpool(config.stateRoot).retryFailed(
+      args.includes("--confirm"),
+      { rebaseEvents: args.includes("--rebase-events") },
+    );
+    process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "retry" : "dry-run", ...result }, null, 2)}\n`);
     return;
   }
   if (command === "status") {
@@ -151,7 +209,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "help") {
-    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|install-hooks|install-service> [--config PATH]\n");
+    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed> [--config PATH]\n");
     return;
   }
   throw new Error(`unknown command: ${command}`);

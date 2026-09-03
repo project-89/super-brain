@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, open, rename, unlink } from "node:fs/promises";
+import { chmod, link, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -8,6 +8,7 @@ import { transcriptImportBundleSchema } from "@_89/fold-transcript";
 import { fileMetadata, sha256File } from "./files.js";
 import { isRecord } from "./json.js";
 import type { ParsedTranscript } from "./types.js";
+import { decryptedVaultSha256, encryptVaultLine } from "./encryption.js";
 
 const SECRET_PATTERNS: readonly { readonly pattern: RegExp; readonly preservePrefix?: boolean }[] = [
   { pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/g },
@@ -86,7 +87,7 @@ function withoutPrivateReasoning(record: Record<string, unknown>): Record<string
 export async function storeRedactedArtifact(
   transcript: ParsedTranscript,
   vaultRoot: string,
-  options: { readonly reasoningPolicy?: "exclude" | "include" } = {},
+  options: { readonly reasoningPolicy?: "exclude" | "include"; readonly encryptionKey?: Uint8Array } = {},
 ): Promise<ParsedTranscript> {
   const { artifact } = transcript.bundle;
   const beforeHash = await fileMetadata(transcript.sourcePath);
@@ -103,7 +104,12 @@ export async function storeRedactedArtifact(
   }
   await mkdir(vaultRoot, { recursive: true, mode: 0o700 });
   await chmod(vaultRoot, 0o700);
-  const target = join(vaultRoot, artifact.source, artifact.sha256.slice(0, 2), `${artifact.sha256}.jsonl`);
+  const target = join(
+    vaultRoot,
+    artifact.source,
+    artifact.sha256.slice(0, 2),
+    `${artifact.sha256}.jsonl${options.encryptionKey === undefined ? "" : ".enc"}`,
+  );
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.tmp`;
   const output = await open(temporary, "wx", 0o600);
@@ -123,7 +129,8 @@ export async function storeRedactedArtifact(
         : parsed;
       const redacted = redactJsonValue(safe);
       redactionCount += redacted.count;
-      await output.writeFile(`${JSON.stringify(redacted.value)}\n`, "utf8");
+      const serialized = JSON.stringify(redacted.value);
+      await output.writeFile(`${options.encryptionKey === undefined ? serialized : encryptVaultLine(serialized, options.encryptionKey)}\n`, "utf8");
     }
     const storedMetadata = await fileMetadata(transcript.sourcePath);
     if (storedMetadata.byteLength !== artifact.byteLength || storedMetadata.modifiedAt !== artifact.modifiedAt) {
@@ -131,10 +138,25 @@ export async function storeRedactedArtifact(
     }
     await output.sync();
     await output.close();
-    await rename(temporary, target).catch(async (error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      await unlink(temporary);
-    });
+    await link(temporary, target).then(
+      () => unlink(temporary),
+      async (error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const [existingHash, pendingHash] = options.encryptionKey === undefined
+          ? await Promise.all([sha256File(target), sha256File(temporary)])
+          : await Promise.all([
+              decryptedVaultSha256(target, options.encryptionKey),
+              decryptedVaultSha256(temporary, options.encryptionKey),
+            ]);
+        if (existingHash !== pendingHash) {
+          throw new Error(
+            "Transcript artifact already exists with different redaction or reasoning content; use a separate vault",
+          );
+        }
+        await unlink(temporary);
+      },
+    );
+    await chmod(target, 0o600);
   } catch (error) {
     await output.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);

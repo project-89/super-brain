@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { FoldEvent } from "@_89/fold";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { encryptVaultLine } from "@_89/super-brain-importer";
 
-import { extractMemoryCandidates, messagesFromVaultRecords } from "../src/index.js";
+import { extractLiveMemoryCandidates, extractMemoryCandidates, messagesFromVaultRecords, readVaultMessages } from "../src/index.js";
 
 const run = {
   id: "claude-code:run-a",
@@ -60,5 +65,78 @@ describe("transcript memory extraction", () => {
     expect(messages[0]?.projectPath).toBe("/Users/example/Workspaces/project-a");
     const candidates = extractMemoryCandidates({ ...run, cwd: "/Users/example/.claude-mem/observer-sessions" }, "run-event", messages);
     expect(candidates[0]?.content).toMatchObject({ files: ["/Users/example/Workspaces/project-a"] });
+  });
+
+  it("extracts live reasoning checkpoints with event and turn evidence", () => {
+    const event = {
+      id: "019c0000-0000-7000-8000-000000000001",
+      kind: "terminal.observation",
+      at: { t: 1_787_000_000_000 },
+      capture: {
+        scope: { workspace: "workspace-a" },
+        identity: {
+          repo: "project-a",
+          session: "session-a",
+          turn: "turn-a",
+          runtime: "codex",
+          model: "gpt-5.6",
+        },
+      },
+      changes: [{
+        verb: "create",
+        nodeKind: "x.fold.activity-observation",
+        after: {
+          observation: "reasoning_checkpoint",
+          data: {
+            summary: "Postgres remains canonical",
+            hypothesis: "One durable event log avoids split truth.",
+            evidence: "The projection rebuilds from the Fold log.",
+            artifactId: "artifact-a",
+            confidence: 0.91,
+          },
+        },
+      }],
+    } as unknown as FoldEvent;
+
+    expect(extractLiveMemoryCandidates(event)).toEqual([expect.objectContaining({
+      source: "live-reasoning-checkpoint",
+      summary: "Postgres remains canonical",
+      projectIds: ["project-a"],
+      evidence: [{ eventId: event.id, projectId: "project-a", turnId: "turn-a" }],
+      confidence: 0.91,
+      content: expect.objectContaining({
+        artifactId: "artifact-a",
+        sessionId: "session-a",
+        turnId: "turn-a",
+        runtime: "codex",
+      }),
+    })]);
+  });
+
+  it("ignores ordinary terminal observations", () => {
+    const event = {
+      kind: "terminal.observation",
+      capture: { identity: { repo: "project-a" } },
+      changes: [{ verb: "create", nodeKind: "x.fold.activity-observation", after: { observation: "tool_result" } }],
+    } as unknown as FoldEvent;
+    expect(extractLiveMemoryCandidates(event)).toEqual([]);
+  });
+
+  it("reads authenticated encrypted vault artifacts", async () => {
+    const vault = await mkdtemp(join(tmpdir(), "memory-worker-vault-"));
+    const directory = join(vault, "claude-code", "aa");
+    await mkdir(directory, { recursive: true });
+    const key = new Uint8Array(32).fill(9);
+    const record = JSON.stringify({
+      type: "user",
+      uuid: "message-a",
+      timestamp: "2026-08-20T12:00:00.000Z",
+      message: { content: "We decided that canonical evidence remains immutable." },
+    });
+    await writeFile(join(directory, `${"a".repeat(64)}.jsonl.enc`), `${encryptVaultLine(record, key)}\n`, "utf8");
+    await expect(readVaultMessages(vault, run, key)).resolves.toEqual([
+      expect.objectContaining({ text: "We decided that canonical evidence remains immutable." }),
+    ]);
+    await expect(readVaultMessages(vault, run, new Uint8Array(32))).rejects.toThrow(/authentication/);
   });
 });

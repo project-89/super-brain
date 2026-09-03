@@ -93,6 +93,8 @@ export function TrajectoriesPage({
   const selectedRecord = report?.records.find(({ trajectory }) => trajectory.id === selectedRunId);
   const divergence = report?.divergences.find(({ trajectoryId }) => trajectoryId === selectedRunId)?.divergence;
   const evaluation = report?.evaluations.find(({ trajectoryId }) => trajectoryId === selectedRunId);
+  const classifiedRuns = report?.records.filter(({ trajectory }) => trajectory.outcome !== "unknown").length ?? 0;
+  const unknownRuns = (report?.records.length ?? 0) - classifiedRuns;
   const nodes = useMemo(() => report === undefined ? new Map() : nodeIndex(report), [report]);
 
   return (
@@ -143,14 +145,14 @@ export function TrajectoriesPage({
                 <div className="trajectory-metrics" aria-label="Trajectory analysis">
                   <div><CircleDot aria-hidden="true" /><span><strong>{report.analysis.traceCount}</strong><small>Runs</small></span></div>
                   <div><Check aria-hidden="true" /><span><strong>{percent(report.analysis.coverage.mappedRatio)}</strong><small>Mapped</small></span></div>
-                  <div><Route aria-hidden="true" /><span><strong>{report.analysis.routeEligibleTraceCount}</strong><small>Complete routes</small></span></div>
+                  <div><Route aria-hidden="true" /><span><strong>{classifiedRuns}</strong><small>Verified / {unknownRuns} unknown</small></span></div>
                   <div><GitBranch aria-hidden="true" /><span><strong>{report.analysis.routes.length}</strong><small>Observed routes</small></span></div>
                 </div>
 
                 <section className="trajectory-consensus">
                   <header><span><span className="eyebrow">Observed evidence</span><h3>Highest-success path</h3></span><small>{report.analysis.incompleteTraceCount} incomplete</small></header>
                   {report.analysis.mostSuccessfulPath.length === 0 ? (
-                    <EmptyState title="No complete route" />
+                    <EmptyState title={classifiedRuns === 0 ? "No verified outcome route" : "No complete route"} />
                   ) : (
                     <div className="trajectory-path">
                       {report.analysis.mostSuccessfulPath.map((nodeId, index) => {
@@ -200,7 +202,7 @@ export function TrajectoriesPage({
                           {selectedRun.steps.map((step) => (
                             <li key={step.raw.id}>
                               <span className="trajectory-step-number">{step.raw.stepNumber}</span>
-                              <div><span><b>{step.raw.role.replaceAll("_", " ")}</b><em className={`projection-badge projection-badge--${step.projection.kind}`}>{step.projection.kind}</em></span><p>{step.raw.content}</p><code>{projectionLabel(step)} · {step.projection.method.kind}:{step.projection.method.id}</code></div>
+                              <div><span><b>{step.raw.role.replaceAll("_", " ")}</b><em className={`projection-badge projection-badge--${step.projection.kind}`}>{step.projection.kind}</em></span><p>{step.raw.content}</p><code>{projectionLabel(step)} · {step.projection.method.kind}:{step.projection.method.id}</code>{(step.raw.eventId !== undefined || step.raw.artifactId !== undefined || step.raw.turnId !== undefined || step.raw.durationMs !== undefined) && <small className="trajectory-step-evidence">{[step.raw.eventId === undefined ? undefined : `event ${step.raw.eventId}`, step.raw.artifactId === undefined ? undefined : `artifact ${step.raw.artifactId}`, step.raw.turnId === undefined ? undefined : `turn ${step.raw.turnId}`, step.raw.durationMs === undefined ? undefined : `${step.raw.durationMs} ms`].filter(Boolean).join(" · ")}</small>}</div>
                             </li>
                           ))}
                         </ol>

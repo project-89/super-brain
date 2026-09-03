@@ -225,6 +225,7 @@ describe("SDK personal memory API", () => {
       audience: "workspace",
       projectIds: ["project-a"],
       creatorId: "owner-a",
+      evidence: [{ eventId: "transcript-chunk-1", projectId: "project-a", runId: "run-a" }],
     });
     expect(result.memoryEvent.causedBy).toEqual(["candidate-event", "accept-event"]);
     expect(store.appendManyCount).toBe(1);

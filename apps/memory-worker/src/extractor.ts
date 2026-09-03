@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 
+import type { FoldEvent, JsonValue } from "@_89/fold";
 import type { TranscriptRun } from "@_89/fold-transcript";
 
 import type { ExtractedCandidate, VaultMessage } from "./types.js";
 
 export const RULE_EXTRACTOR = { kind: "rule", id: "durable-transcript-memory", version: "1" } as const;
+export const LIVE_EXTRACTOR = { kind: "rule", id: "live-structured-memory", version: "1" } as const;
 
 function decodeXml(value: string): string {
   return value
@@ -31,7 +33,7 @@ function tags(body: string, name: string): string[] {
     .filter(Boolean);
 }
 
-function candidateId(timestamp: number, identity: string): string {
+export function deterministicCandidateId(timestamp: number, identity: string): string {
   const digest = createHash("sha256").update(identity).digest();
   const bytes = new Uint8Array(16);
   let remaining = Math.max(0, Math.min(0xffffffffffff, Math.floor(timestamp)));
@@ -91,7 +93,7 @@ function structuredObservations(run: TranscriptRun, runEventId: string, message:
     const projectId = projectFor(run, message.at);
     const identity = `${RULE_EXTRACTOR.version}\0xml\0${run.id}\0${message.turnId}\0${index}\0${title}\0${narrative ?? ""}`;
     return [{
-      id: candidateId(timestampFor(run, message), identity),
+      id: deterministicCandidateId(timestampFor(run, message), identity),
       projectIds: projectId === undefined ? [] : [projectId],
       source: "claude-mem-observation",
       summary: title.slice(0, 500),
@@ -128,7 +130,7 @@ function durableStatements(run: TranscriptRun, runEventId: string, message: Vaul
     const isPreference = message.role === "user" && /\bi (?:prefer|want|would like)\b/i.test(statement);
     const identity = `${RULE_EXTRACTOR.version}\0statement\0${run.id}\0${message.turnId}\0${index}\0${statement.toLocaleLowerCase()}`;
     return [{
-      id: candidateId(timestampFor(run, message), identity),
+      id: deterministicCandidateId(timestampFor(run, message), identity),
       projectIds: projectId === undefined ? [] : [projectId],
       source: "transcript-rule",
       summary: statement,
@@ -163,6 +165,72 @@ export function extractMemoryCandidates(
       candidates.push(candidate);
       if (candidates.length >= maxCandidates) return candidates;
     }
+  }
+  return candidates;
+}
+
+function jsonObject(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function optionalText(value: JsonValue | undefined): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function boundedScore(value: JsonValue | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : fallback;
+}
+
+export function extractLiveMemoryCandidates(event: FoldEvent): ExtractedCandidate[] {
+  if (event.kind !== "terminal.observation") return [];
+  const projectId = event.capture.identity?.repo;
+  const sessionId = event.capture.identity?.session;
+  const model = event.capture.identity?.model;
+  const runtime = event.capture.identity?.runtime;
+  const candidates: ExtractedCandidate[] = [];
+  for (const change of event.changes) {
+    if (change.verb !== "create" || change.nodeKind !== "x.fold.activity-observation") continue;
+    const observation = optionalText(change.after.observation);
+    if (observation !== "reasoning_checkpoint" && observation !== "human_decision") continue;
+    const data = jsonObject(change.after.data);
+    const summary = optionalText(data?.summary);
+    if (summary === undefined) continue;
+    const turnId = optionalText(data?.turnId) ?? event.capture.identity?.turn;
+    const artifactId = optionalText(data?.artifactId);
+    const verdict = optionalText(data?.verdict);
+    const source = observation === "human_decision" ? "live-human-decision" : "live-reasoning-checkpoint";
+    const evidence = {
+      eventId: event.id,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(turnId === undefined ? {} : { turnId }),
+    };
+    const content: Record<string, JsonValue> = {
+      summary,
+      evidence: [evidence],
+      ...(optionalText(data?.hypothesis) === undefined ? {} : { hypothesis: optionalText(data?.hypothesis)! }),
+      ...(optionalText(data?.evidence) === undefined ? {} : { supportingEvidence: optionalText(data?.evidence)! }),
+      ...(optionalText(data?.decision) === undefined ? {} : { decision: optionalText(data?.decision)! }),
+      ...(verdict === undefined ? {} : { verdict }),
+      ...(artifactId === undefined ? {} : { artifactId }),
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(turnId === undefined ? {} : { turnId }),
+      ...(model === undefined ? {} : { model }),
+      ...(runtime === undefined ? {} : { runtime }),
+    };
+    candidates.push({
+      id: deterministicCandidateId(event.at.t, `${LIVE_EXTRACTOR.version}\0${observation}\0${event.id}`),
+      projectIds: projectId === undefined ? [] : [projectId],
+      source,
+      summary: summary.slice(0, 500),
+      content,
+      tags: [observation === "human_decision" ? "human-decision" : "reasoning-checkpoint", ...(verdict === undefined ? [] : [verdict])],
+      evidence: [evidence],
+      confidence: boundedScore(data?.confidence, observation === "human_decision" ? 1 : 0.75),
+      salience: observation === "human_decision" ? 1 : 0.8,
+      extractor: LIVE_EXTRACTOR,
+    });
   }
   return candidates;
 }

@@ -9,6 +9,11 @@ export const traceStepSchema = z.object({
   role: z.enum(["model_thought", "tool_call", "tool_call_response", "decision", "model_output"]),
   content: z.string(),
   toolName: nonEmpty.optional(),
+  artifactId: nonEmpty.optional(),
+  eventId: nonEmpty.optional(),
+  turnId: nonEmpty.optional(),
+  startedAt: z.string().datetime({ offset: true }).optional(),
+  durationMs: z.number().finite().nonnegative().optional(),
 }).strict();
 
 export const sharedNodeSchema = z.object({

@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { deliverTranscriptBundle, listDeliveredTranscriptRunIds } from "./delivery.js";
 import { storeRedactedArtifact } from "./redact.js";
+import { readVaultKey } from "./encryption.js";
 import { scanTranscripts } from "./scan.js";
 
 const args = process.argv.slice(2).filter((argument) => argument !== "--");
@@ -41,6 +42,7 @@ async function main(): Promise<void> {
     readonly workspaceId: string;
     readonly bearerToken: string;
     readonly vaultRoot: string;
+    readonly vaultEncryptionKey?: Uint8Array;
   } | undefined;
   if (command === "import") {
     if (!hasFlag("--confirm")) {
@@ -53,11 +55,18 @@ async function main(): Promise<void> {
     const workspaceId = option("--workspace") ?? process.env.FOLD_API_WORKSPACE;
     const bearerToken = process.env.FOLD_API_TOKEN;
     const vaultRoot = option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT;
+    const vaultKeyPath = option("--vault-key") ?? process.env.FOLD_TRANSCRIPT_VAULT_KEY_FILE;
     if (apiUrl === undefined) throw new TypeError("import requires --api-url or FOLD_API_URL");
     if (workspaceId === undefined) throw new TypeError("import requires --workspace or FOLD_API_WORKSPACE");
     if (bearerToken === undefined) throw new TypeError("import requires FOLD_API_TOKEN");
     if (vaultRoot === undefined) throw new TypeError("import requires --vault or FOLD_TRANSCRIPT_VAULT");
-    delivery = { apiUrl, workspaceId, bearerToken, vaultRoot };
+    delivery = {
+      apiUrl,
+      workspaceId,
+      bearerToken,
+      vaultRoot,
+      ...(vaultKeyPath === undefined ? {} : { vaultEncryptionKey: await readVaultKey(vaultKeyPath) }),
+    };
   }
   const limitValue = option("--limit");
   const limit = limitValue === undefined ? undefined : Number(limitValue);
@@ -109,7 +118,9 @@ async function main(): Promise<void> {
       continue;
     }
     try {
-      const stored = await storeRedactedArtifact(transcript, delivery.vaultRoot);
+      const stored = await storeRedactedArtifact(transcript, delivery.vaultRoot, {
+        ...(delivery.vaultEncryptionKey === undefined ? {} : { encryptionKey: delivery.vaultEncryptionKey }),
+      });
       const delivered = await deliverTranscriptBundle(stored.bundle, {
         apiUrl: delivery.apiUrl,
         workspaceId: delivery.workspaceId,

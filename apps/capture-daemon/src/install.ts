@@ -50,6 +50,23 @@ async function writePrivate(path: string, value: unknown): Promise<void> {
   }
 }
 
+async function writePrivateText(path: string, value: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  const file = await open(temporary, "w", 0o600);
+  try {
+    await file.writeFile(value, "utf8");
+    await file.sync();
+    await file.close();
+    await rename(temporary, path);
+    await chmod(path, 0o600);
+  } catch (error) {
+    await file.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
 function hookCommand(executable: string, configPath: string, source: "claude-code" | "codex"): string {
   return `${shellQuote(process.execPath)} ${shellQuote(executable)} relay ${source} --config ${shellQuote(configPath)} # super-brain-capture`;
 }
@@ -100,6 +117,20 @@ export async function installHooks(executableInput: string, configPathInput: str
     await writePrivate(target.path, mergedHookSettings(settings, executable, configPath, target.source));
   }
   return targets.map(({ path }) => path);
+}
+
+export async function installHermesHook(configPathInput: string): Promise<readonly string[]> {
+  const configPath = resolve(configPathInput);
+  const directory = join(homedir(), ".hermes", "hooks", "super-brain-capture");
+  const manifestPath = join(directory, "HOOK.yaml");
+  const handlerPath = join(directory, "handler.py");
+  const manifest = `name: super-brain-capture\ndescription: Relay Hermes gateway lifecycle and tool-step observations\nevents:\n  - session:start\n  - session:reset\n  - agent:start\n  - agent:step\n  - agent:end\n`;
+  const handler = `import asyncio\nimport json\nimport os\nimport urllib.request\nfrom pathlib import Path\n\nCONFIG_PATH = Path(${JSON.stringify(configPath)})\n\ndef _emit(name, context):\n    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))\n    session_id = context.get("session_id") or context.get("session_key") or "hermes-gateway"\n    payload = dict(context)\n    payload.update({"hook_event_name": name, "session_id": str(session_id), "cwd": os.getcwd()})\n    request = urllib.request.Request(\n        "http://%s:%s/hook" % (config["bindHost"], config["port"]),\n        data=json.dumps(payload).encode("utf-8"),\n        headers={\n            "Content-Type": "application/json",\n            "X-Agent-Source": "hermes",\n            "X-Super-Brain-Hook-Token": config["hookToken"],\n        },\n        method="POST",\n    )\n    with urllib.request.urlopen(request, timeout=2):\n        pass\n\nasync def handle(event_type, context):\n    names = {\n        "session:start": ["SessionStart"],\n        "session:reset": ["SessionEnd"],\n        "agent:start": ["UserPromptSubmit"],\n        "agent:step": ["HermesStep"],\n        "agent:end": ["Stop", "SessionEnd"],\n    }.get(event_type, [])\n    payload = dict(context or {})\n    if event_type == "agent:start":\n        payload["prompt"] = payload.get("message", "")\n    if event_type == "agent:end":\n        payload["last_assistant_message"] = payload.get("response", "")\n    if event_type == "session:reset":\n        payload["reason"] = "reset"\n    for name in names:\n        await asyncio.to_thread(_emit, name, payload)\n`;
+  await Promise.all([
+    writePrivateText(manifestPath, manifest),
+    writePrivateText(handlerPath, handler),
+  ]);
+  return [manifestPath, handlerPath];
 }
 
 function xml(value: string): string {

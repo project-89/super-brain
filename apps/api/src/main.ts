@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { PostgresVectorMemoryRanker } from "@_89/fold-postgres";
 
@@ -9,6 +10,7 @@ import { LocalLexicalMemoryRanker } from "./recall.js";
 import { LocalEvidenceReasoner } from "./reasoning.js";
 import { createApiServer } from "./server.js";
 import { HttpMemoryEmbeddingProvider } from "./embeddings.js";
+import { installApiLaunchAgent } from "./install.js";
 
 function portFromEnvironment(value: string | undefined): number {
   const port = value === undefined ? 3000 : Number(value);
@@ -40,6 +42,13 @@ function corsOriginsFromEnvironment(value: string | undefined): readonly string[
 }
 
 async function main(): Promise<void> {
+  const args = process.argv.slice(2).filter((argument) => argument !== "--");
+  const command = args[0] ?? "serve";
+  if (command === "install-service") {
+    process.stdout.write(`${await installApiLaunchAgent(fileURLToPath(import.meta.url))}\n`);
+    return;
+  }
+  if (command !== "serve") throw new TypeError("supported commands: serve, install-service");
   const credentials = process.env.FOLD_API_CREDENTIALS_JSON;
   if (credentials === undefined || credentials.trim().length === 0) {
     throw new TypeError("FOLD_API_CREDENTIALS_JSON is required");
@@ -76,6 +85,12 @@ async function main(): Promise<void> {
     process.env.FOLD_API_RATE_LIMIT_PER_MINUTE,
     300,
   );
+  const fleetOrphanAfterMs = nonNegativeIntegerFromEnvironment(
+    "FOLD_FLEET_ORPHAN_AFTER_MS",
+    process.env.FOLD_FLEET_ORPHAN_AFTER_MS,
+    24 * 60 * 60_000,
+  );
+  if (fleetOrphanAfterMs === 0) throw new TypeError("FOLD_FLEET_ORPHAN_AFTER_MS must be greater than zero");
   const corsOrigins = corsOriginsFromEnvironment(process.env.FOLD_API_CORS_ORIGINS);
   await registry.open();
   let server: ReturnType<typeof createApiServer>;
@@ -88,6 +103,7 @@ async function main(): Promise<void> {
       reasoner: new LocalEvidenceReasoner(),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),
       ...(corsOrigins === undefined ? {} : { corsOrigins }),
+      fleetOrphanAfterMs,
       reportError: (error) => console.error(error),
     });
     await new Promise<void>((resolve, reject) => {

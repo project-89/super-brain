@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import type {
   AuthenticatedSubject,
+  ApiCapability,
   Authenticator,
   MembershipResolver,
 } from "./types.js";
@@ -22,6 +23,22 @@ const staticCredentialMapSchema = z.record(
     .object({
       principalId: z.string().min(1),
       author: authorSchema.optional(),
+      capabilities: z.array(z.enum([
+        "events:read",
+        "events:write",
+        "memories:read",
+        "memories:write",
+        "trajectories:read",
+        "trajectories:write",
+        "transcripts:read",
+        "transcripts:write",
+        "fleet:read",
+        "steering:read",
+        "steering:write",
+        "reasoning:read",
+        "consumers:read",
+        "consumers:write",
+      ])).max(14).optional(),
       workspaces: z.record(staticWorkspaceMembershipSchema),
     })
     .strict(),
@@ -89,7 +106,14 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
       }
       const id = credentialId(token);
       this.credentials.set(id, {
-        subject: { credentialId: id, principalId: configured.principalId, author },
+        subject: {
+          credentialId: id,
+          principalId: configured.principalId,
+          author,
+          ...(configured.capabilities === undefined
+            ? {}
+            : { capabilities: [...new Set(configured.capabilities)] as ApiCapability[] }),
+        },
         workspaces: configured.workspaces,
       });
     }
@@ -111,7 +135,13 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
   async authenticate(bearerToken: string): Promise<AuthenticatedSubject | undefined> {
     if (bearerToken.length === 0) return undefined;
     const subject = this.credentials.get(credentialId(bearerToken))?.subject;
-    return subject === undefined ? undefined : { ...subject, author: { ...subject.author } };
+    return subject === undefined
+      ? undefined
+      : {
+          ...subject,
+          author: { ...subject.author },
+          ...(subject.capabilities === undefined ? {} : { capabilities: [...subject.capabilities] }),
+        };
   }
 
   async resolveAccess(
@@ -124,7 +154,8 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
       stored.subject.principalId !== subject.principalId ||
       stored.subject.author.kind !== subject.author.kind ||
       stored.subject.author.id !== subject.author.id ||
-      stored.subject.author.productionId !== subject.author.productionId
+      stored.subject.author.productionId !== subject.author.productionId ||
+      JSON.stringify(stored.subject.capabilities) !== JSON.stringify(subject.capabilities)
     ) {
       return undefined;
     }

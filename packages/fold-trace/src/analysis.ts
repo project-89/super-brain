@@ -138,6 +138,8 @@ export function analyzeProjectedTrajectories(
       sourceId: edge.sourceId,
       targetId: edge.targetId,
       ...counts,
+      unknowns: counts.traversals - classified,
+      classifiedSamples: classified,
       successRate: classified === 0 ? 0 : counts.successes / classified,
     });
   }
@@ -145,7 +147,12 @@ export function analyzeProjectedTrajectories(
   const routes: RouteOutcome[] = [...routeCounts.values()]
     .map((route) => {
       const classified = route.successes + route.failures;
-      return { ...route, successRate: classified === 0 ? 0 : route.successes / classified };
+      return {
+        ...route,
+        unknowns: route.samples - classified,
+        classifiedSamples: classified,
+        successRate: classified === 0 ? 0 : route.successes / classified,
+      };
     })
     .sort((left, right) => {
       if (left.successRate !== right.successRate) return right.successRate - left.successRate;
@@ -161,7 +168,7 @@ export function analyzeProjectedTrajectories(
     incompleteTraceCount: trajectories.length - routeEligibleTraceCount,
     coverage: projectionCoverage(trajectories),
     routes,
-    mostSuccessfulPath: routes[0]?.nodeIds ?? [],
+    mostSuccessfulPath: routes.find((route) => route.classifiedSamples > 0)?.nodeIds ?? [],
     edgeOutcomes,
   };
 }

@@ -1,4 +1,4 @@
-import { Check, Edit3, ListFilter, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Edit3, ListFilter, Plus, Search, Sparkles, ThumbsDown, ThumbsUp, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
@@ -14,6 +14,7 @@ export function MemoryPage({
   onCreate,
   onEdit,
   onForget,
+  onFeedback,
   onAcceptCandidate,
   onRejectCandidate,
   mutationPending,
@@ -30,6 +31,7 @@ export function MemoryPage({
   readonly onCreate: () => void;
   readonly onEdit: (memory: PersonalMemory) => void;
   readonly onForget: (memory: PersonalMemory) => void;
+  readonly onFeedback: (memory: PersonalMemory, signal: "helpful" | "unhelpful") => Promise<void>;
   readonly onAcceptCandidate: (candidate: MemoryCandidate) => Promise<void>;
   readonly onRejectCandidate: (candidate: MemoryCandidate, reason: string) => Promise<void>;
   readonly mutationPending: boolean;
@@ -155,6 +157,8 @@ export function MemoryPage({
               <header className="detail-pane__header">
                 <div><span className="eyebrow">Revision {selected.revision}</span><h2>{selected.summary || "Untitled memory"}</h2></div>
                 <div className="detail-pane__actions">
+                  <button className="icon-button" type="button" disabled={mutationPending} title="Mark helpful" aria-label="Mark memory helpful" onClick={() => void onFeedback(selected, "helpful")}><ThumbsUp aria-hidden="true" /></button>
+                  <button className="icon-button" type="button" disabled={mutationPending} title="Mark unhelpful" aria-label="Mark memory unhelpful" onClick={() => void onFeedback(selected, "unhelpful")}><ThumbsDown aria-hidden="true" /></button>
                   <button className="icon-button" type="button" title="Revise memory" aria-label="Revise memory" onClick={() => onEdit(selected)}><Edit3 aria-hidden="true" /></button>
                   <button className="icon-button icon-button--danger" type="button" title="Forget memory" aria-label="Forget memory" onClick={() => onForget(selected)}><Trash2 aria-hidden="true" /></button>
                 </div>
@@ -171,6 +175,9 @@ export function MemoryPage({
               <div className="memory-content"><pre>{memoryContent(selected) || "No content"}</pre></div>
               {selected.entities.length > 0 && (
                 <section className="detail-section"><h3>Entities</h3><ul className="entity-list">{selected.entities.map((entity) => <li key={`${entity.type}:${entity.id}`}><strong>{entity.name}</strong><span>{entity.type}</span><code>{entity.id}</code></li>)}</ul></section>
+              )}
+              {(selected.evidence?.length ?? 0) > 0 && (
+                <section className="detail-section"><h3>Evidence</h3><ul className="candidate-evidence">{selected.evidence!.map((evidence) => <li key={`${evidence.eventId}:${evidence.turnId ?? ""}`}><code>{evidence.eventId}</code>{evidence.projectId !== undefined && <span>{evidence.projectId}</span>}{evidence.runId !== undefined && <span>{evidence.runId}</span>}{evidence.turnId !== undefined && <span>{evidence.turnId}</span>}</li>)}</ul></section>
               )}
             </>
           )}

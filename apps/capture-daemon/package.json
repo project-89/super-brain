@@ -14,13 +14,15 @@
   "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsup src/index.ts src/main.ts --format esm --dts --clean",
-    "start": "node --enable-source-maps dist/main.js run",
+    "start": "node --enable-source-maps dist/main.js",
+    "serve": "node --enable-source-maps dist/main.js run",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@_89/fold": "workspace:*",
     "@_89/fold-activity": "workspace:*",
+    "@_89/fold-trace": "workspace:*",
     "@_89/fold-trajectory": "workspace:*",
     "@_89/super-brain-client": "workspace:*",
     "@_89/super-brain-importer": "workspace:*"

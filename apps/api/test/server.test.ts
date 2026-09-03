@@ -1,5 +1,6 @@
 import {
   FixedWindowRateLimiter,
+  StaticIdentityDirectory,
   createApiServer,
   type MembershipResolver,
 } from "../src/index.js";
@@ -228,6 +229,30 @@ describe("Fold HTTP API", () => {
         (await apiRequest(api.baseUrl, "/v1/workspaces/workspace-2/events", { token: "token-a" }))
           .status,
       ).toBe(403);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("enforces credential capabilities independently from workspace role", async () => {
+    const directory = new StaticIdentityDirectory({
+      "read-token": {
+        principalId: "reader-a",
+        capabilities: ["memories:read"],
+        workspaces: { "workspace-1": { role: "owner" } },
+      },
+    });
+    const api = await startApi({ authenticator: directory, memberships: directory });
+    try {
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", { token: "read-token" })).status)
+        .toBe(200);
+      expect(await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { token: "read-token" }))
+        .toMatchObject({ status: 403, body: { error: { code: "credential_scope_denied" } } });
+      expect(await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", {
+        method: "POST",
+        token: "read-token",
+        body: memoryRecordBody(),
+      })).toMatchObject({ status: 403, body: { error: { code: "credential_scope_denied" } } });
     } finally {
       await api.close();
     }
@@ -506,6 +531,23 @@ describe("Fold HTTP API", () => {
       );
       expect(recalled.body.memories).toHaveLength(1);
       expect(recalled.body.memories[0]).toMatchObject({ score: 0.8, memory: { id: MEMORY_A } });
+
+      const feedback = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/memories/${MEMORY_A}/feedback`,
+        {
+          method: "POST",
+          token: "token-a",
+          body: {
+            stamp: { id: "event-feedback", t: 115, worldDate: "2026-08-17" },
+            input: { signal: "helpful", query: "Which memory helped?", taskId: "task-a" },
+          },
+        },
+      );
+      expect(feedback).toMatchObject({
+        status: 201,
+        body: { feedback: { memoryId: MEMORY_A, signal: "helpful", actorId: "user-a", taskId: "task-a" } },
+      });
 
       const forgotten = await apiRequest(
         api.baseUrl,
@@ -877,7 +919,10 @@ describe("Fold HTTP API", () => {
           },
         },
       );
-      expect(duplicate).toMatchObject({ status: 409, body: { error: { code: "fold_conflict" } } });
+      expect(duplicate).toMatchObject({
+        status: 201,
+        body: { event: { id: "trajectory-tree-event" }, record: { tree: trajectoryTree } },
+      });
     } finally {
       await api.close();
     }

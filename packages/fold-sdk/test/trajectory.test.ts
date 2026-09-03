@@ -115,7 +115,7 @@ describe("SDK trajectory API", () => {
     ).resolves.toMatchObject({ record: { recordType: "tree" } });
     await expect(
       sdk.recordTrajectoryTree(context, stamp("duplicate-tree", 3), tree),
-    ).rejects.toBeInstanceOf(FoldSdkConflictError);
+    ).resolves.toMatchObject({ record: { tree } });
     await sdk.recordTrajectory(context, stamp("run-event", 4), trajectory("run-a"));
     await expect(
       sdk.recordTrajectory(context, stamp("run-event", 4), trajectory("run-a")),
@@ -123,6 +123,23 @@ describe("SDK trajectory API", () => {
     await expect(
       sdk.recordTrajectory(context, stamp("duplicate-run", 5), trajectory("run-a")),
     ).rejects.toBeInstanceOf(FoldSdkConflictError);
+  });
+
+  it("accepts append-only shared-tree revisions for later model branches", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    const context = trajectoryContext();
+    await sdk.recordTrajectoryTree(context, stamp("tree-event", 1), tree);
+    const revision = {
+      ...tree,
+      nodes: [...tree.nodes, { id: "alternative", kind: "decision" as const, label: "Alternative diagnosis" }],
+      edges: [...tree.edges, { id: "e-alternative", sourceId: "observe", targetId: "alternative", label: "alternative" }],
+    };
+    await sdk.recordTrajectoryTree(context, stamp("tree-revision", 2), revision);
+    expect((await sdk.trajectoryTasks(context.access))[0]?.tree.nodes).toHaveLength(tree.nodes.length + 1);
+    await expect(sdk.recordTrajectoryTree(context, stamp("bad-revision", 3), {
+      ...revision,
+      nodes: revision.nodes.map((node) => node.id === "observe" ? { ...node, label: "Changed" } : node),
+    })).rejects.toBeInstanceOf(FoldSdkConflictError);
   });
 
   it("does not expose space-scoped trajectory records after access is removed", async () => {

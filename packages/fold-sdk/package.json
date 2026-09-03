@@ -27,6 +27,7 @@
     "@_89/fold-drives": "workspace:*",
     "@_89/fold-epistemic": "workspace:*",
     "@_89/fold-fleet": "workspace:*",
+    "@_89/fold-trace": "workspace:*",
     "@_89/fold-transcript": "workspace:*",
     "@_89/fold-trajectory": "workspace:*"
   },

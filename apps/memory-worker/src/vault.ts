@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import type { TranscriptRun, TranscriptSource } from "@_89/fold-transcript";
 
 import type { VaultMessage } from "./types.js";
+import { decryptVaultLine } from "@_89/super-brain-importer";
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -112,26 +113,30 @@ export function messagesFromVaultRecords(
   return messages;
 }
 
-export function vaultPath(vaultRoot: string, run: TranscriptRun): string | undefined {
+export function vaultPath(vaultRoot: string, run: TranscriptRun, encrypted = false): string | undefined {
   const sha256 = run.artifactId.replace(/^artifact-/, "");
   if (!/^[0-9a-f]{64}$/.test(sha256)) return undefined;
-  return join(vaultRoot, run.source, sha256.slice(0, 2), `${sha256}.jsonl`);
+  return join(vaultRoot, run.source, sha256.slice(0, 2), `${sha256}.jsonl${encrypted ? ".enc" : ""}`);
 }
 
-export async function readVaultMessages(vaultRoot: string, run: TranscriptRun): Promise<readonly VaultMessage[] | undefined> {
-  const path = vaultPath(vaultRoot, run);
+export async function readVaultMessages(
+  vaultRoot: string,
+  run: TranscriptRun,
+  encryptionKey?: Uint8Array,
+): Promise<readonly VaultMessage[] | undefined> {
+  const encryptedPath = vaultPath(vaultRoot, run, true);
+  const plainPath = vaultPath(vaultRoot, run);
+  if (encryptedPath === undefined || plainPath === undefined) return undefined;
+  const path = await access(encryptedPath).then(() => encryptedPath).catch(() =>
+    access(plainPath).then(() => plainPath).catch(() => undefined));
   if (path === undefined) return undefined;
-  try {
-    await access(path);
-  } catch {
-    return undefined;
-  }
   const records: Record<string, unknown>[] = [];
   const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
   for await (const line of lines) {
     if (line.trim().length === 0) continue;
+    const decrypted = decryptVaultLine(line, encryptionKey);
     try {
-      const record = recordValue(JSON.parse(line) as unknown);
+      const record = recordValue(JSON.parse(decrypted) as unknown);
       if (record !== undefined) records.push(record);
     } catch {
       // Redacted vaults contain JSONL; malformed lines are ignored independently.

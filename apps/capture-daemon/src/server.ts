@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { CaptureEngine } from "./capture.js";
-import { DurableSpool } from "./storage.js";
+import { DurableSpool, readRelayFailureSummary } from "./storage.js";
 import type { CaptureConfig, HookSource } from "./types.js";
 
 function send(response: ServerResponse, status: number, body: unknown): void {
@@ -22,7 +22,12 @@ function authorized(request: IncomingMessage, expected: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function source(value: string | undefined): HookSource {
+export function hookSource(headerValue: string | undefined, payloadValue: unknown): HookSource {
+  const value = headerValue === "claude" || headerValue === "claude-code" || headerValue === "codex" || headerValue === "hermes"
+    ? headerValue
+    : typeof payloadValue === "string"
+      ? payloadValue
+      : undefined;
   if (value === "claude" || value === "claude-code") return "claude-code";
   if (value === "codex") return "codex";
   if (value === "hermes") return "hermes";
@@ -85,8 +90,11 @@ export class CaptureHttpServer {
     try {
       const url = new URL(request.url ?? "/", "http://capture.local");
       if (request.method === "GET" && url.pathname === "/health") {
-        const jobs = await this.spool.list();
-        send(response, 200, { status: "ok", ...this.engine.snapshot(), pendingJobs: jobs.length });
+        const [spool, relayFailures] = await Promise.all([
+          this.spool.snapshot(),
+          readRelayFailureSummary(this.config.stateRoot),
+        ]);
+        send(response, 200, { status: "ok", ...this.engine.snapshot(), ...spool, relayFailures });
         return;
       }
       if (request.method !== "POST" || !["/hook", "/checkpoint", "/decision"].includes(url.pathname)) {
@@ -104,7 +112,7 @@ export class CaptureHttpServer {
           ? "HumanDecision"
           : undefined;
       const result = await this.engine.ingest(
-        source(typeof body.source === "string" ? body.source : request.headers["x-agent-source"] as string | undefined),
+        hookSource(request.headers["x-agent-source"] as string | undefined, body.source),
         eventName === undefined ? body : { ...body, hook_event_name: eventName },
       );
       send(response, 202, { accepted: true, artifactId: result.artifactId });

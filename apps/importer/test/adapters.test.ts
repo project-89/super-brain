@@ -9,6 +9,8 @@ import {
   parseCodexTranscript,
   projectForRoot,
   deliverTranscriptBundle,
+  decryptVaultLine,
+  ensureVaultKey,
   listDeliveredTranscriptRunIds,
   scanTranscripts,
   storeRedactedArtifact,
@@ -142,6 +144,38 @@ describe("transcript source adapters", () => {
     const target = join(vault, "claude-code", stored.bundle.artifact.sha256.slice(0, 2), `${stored.bundle.artifact.sha256}.jsonl`);
     expect(stored.bundle.artifact.reasoningPolicy).toBe("included");
     expect(await readFile(target, "utf8")).toContain("inspect the cache");
+  });
+
+  it("encrypts each redacted vault record with an authenticated key", async () => {
+    const path = await fixture("99999999-9999-4999-8999-999999999999.jsonl", [
+      { type: "user", sessionId: "99999999-9999-4999-8999-999999999999", uuid: "message-a", cwd: "/work/private", timestamp: "2026-08-20T12:00:00.000Z", message: { role: "user", content: "token=abcdefghijklmnop durable choice" } },
+    ]);
+    const parsed = await parseClaudeTranscript(path);
+    const vault = await mkdtemp(join(tmpdir(), "fold-vault-encrypted-"));
+    const keyFile = join(vault, "keys", "vault.key");
+    const { key } = await ensureVaultKey(keyFile);
+    await storeRedactedArtifact(parsed, vault, { encryptionKey: key });
+    const target = join(vault, "claude-code", parsed.bundle.artifact.sha256.slice(0, 2), `${parsed.bundle.artifact.sha256}.jsonl.enc`);
+    const encrypted = await readFile(target, "utf8");
+    expect(encrypted).not.toContain("durable choice");
+    expect(decryptVaultLine(encrypted.trim(), key)).toContain("durable choice");
+    expect(decryptVaultLine(encrypted.trim(), key)).toContain("[REDACTED]");
+    expect((await stat(keyFile)).mode & 0o777).toBe(0o600);
+    await expect(storeRedactedArtifact(parsed, vault, { encryptionKey: key })).resolves.toBeDefined();
+    await expect(() => decryptVaultLine(encrypted.trim(), new Uint8Array(32))).toThrow(/authentication/);
+  });
+
+  it("never replaces an existing artifact with a different reasoning policy", async () => {
+    const path = await fixture("88888888-8888-4888-8888-888888888887.jsonl", [
+      { type: "assistant", sessionId: "88888888-8888-4888-8888-888888888887", cwd: "/work/private", timestamp: "2026-08-20T12:00:00.000Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: "visible" }] } },
+    ]);
+    const parsed = await parseClaudeTranscript(path);
+    const vault = await mkdtemp(join(tmpdir(), "fold-vault-policy-"));
+    await storeRedactedArtifact(parsed, vault);
+    await expect(storeRedactedArtifact(parsed, vault, { reasoningPolicy: "include" }))
+      .rejects.toThrow("different redaction or reasoning content");
+    const target = join(vault, "claude-code", parsed.bundle.artifact.sha256.slice(0, 2), `${parsed.bundle.artifact.sha256}.jsonl`);
+    expect(await readFile(target, "utf8")).not.toContain("private reasoning");
   });
 
   it("rejects an artifact whose source changed after scanning", async () => {

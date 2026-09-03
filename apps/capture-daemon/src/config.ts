@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { hostname, homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 
 import type { CaptureConfig, ReasoningPolicy } from "./types.js";
+import { ensureVaultKey } from "@_89/super-brain-importer";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -64,8 +65,10 @@ export function parseCaptureConfig(value: unknown): CaptureConfig {
     port: positiveInteger(input.port, "port"),
     heartbeatWindowMs: positiveInteger(input.heartbeatWindowMs, "heartbeatWindowMs"),
     heartbeatIntervalMs: positiveInteger(input.heartbeatIntervalMs, "heartbeatIntervalMs"),
+    orphanAfterMs: positiveInteger(input.orphanAfterMs ?? 24 * 60 * 60_000, "orphanAfterMs"),
     stateRoot: expandedPath(input.stateRoot, "stateRoot"),
     vaultRoot: expandedPath(input.vaultRoot, "vaultRoot"),
+    ...(input.vaultKeyPath === undefined ? {} : { vaultKeyPath: expandedPath(input.vaultKeyPath, "vaultKeyPath") }),
     reasoningPolicy,
   };
 }
@@ -96,6 +99,18 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
   }
 }
 
+export async function enableCaptureVaultEncryption(
+  pathInput = defaultConfigPath(),
+  keyPathInput?: string,
+): Promise<{ readonly path: string; readonly keyPath: string }> {
+  const path = resolve(pathInput);
+  const current = await readCaptureConfig(path);
+  const keyPath = resolve(keyPathInput ?? current.vaultKeyPath ?? join(dirname(path), "vault.key"));
+  await ensureVaultKey(keyPath);
+  await writePrivateJson(path, { ...current, vaultKeyPath: keyPath });
+  return { path, keyPath };
+}
+
 export async function initializeCaptureConfig(options: {
   readonly path?: string;
   readonly apiToken: string;
@@ -103,6 +118,7 @@ export async function initializeCaptureConfig(options: {
   readonly workspaceId?: string;
   readonly stateRoot?: string;
   readonly vaultRoot?: string;
+  readonly vaultKeyPath?: string;
   readonly reasoningPolicy?: ReasoningPolicy;
   readonly force?: boolean;
 }): Promise<{ readonly path: string; readonly config: CaptureConfig }> {
@@ -113,6 +129,8 @@ export async function initializeCaptureConfig(options: {
     });
   }
   const machine = hostname().toLowerCase().replace(/[^a-z0-9.-]+/g, "-") || "local";
+  const vaultKeyPath = resolve(options.vaultKeyPath ?? join(dirname(path), "vault.key"));
+  await ensureVaultKey(vaultKeyPath);
   const config = parseCaptureConfig({
     apiUrl: options.apiUrl ?? "http://127.0.0.1:3003",
     workspaceId: options.workspaceId ?? "local-history",
@@ -123,8 +141,10 @@ export async function initializeCaptureConfig(options: {
     port: 8377,
     heartbeatWindowMs: 90_000,
     heartbeatIntervalMs: 30_000,
+    orphanAfterMs: 24 * 60 * 60_000,
     stateRoot: options.stateRoot ?? `${homedir()}/.local/state/super-brain/capture`,
     vaultRoot: options.vaultRoot ?? `${homedir()}/.local/share/super-brain/vault`,
+    vaultKeyPath,
     reasoningPolicy: options.reasoningPolicy ?? "exclude",
   });
   await writePrivateJson(path, config);

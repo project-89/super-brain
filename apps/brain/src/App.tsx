@@ -164,6 +164,18 @@ export default function App() {
             setForgetMemory(memory);
             setForgetReason("no longer needed");
           }}
+          onFeedback={async (memory, signal) => {
+            setMutationPending(true);
+            setMutationError(undefined);
+            try {
+              await api.recordMemoryFeedback(memory.id, signal);
+              setNotice(signal === "helpful" ? "Memory marked helpful" : "Memory marked unhelpful");
+            } catch (caught) {
+              setMutationError(caught instanceof Error ? caught.message : "Memory feedback failed");
+            } finally {
+              setMutationPending(false);
+            }
+          }}
           onAcceptCandidate={async (candidate) => {
             setMutationPending(true);
             setMutationError(undefined);

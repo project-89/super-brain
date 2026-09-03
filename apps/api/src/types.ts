@@ -13,7 +13,24 @@ export interface AuthenticatedSubject {
   readonly credentialId: string;
   readonly principalId: string;
   readonly author: Author;
+  readonly capabilities?: readonly ApiCapability[];
 }
+
+export type ApiCapability =
+  | "events:read"
+  | "events:write"
+  | "memories:read"
+  | "memories:write"
+  | "trajectories:read"
+  | "trajectories:write"
+  | "transcripts:read"
+  | "transcripts:write"
+  | "fleet:read"
+  | "steering:read"
+  | "steering:write"
+  | "reasoning:read"
+  | "consumers:read"
+  | "consumers:write";
 
 export interface Authenticator {
   authenticate(bearerToken: string): Promise<AuthenticatedSubject | undefined>;
@@ -68,6 +85,7 @@ export interface ApiDependencies {
   readonly corsOrigins?: readonly string[];
   readonly reportError?: (error: unknown) => void;
   readonly eventStreamPollMs?: number;
+  readonly fleetOrphanAfterMs?: number;
 }
 
 export interface StaticWorkspaceMembership {
@@ -78,6 +96,7 @@ export interface StaticWorkspaceMembership {
 export interface StaticCredentialConfiguration {
   readonly principalId: string;
   readonly author?: Author;
+  readonly capabilities?: readonly ApiCapability[];
   readonly workspaces: Readonly<Record<string, StaticWorkspaceMembership>>;
 }
 

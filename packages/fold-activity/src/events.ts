@@ -29,6 +29,7 @@ const OBSERVATION_KINDS: ReadonlySet<string> = new Set([
   "tool_running",
   "tool_result",
   "file_changed",
+  "repository_changed",
   "verification_result",
   "reasoning_checkpoint",
   "human_decision",
@@ -236,6 +237,7 @@ export function makeTerminalObservationEvent(
   context: TerminalSensorContext,
   stamp: ActivityEventStamp,
   observation: TerminalObservation,
+  causedBy?: readonly string[],
 ): FoldEvent {
   const digest = observation.output === undefined ? undefined : digestTerminalOutput(observation.output);
   const after: Record<string, JsonValue> = {
@@ -257,6 +259,7 @@ export function makeTerminalObservationEvent(
   };
   const event = parseEvent({
     ...baseEvent(context, stamp),
+    ...(causedBy === undefined || causedBy.length === 0 ? {} : { causedBy: [...causedBy] }),
     kind: "terminal.observation",
     title: `Terminal ${observation.kind.replaceAll("_", " ")}`,
     changes: [

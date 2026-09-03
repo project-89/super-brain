@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { SuperBrainClient } from "@_89/super-brain-client";
+import { readVaultKey } from "@_89/super-brain-importer";
+import { fileURLToPath } from "node:url";
 
+import { installMemoryWorkerLaunchAgent } from "./install.js";
 import { TranscriptMemoryWorker } from "./worker.js";
 import type { ExtractedCandidate } from "./types.js";
 
@@ -21,8 +24,17 @@ function required(value: string | undefined, label: string): string {
 
 async function main(): Promise<void> {
   const command = args[0] ?? "scan";
+  if (command === "install-service") {
+    const path = await installMemoryWorkerLaunchAgent(fileURLToPath(import.meta.url), {
+      consumerId: option("--consumer") ?? "transcript-memory-extractor-v1",
+      autoPromote: !args.includes("--no-auto-promote"),
+      replayAll: args.includes("--replay-all"),
+    });
+    process.stdout.write(`${path}\n`);
+    return;
+  }
   if (command !== "scan" && command !== "backfill" && command !== "watch") {
-    throw new TypeError("supported commands: scan, backfill, watch");
+    throw new TypeError("supported commands: scan, backfill, watch, install-service");
   }
   if (command === "backfill" && !args.includes("--confirm")) {
     throw new TypeError("backfill requires --confirm; run scan first to review counts");
@@ -31,6 +43,8 @@ async function main(): Promise<void> {
   const workspaceId = required(option("--workspace") ?? process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE");
   const token = required(process.env.SUPER_BRAIN_TOKEN ?? process.env.FOLD_API_TOKEN, "SUPER_BRAIN_TOKEN");
   const vaultRoot = required(option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT, "FOLD_TRANSCRIPT_VAULT");
+  const vaultKeyPath = option("--vault-key") ?? process.env.FOLD_TRANSCRIPT_VAULT_KEY_FILE;
+  const vaultEncryptionKey = vaultKeyPath === undefined ? undefined : await readVaultKey(vaultKeyPath);
   const maxValue = option("--max-per-run");
   const maxCandidatesPerRun = maxValue === undefined ? 25 : Number(maxValue);
   const limitValue = option("--limit");
@@ -44,7 +58,14 @@ async function main(): Promise<void> {
 
   const client = new SuperBrainClient({ baseUrl, workspaceId, token });
   const autoPromote = args.includes("--auto-promote");
-  const worker = new TranscriptMemoryWorker({ client, vaultRoot, maxCandidatesPerRun, audience, autoPromote });
+  const worker = new TranscriptMemoryWorker({
+    client,
+    vaultRoot,
+    maxCandidatesPerRun,
+    audience,
+    autoPromote,
+    ...(vaultEncryptionKey === undefined ? {} : { vaultEncryptionKey }),
+  });
   if (command === "watch") {
     await worker.watch({
       consumerId: option("--consumer") ?? "transcript-memory-extractor-v1",

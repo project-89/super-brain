@@ -11,6 +11,7 @@ import type {
   MemoryCandidate,
   MemoryCandidateDecision,
   MemoryCandidateView,
+  MemoryFeedbackRecord,
   PersonalMemory,
   RecallRequest,
   RecalledMemory,
@@ -93,6 +94,11 @@ export interface MemoryMutationResult {
 export interface MemoryForgetResult {
   readonly event: FoldEvent;
   readonly forgotten: ForgottenMemory;
+}
+
+export interface MemoryFeedbackResult {
+  readonly event: FoldEvent;
+  readonly feedback: MemoryFeedbackRecord;
 }
 
 export interface MemoryCandidateMutationResult {

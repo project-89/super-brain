@@ -30,6 +30,7 @@ export interface PersonalMemory {
   readonly content: JsonValue;
   readonly tags: readonly string[];
   readonly entities: readonly MemoryEntityRef[];
+  readonly evidence?: readonly MemoryCandidateEvidence[];
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly revision: number;
@@ -45,12 +46,14 @@ export interface MemoryInput {
   readonly content?: JsonValue;
   readonly tags?: readonly string[];
   readonly entities?: readonly MemoryEntityRef[];
+  readonly evidence?: readonly MemoryCandidateEvidence[];
 }
 
 export interface MemoryRevisionPatch {
   readonly summary?: string;
   readonly content?: JsonValue;
   readonly tags?: readonly string[];
+  readonly evidence?: readonly MemoryCandidateEvidence[];
 }
 
 export interface ForgottenMemory {

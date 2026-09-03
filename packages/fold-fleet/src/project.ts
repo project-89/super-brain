@@ -62,15 +62,40 @@ function requiredIdentity(event: FoldEvent): FleetSessionIdentity {
   };
 }
 
-function sameIdentity(left: FleetSessionIdentity, right: FleetSessionIdentity): boolean {
-  return (
-    left.sessionId === right.sessionId &&
-    left.agentId === right.agentId &&
-    left.taskId === right.taskId &&
-    left.repo === right.repo &&
-    left.branch === right.branch &&
-    left.runtime === right.runtime
+function refineValue(
+  left: string | undefined,
+  right: string | undefined,
+  provisional: (value: string) => boolean = (value) => value === "unknown",
+): string | undefined {
+  if (left === right || right === undefined || provisional(right)) return left;
+  if (left === undefined || provisional(left)) return right;
+  return undefined;
+}
+
+function refineIdentity(
+  current: FleetSessionIdentity,
+  observed: FleetSessionIdentity,
+): FleetSessionIdentity | undefined {
+  if (current.sessionId !== observed.sessionId) return undefined;
+  const task = refineValue(
+    current.taskId,
+    observed.taskId,
+    (value) => value === "unknown" || value === `capture-session:unknown:${current.sessionId}`,
   );
+  const agent = refineValue(current.agentId, observed.agentId);
+  const repo = refineValue(current.repo, observed.repo);
+  const branch = observed.branch === "unknown" ? current.branch : observed.branch;
+  const runtime = refineValue(current.runtime, observed.runtime);
+  if (task === undefined || agent === undefined || repo === undefined || branch === undefined) return undefined;
+  if (current.runtime !== undefined && observed.runtime !== undefined && runtime === undefined) return undefined;
+  return {
+    sessionId: current.sessionId,
+    agentId: agent,
+    taskId: task,
+    repo,
+    branch,
+    ...(runtime === undefined ? {} : { runtime }),
+  };
 }
 
 function sessionFor(
@@ -81,13 +106,16 @@ function sessionFor(
   const identity = requiredIdentity(event);
   const existing = sessions.get(identity.sessionId);
   if (existing !== undefined) {
-    if (!sameIdentity(existing, identity)) {
+    const refined = refineIdentity(existing, identity);
+    if (refined === undefined) {
       throw new FleetProjectionError(`session ${identity.sessionId} changed immutable capture identity`);
     }
     if (existing.sensor !== sensor) {
       throw new FleetProjectionError(`session ${identity.sessionId} changed sensor identity`);
     }
-    return existing;
+    const session = { ...existing, ...refined };
+    sessions.set(identity.sessionId, session);
+    return session;
   }
   const created: MutableFleetSession = {
     ...identity,

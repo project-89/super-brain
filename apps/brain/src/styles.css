@@ -2423,6 +2423,14 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
+.trajectory-step-evidence {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-subtle);
+  font-size: 8px;
+  overflow-wrap: anywhere;
+}
+
 .trajectory-loading,
 .trajectory-error {
   display: flex;

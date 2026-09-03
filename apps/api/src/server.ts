@@ -19,6 +19,7 @@ import {
 import type {
   EpistemicEventContext,
   MemoryCandidateInput,
+  MemoryFeedbackInput,
   MemoryInput,
   MemoryRevisionPatch,
   RecallRequest,
@@ -64,6 +65,7 @@ import {
 
 import type {
   ApiDependencies,
+  ApiCapability,
   AuthenticatedSubject,
 } from "./types.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
@@ -104,6 +106,13 @@ const entitySchema = z
   })
   .strict();
 
+const memoryCandidateEvidenceSchema = z.object({
+  eventId: z.string().trim().min(1).max(500),
+  projectId: z.string().trim().min(1).max(300).optional(),
+  runId: z.string().trim().min(1).max(500).optional(),
+  turnId: z.string().trim().min(1).max(500).optional(),
+}).strict();
+
 const memoryInputSchema = z
   .object({
     id: z.string().min(1),
@@ -115,6 +124,7 @@ const memoryInputSchema = z
     content: jsonValueSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
     entities: z.array(entitySchema).optional(),
+    evidence: z.array(memoryCandidateEvidenceSchema).max(1_000).optional(),
   })
   .strict();
 
@@ -123,15 +133,9 @@ const memoryPatchSchema = z
     summary: z.string().max(500).optional(),
     content: jsonValueSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
+    evidence: z.array(memoryCandidateEvidenceSchema).max(1_000).optional(),
   })
   .strict();
-
-const memoryCandidateEvidenceSchema = z.object({
-  eventId: z.string().trim().min(1).max(500),
-  projectId: z.string().trim().min(1).max(300).optional(),
-  runId: z.string().trim().min(1).max(500).optional(),
-  turnId: z.string().trim().min(1).max(500).optional(),
-}).strict();
 
 const memoryCandidateInputSchema = z.object({
   id: z.string().min(1),
@@ -219,6 +223,18 @@ const memoryForgetSchema = z
     ...causedByField,
   })
   .strict();
+
+const memoryFeedbackSchema = z.object({
+  stamp: stampSchema,
+  input: z.object({
+    signal: z.enum(["recalled", "helpful", "unhelpful", "superseded"]),
+    query: z.string().trim().min(1).max(2_000).optional(),
+    taskId: z.string().trim().min(1).max(500).optional(),
+    sessionId: z.string().trim().min(1).max(500).optional(),
+    detail: z.string().trim().min(1).max(2_000).optional(),
+  }).strict(),
+  ...causedByField,
+}).strict();
 
 const memoryCandidateProposalSchema = z.object({
   stamp: stampSchema,
@@ -796,6 +812,15 @@ function parsedRankedRecallRequest(input: unknown): RankedMemoryRecallRequest {
   return rankedRecallRequestSchema.parse(input) as RankedMemoryRecallRequest;
 }
 
+function parsedMemoryEvidence(input: z.infer<typeof memoryCandidateEvidenceSchema>) {
+  return {
+    eventId: input.eventId,
+    ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+    ...(input.runId === undefined ? {} : { runId: input.runId }),
+    ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+  };
+}
+
 function parsedMemoryInput(input: z.infer<typeof memoryInputSchema>): MemoryInput {
   return {
     id: input.id,
@@ -807,6 +832,7 @@ function parsedMemoryInput(input: z.infer<typeof memoryInputSchema>): MemoryInpu
     ...(input.content === undefined ? {} : { content: input.content }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
     ...(input.entities === undefined ? {} : { entities: input.entities }),
+    ...(input.evidence === undefined ? {} : { evidence: input.evidence.map(parsedMemoryEvidence) }),
   };
 }
 
@@ -819,6 +845,7 @@ function parsedMemoryPatch(input: z.infer<typeof memoryPatchSchema>): MemoryRevi
     ...(input.summary === undefined ? {} : { summary: input.summary }),
     ...(input.content === undefined ? {} : { content: input.content }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
+    ...(input.evidence === undefined ? {} : { evidence: input.evidence.map(parsedMemoryEvidence) }),
   };
 }
 
@@ -954,6 +981,29 @@ async function authenticate(
   return subject;
 }
 
+function routeCapability(resource: string | undefined, resourceId: string | undefined, method: string): ApiCapability | undefined {
+  if (resource === "event-stream" || resource === "projection") return "events:read";
+  if (resource === "events") return method === "GET" ? "events:read" : "events:write";
+  if (resource === "consumers") return method === "GET" ? "consumers:read" : "consumers:write";
+  if (resource === "trajectory-tasks") return method === "GET" ? "trajectories:read" : "trajectories:write";
+  if (resource === "trajectories") return "trajectories:write";
+  if (resource === "fleet") return "fleet:read";
+  if (resource === "transcript-projects" || resource === "transcript-runs") return "transcripts:read";
+  if (resource === "transcript-imports") return "transcripts:write";
+  if (resource === "steering") return method === "GET" ? "steering:read" : "steering:write";
+  if (resource === "reasoning") return "reasoning:read";
+  if (resource === "memories" && (resourceId === "recall" || resourceId === "search")) return "memories:read";
+  if (resource === "memories" || resource?.startsWith("memory-candidate") === true) {
+    return method === "GET" ? "memories:read" : "memories:write";
+  }
+  return undefined;
+}
+
+function assertCredentialCapability(subject: AuthenticatedSubject, capability: ApiCapability | undefined): void {
+  if (capability === undefined || subject.capabilities === undefined || subject.capabilities.includes(capability)) return;
+  throw new ApiHttpError(403, "credential_scope_denied", `Credential lacks ${capability}`);
+}
+
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
@@ -983,6 +1033,7 @@ async function handleRequest(
   const sdk = await dependencies.sdks.sdkFor(workspaceId);
   const resource = segments[3];
   const resourceId = segments[4] === undefined ? undefined : decodeSegment(segments[4], "resourceId");
+  assertCredentialCapability(subject, routeCapability(resource, resourceId, method));
   const maxBodyBytes = dependencies.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
   if (resource === "event-stream" && resourceId === undefined) {
@@ -1112,7 +1163,7 @@ async function handleRequest(
   if (resource === "fleet" && resourceId === undefined) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const nowMs = finiteQueryNumber(url, "nowMs") ?? Date.now();
-    const orphanAfterMs = finiteQueryNumber(url, "orphanAfterMs");
+    const orphanAfterMs = finiteQueryNumber(url, "orphanAfterMs") ?? dependencies.fleetOrphanAfterMs;
     const fleet = await sdk.fleetSnapshot(access, nowMs, {
       ...(orphanAfterMs === undefined ? {} : { orphanAfterMs }),
     });
@@ -1456,6 +1507,23 @@ async function handleRequest(
     throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
   }
 
+  if (resource === "memories" && resourceId !== undefined && segments.length === 6) {
+    const action = decodeSegment(segments[5]!, "memory action");
+    if (action !== "feedback") throw new ApiHttpError(404, "not_found", "Route not found");
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const current = await sdk.memoryById(access, resourceId);
+    if (current === undefined) throw new PersonalMemoryUnavailableError(resourceId);
+    const body = memoryFeedbackSchema.parse(await readJsonBody(request, maxBodyBytes));
+    sendJson(response, 201, await sdk.recordMemoryFeedback(
+      memoryContext(subject, access, current.spaceId, current.audience),
+      body.stamp,
+      resourceId,
+      body.input as MemoryFeedbackInput,
+      body.causedBy,
+    ));
+    return;
+  }
+
   if (resource === "memories" && resourceId !== undefined && segments.length === 5) {
     if (method !== "GET" && method !== "PATCH" && method !== "DELETE") {
       throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
@@ -1468,6 +1536,9 @@ async function handleRequest(
     }
     const current = await sdk.memoryById(access, resourceId);
     if (current === undefined) throw new PersonalMemoryUnavailableError(resourceId);
+    if (current.audience === "workspace" && !canSteer(access)) {
+      throw new ApiHttpError(403, "shared_memory_access_denied", "Workspace memory changes require an owner or admin role");
+    }
     const context = memoryContext(subject, access, current.spaceId, current.audience);
     if (method === "PATCH") {
       const body = memoryRevisionSchema.parse(await readJsonBody(request, maxBodyBytes));

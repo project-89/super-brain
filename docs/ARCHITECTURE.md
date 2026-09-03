@@ -52,6 +52,9 @@ hook only after canonical delivery work is on disk. A fixed machine sensor
 credential authors Fleet events while session, harness, project, branch, and
 comparison identities remain attached to capture metadata. Restored sessions
 are not heartbeated until a fresh hook proves they are still alive.
+Freshness becomes unknown after the declared heartbeat window; orphan recovery
+is a separate 24-hour threshold by default, avoiding action on an idle or
+recently restarted local harness.
 
 `PreToolUse`, `PostToolUse`, failures, file targets, and verification commands
 produce observable trajectory steps automatically. Concise agent reasoning
@@ -78,11 +81,13 @@ extractor identity/version, and immutable event/run/turn evidence. Proposals and
 decisions are never hidden projection mutations. Accepted candidates create a
 normal active memory with causal links to both the proposal and decision.
 
-Automatic promotion is deliberately conservative: only structured ClaudeMem
-observations at confidence `>= 0.95` with a resolved project qualify. Global
-observations and rule-derived statements remain pending. This gives the system
-automatic memory formation without silently treating ambiguous extraction as
-truth.
+Automatic promotion is deliberately conservative. Structured ClaudeMem
+observations require confidence `>= 0.95` and a resolved project. Explicit
+human decisions with a resolved project can promote immediately. A live
+reasoning checkpoint becomes active only after a successful trajectory cites
+that checkpoint's exact event ID. Global observations and other rule-derived
+statements remain pending. Repeated equivalent evidence revises the accepted
+memory instead of producing duplicate memories.
 
 Recall always applies current workspace, creator, space, audience, and project
 authorization. Project queries also include intentionally global memories.
@@ -109,6 +114,7 @@ export FOLD_API_CREDENTIALS_JSON='{"replace-token":{"principalId":"owner","works
 export FOLD_API_PORT=3003
 pnpm --filter @_89/super-brain-api build
 pnpm --filter @_89/super-brain-api start
+pnpm --filter @_89/super-brain-api start -- install-service
 ```
 
 Initial JSONL migration is exact and resumable:
@@ -130,6 +136,7 @@ export FOLD_TRANSCRIPT_VAULT=.data/transcript-vault
 pnpm --filter @_89/super-brain-memory-worker start -- scan
 pnpm --filter @_89/super-brain-memory-worker start -- backfill --confirm --auto-promote
 pnpm --filter @_89/super-brain-memory-worker start -- watch --auto-promote
+pnpm --filter @_89/super-brain-memory-worker start -- install-service
 ```
 
 Continuous local capture:
@@ -168,10 +175,12 @@ cursor is caught up to the 760th run event.
 
 ## Deployment Boundaries
 
-The implemented service has real persistence, authentication, authorization,
-resumable streams, continuous local capture, and automatic memory formation. A public or multi-host
-deployment must still supply TLS termination, secret rotation or an external
-identity provider, backups and restore testing, distributed rate limiting, and
-an embedding sidecar when semantic ranking is desired. External sensors must
-send authenticated real events; the API intentionally exposes no simulated
-fleet mutation route.
+The implemented service has real persistence, scoped authentication,
+authorization, resumable streams, continuous local capture, automatic memory
+formation, encrypted local vaults, integrity-manifest exports, and executable
+PostgreSQL backup/restore checks. A public or multi-host deployment must still
+supply TLS termination, automated secret rotation or an external identity
+provider, a scheduled off-host backup policy, distributed rate limiting, and an
+embedding sidecar when semantic ranking is desired. External sensors must send
+authenticated real events; the API intentionally exposes no simulated fleet
+mutation route.

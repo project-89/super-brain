@@ -14,6 +14,11 @@ export interface TraceStep {
   readonly role: TraceStepRole;
   readonly content: string;
   readonly toolName?: string;
+  readonly artifactId?: string;
+  readonly eventId?: string;
+  readonly turnId?: string;
+  readonly startedAt?: string;
+  readonly durationMs?: number;
 }
 
 export interface ToolCallResult {
@@ -118,6 +123,8 @@ export interface EdgeOutcome {
   readonly traversals: number;
   readonly successes: number;
   readonly failures: number;
+  readonly unknowns: number;
+  readonly classifiedSamples: number;
   readonly successRate: number;
 }
 
@@ -126,6 +133,8 @@ export interface RouteOutcome {
   readonly samples: number;
   readonly successes: number;
   readonly failures: number;
+  readonly unknowns: number;
+  readonly classifiedSamples: number;
   readonly successRate: number;
 }
 

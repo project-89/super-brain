@@ -53,10 +53,12 @@ Claude `thinking` blocks and Codex exposed reasoning are excluded by default;
 encrypted content is always excluded. The capture daemon can opt into retaining
 exposed reasoning in the private redacted vault, and records that choice as
 `artifact.reasoningPolicy`. This never promotes reasoning text into canonical
-Fold state. When import is explicitly confirmed, the importer writes a new JSONL artifact
-to a `0700` content-addressed vault tree with `0600` files. Common token, key,
-password, bearer, AWS key, and private-key patterns are replaced with
-`[REDACTED]`. The original file remains untouched.
+Fold state. When import is explicitly confirmed, the importer writes a new JSONL
+artifact to a `0700` content-addressed vault tree with `0600` files. An optional
+AES-256-GCM key encrypts each redacted line independently with a random nonce;
+authentication failure is fatal. Common token, key, password, bearer, AWS key,
+and private-key patterns are replaced with `[REDACTED]`. The original file
+remains untouched.
 
 The adapter verifies file size and modification time across parsing and hashing,
 and the vault writer verifies the source hash again before storage. A transcript
@@ -117,11 +119,14 @@ resolves project roots from the transcript catalog. Candidate IDs are
 deterministic, so a confirmed backfill is resumable and duplicate-safe.
 
 Every extraction first becomes a `memory.candidate-proposed` event. With
-`--auto-promote`, only structured observations at confidence `>= 0.95` with a
-resolved project are accepted automatically. Acceptance appends a decision and
-active memory atomically. Rule-derived and unresolved global observations stay
-pending for explicit review. The `watch` command uses a principal-scoped durable
-consumer cursor and resumes after API or network interruption.
+`--auto-promote`, structured observations require confidence `>= 0.95` and a
+resolved project. Explicit project-scoped human decisions also qualify. Live
+reasoning checkpoints remain proposed until a verified successful trajectory
+cites their exact event. Acceptance appends a decision and active memory
+atomically; later equivalent observations append evidence through a revision.
+Other rule-derived and unresolved global observations stay pending for review.
+The `watch` command uses a principal-scoped durable consumer cursor and resumes
+after API or network interruption.
 
 ## Current Limits
 

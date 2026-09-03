@@ -202,6 +202,40 @@ describe("orphan sweep", () => {
 });
 
 describe("fleet identity validation", () => {
+  it("refines and never regresses a provisional capture identity", () => {
+    const provisional = context("session-1", {
+      agent: "unknown",
+      task: "capture-session:unknown:session-1",
+      runtime: "unknown",
+      branch: "unknown",
+    });
+    const concrete = context("session-1", {
+      agent: "codex",
+      task: "capture-session:codex:session-1",
+      runtime: "codex",
+      branch: "main",
+    });
+    const session = rebuildFleet([
+      signal(1, 0, { type: "session_started" }, provisional),
+      signal(2, 100, { type: "session_ready" }, concrete),
+      signal(3, 200, { type: "heartbeat" }, provisional),
+    ], epoch + 300).sessions.get("session-1");
+    expect(session).toMatchObject({
+      agentId: "codex",
+      taskId: "capture-session:codex:session-1",
+      runtime: "codex",
+      branch: "main",
+    });
+  });
+
+  it("tracks an ordered branch change as live session context", () => {
+    const session = rebuildFleet([
+      signal(1, 0, { type: "session_started" }, context("session-1", { branch: "dev" })),
+      signal(2, 100, { type: "tool_running", toolName: "git" }, context("session-1", { branch: "feature" })),
+    ], epoch + 200).sessions.get("session-1");
+    expect(session?.branch).toBe("feature");
+  });
+
   it("fails closed when a session changes its stamped identity", () => {
     const first = signal(1, 0, { type: "session_started" });
     const conflicting = signal(

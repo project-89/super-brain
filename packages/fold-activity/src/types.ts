@@ -84,6 +84,7 @@ export type TerminalObservationKind =
   | "tool_running"
   | "tool_result"
   | "file_changed"
+  | "repository_changed"
   | "verification_result"
   | "reasoning_checkpoint"
   | "human_decision"

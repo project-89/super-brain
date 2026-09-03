@@ -3,6 +3,7 @@ import { evaluateOracles, parseReviewVerdict } from "@_89/fold-eval";
 import {
   analyzeProjectedTrajectories,
   firstDivergentEdge,
+  isAdditiveTreeRevision,
   projectTrajectory,
 } from "@_89/fold-trace";
 
@@ -25,8 +26,9 @@ export function rebuildTrajectories(events: readonly FoldEvent[]): TrajectorySta
   for (const event of events) {
     for (const record of trajectoryLogRecordsFromEvent(event)) {
       if (record.recordType === "tree") {
-        if (trees.has(record.tree.taskId)) {
-          throw new TrajectoryProjectionError(`duplicate trajectory tree for task ${record.tree.taskId}`);
+        const current = trees.get(record.tree.taskId);
+        if (current !== undefined && !isAdditiveTreeRevision(current.tree, record.tree)) {
+          throw new TrajectoryProjectionError(`non-additive trajectory tree revision for task ${record.tree.taskId}`);
         }
         trees.set(record.tree.taskId, record);
         continue;

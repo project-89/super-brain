@@ -3,12 +3,15 @@ import type {
   MemoryAudience,
   MemoryCandidateInput,
   MemoryCandidateView,
+  MemoryFeedbackInput,
+  MemoryFeedbackRecord,
   MemoryInput,
+  MemoryRevisionPatch,
   PersonalMemory,
   RecallRequest,
   RecalledMemory,
 } from "@_89/fold-epistemic";
-import type { FoldSdkCursor, RankedMemoryRecallResult } from "@_89/fold-sdk";
+import type { FoldSdkCursor, RankedMemoryRecallResult, TrajectoryTaskSummary } from "@_89/fold-sdk";
 import type { TranscriptRun } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
@@ -49,6 +52,20 @@ export interface ConsumeEventOptions extends Omit<EventStreamOptions, "after" | 
   readonly reconnect?: boolean;
   readonly reconnectDelayMs?: number;
   readonly onEvent: (event: StreamedFoldEvent) => void | Promise<void>;
+}
+
+export interface ReasoningResponse {
+  readonly answer: string;
+  readonly citations: readonly string[];
+  readonly provider: { readonly id: string; readonly kind: "extractive" | "model" };
+  readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic"; readonly corpusSize: number };
+  readonly evidence: readonly {
+    readonly memoryId: string;
+    readonly source: string;
+    readonly summary: string;
+    readonly score?: number;
+  }[];
+  readonly steering?: unknown;
 }
 
 export class SuperBrainApiError extends Error {
@@ -209,6 +226,13 @@ export class SuperBrainClient {
     });
   }
 
+  async trajectoryTasks(): Promise<readonly TrajectoryTaskSummary[]> {
+    const response = await this.request<{ readonly tasks: readonly TrajectoryTaskSummary[] }>(
+      this.workspacePath("trajectory-tasks"),
+    );
+    return response.tasks;
+  }
+
   recordTrajectory(
     stamp: EventStamp,
     input: TrajectoryInput,
@@ -229,8 +253,27 @@ export class SuperBrainClient {
     return this.request(this.workspacePath("memories/recall"), { method: "POST", body: JSON.stringify(request) });
   }
 
+  async memoryById(memoryId: string): Promise<PersonalMemory | undefined> {
+    try {
+      const response = await this.request<{ readonly memory: PersonalMemory }>(
+        `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`,
+      );
+      return response.memory;
+    } catch (error) {
+      if (error instanceof SuperBrainApiError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
   rankMemories(request: Omit<RecallRequest, "candidates"> & { readonly query: string }): Promise<RankedMemoryRecallResult> {
     return this.request(this.workspacePath("memories/search"), { method: "POST", body: JSON.stringify(request) });
+  }
+
+  askReasoning(request: Omit<RecallRequest, "candidates"> & {
+    readonly question: string;
+    readonly actorId?: string;
+  }): Promise<ReasoningResponse> {
+    return this.request(this.workspacePath("reasoning/ask"), { method: "POST", body: JSON.stringify(request) });
   }
 
   recordMemory(input: Omit<MemoryInput, "id"> & { readonly id?: string }, causedBy?: readonly string[]) {
@@ -243,6 +286,33 @@ export class SuperBrainClient {
         ...(causedBy === undefined ? {} : { causedBy }),
       }),
     });
+  }
+
+  reviseMemory(memoryId: string, patch: MemoryRevisionPatch, causedBy?: readonly string[]) {
+    return this.request<{ readonly event: FoldEvent; readonly memory: PersonalMemory }>(
+      `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ stamp: nextEventStamp(), patch, ...(causedBy === undefined ? {} : { causedBy }) }),
+      },
+    );
+  }
+
+  forgetMemory(memoryId: string, reason: string, causedBy?: readonly string[]) {
+    return this.request(`${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ stamp: nextEventStamp(), reason, ...(causedBy === undefined ? {} : { causedBy }) }),
+    });
+  }
+
+  recordMemoryFeedback(memoryId: string, input: MemoryFeedbackInput, causedBy?: readonly string[]) {
+    return this.request<{ readonly event: FoldEvent; readonly feedback: MemoryFeedbackRecord }>(
+      `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/feedback`,
+      {
+        method: "POST",
+        body: JSON.stringify({ stamp: nextEventStamp(), input, ...(causedBy === undefined ? {} : { causedBy }) }),
+      },
+    );
   }
 
   proposeMemoryCandidate(

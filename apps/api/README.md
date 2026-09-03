@@ -29,6 +29,14 @@ Tokens are retained only as SHA-256 lookup keys in process. Unknown fields,
 roles, author shapes, empty credentials, and malformed JSON fail at startup.
 Do not commit real credentials.
 
+An optional `capabilities` array independently restricts a credential to route
+families such as `events:read`, `events:write`, `memories:read`,
+`memories:write`, `trajectories:read`, `trajectories:write`,
+`transcripts:read`, `transcripts:write`, `fleet:read`, `reasoning:read`, and
+`consumers:read`/`consumers:write`. Omitting it preserves full access for local
+operator credentials. Workspace and space roles still apply after capability
+checks.
+
 Optional environment:
 
 - `FOLD_API_HOST`, default `127.0.0.1`;
@@ -40,7 +48,10 @@ Optional environment:
   set it to `0` only when an upstream limiter owns that boundary;
 - `FOLD_API_CORS_ORIGINS`, an optional comma-separated list of exact `http` or
   `https` origins. Configured origins receive CORS headers and every other
-  browser origin is rejected.
+  browser origin is rejected;
+- `FOLD_FLEET_ORPHAN_AFTER_MS`, default `86400000` (24 hours). Session
+  freshness still becomes unknown after its sensor heartbeat window, while a
+  recovery action waits for this longer reconciliation threshold.
 
 Build and run with:
 
@@ -48,6 +59,13 @@ Build and run with:
 pnpm --filter @_89/super-brain-api build
 FOLD_API_CREDENTIALS_JSON='{"local-secret":{"principalId":"local","workspaces":{"local":{"role":"owner"}}}}' \
   pnpm --filter @_89/super-brain-api start
+```
+
+On macOS, the current `FOLD_*` configuration can be installed as an
+owner-readable persistent `launchd` service:
+
+```bash
+pnpm --filter @_89/super-brain-api start -- install-service
 ```
 
 ## Routes

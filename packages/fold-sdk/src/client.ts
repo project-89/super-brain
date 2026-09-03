@@ -9,12 +9,14 @@ import {
 } from "@_89/fold";
 import {
   makeMemoryForgottenEvent,
+  makeMemoryFeedbackEvent,
   makeMemoryCandidateAcceptedEvent,
   makeMemoryCandidateProposedEvent,
   makeMemoryCandidateRejectedEvent,
   makeMemoryRecordedEvent,
   makeMemoryRevisedEvent,
   memoryLogRecordsFromEvent,
+  memoryFeedbackRecordsFromEvent,
   memoryCandidateLogRecordsFromEvent,
   DEFAULT_RECALL_LIMIT,
   MAX_RECALL_LIMIT,
@@ -29,6 +31,7 @@ import {
   type EpistemicEventContext,
   type EpistemicEventStamp,
   type MemoryInput,
+  type MemoryFeedbackInput,
   type MemoryCandidateInput,
   type MemoryCandidateProjection,
   type MemoryProjection,
@@ -49,6 +52,7 @@ import {
   type TrajectoryState,
   type TrajectoryTreeRecord,
 } from "@_89/fold-trajectory";
+import { isAdditiveTreeRevision } from "@_89/fold-trace";
 import {
   eventFromTerminalManagerSignal,
   validateActivityEventEnvelope,
@@ -104,6 +108,7 @@ import type {
   ActivityMutationResult,
   FleetReadModel,
   MemoryForgetResult,
+  MemoryFeedbackResult,
   MemoryCandidateAcceptanceResult,
   MemoryCandidateAcceptanceInput,
   MemoryCandidateListOptions,
@@ -632,14 +637,33 @@ export class FoldSdk {
     return this.enqueue(async () => {
       const event = makeTrajectoryTreeRecordedEvent(context, stamp, tree);
       const current = await this.trajectoryProjection(context.access);
-      if (current.state.trees.has(tree.taskId)) {
+      const currentTree = current.state.trees.get(tree.taskId);
+      if (currentTree !== undefined) {
         const entries = await this.readStoredEntries();
         const existing = entries.find((entry) => entry.event.id === event.id);
         if (existing !== undefined && JSON.stringify(existing.event) === JSON.stringify(event)) {
           const record = trajectoryLogRecordsFromEvent(existing.event)[0];
           if (record?.recordType === "tree") return { event: existing.event, record };
         }
-        throw new FoldSdkConflictError(`trajectory tree already exists for task ${tree.taskId}`);
+        if (JSON.stringify(currentTree.tree) === JSON.stringify(tree)) {
+          const prior = [...entries].reverse().find((entry) =>
+            trajectoryLogRecordsFromEvent(entry.event).some((record) =>
+              record.recordType === "tree" && record.tree.taskId === tree.taskId
+            )
+          );
+          const record = prior === undefined ? undefined : trajectoryLogRecordsFromEvent(prior.event)
+            .find((candidate) => candidate.recordType === "tree" && candidate.tree.taskId === tree.taskId);
+          if (prior !== undefined && record?.recordType === "tree") return { event: prior.event, record };
+        }
+        let additive = false;
+        try {
+          additive = isAdditiveTreeRevision(currentTree.tree, tree);
+        } catch {
+          additive = false;
+        }
+        if (!additive) {
+          throw new FoldSdkConflictError(`trajectory tree revision is not additive for task ${tree.taskId}`);
+        }
       }
       await this.appendInternal(context.access, event, "canon");
       const record = trajectoryLogRecordsFromEvent(event)[0];
@@ -973,6 +997,7 @@ export class FoldSdk {
         content: candidate.content,
         tags: candidate.tags,
         entities: candidate.entities,
+        evidence: candidate.evidence,
       }, [candidate.proposalEventId, decisionEvent.id]);
       rebuildMemoryCandidates([...current.events, decisionEvent]);
       const memoryProjection = rebuildMemories([...current.events, decisionEvent, memoryEvent]);
@@ -1027,6 +1052,7 @@ export class FoldSdk {
           content: candidate.content,
           tags: candidate.tags,
           entities: candidate.entities,
+          evidence: candidate.evidence,
         }, [candidate.proposalEventId, decisionEvent.id]);
         return { candidate, memoryId: acceptance.memoryId, decisionEvent, memoryEvent };
       });
@@ -1090,6 +1116,25 @@ export class FoldSdk {
       const revised = recallProjectedMemoryById(next, context.access, memoryId);
       if (revised === undefined) throw new FoldSdkError(`memory ${memoryId} disappeared after revision`);
       return { event, memory: revised };
+    });
+  }
+
+  recordMemoryFeedback(
+    context: EpistemicEventContext,
+    stamp: EpistemicEventStamp,
+    memoryId: string,
+    input: MemoryFeedbackInput,
+    causedBy?: readonly string[],
+  ): Promise<MemoryFeedbackResult> {
+    return this.enqueue(async () => {
+      const current = await this.memoryProjection(context.access);
+      const memory = recallProjectedMemoryById(current.projection, context.access, memoryId);
+      if (memory === undefined) throw new PersonalMemoryUnavailableError(memoryId);
+      const event = makeMemoryFeedbackEvent(context, stamp, memory, input, causedBy);
+      await this.appendInternal(context.access, event, "canon");
+      const feedback = memoryFeedbackRecordsFromEvent(event)[0];
+      if (feedback === undefined) throw new FoldSdkError(`memory feedback event ${event.id} was empty`);
+      return { event, feedback };
     });
   }
 
