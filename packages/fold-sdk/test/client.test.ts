@@ -78,9 +78,11 @@ describe("Fold SDK producer and consumer API", () => {
 
   it("rejects duplicate IDs and nonmonotonic same-time producer IDs", async () => {
     const sdk = new FoldSdk(new MemoryStore());
-    await sdk.append(access(), event({ id: "event-b", t: 10 }));
+    const original = event({ id: "event-b", t: 10 });
+    const first = await sdk.append(access(), original);
+    await expect(sdk.append(access(), original)).resolves.toEqual(first);
     await expect(sdk.append(access(), event({ id: "event-b", t: 11 }))).rejects.toThrow(
-      /duplicate event id/,
+      /event id is already used/,
     );
     await expect(sdk.append(access(), event({ id: "event-a", t: 10 }))).rejects.toThrow(
       /not lexicographically monotonic/,

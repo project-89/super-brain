@@ -82,6 +82,24 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)(lightningcss@1.33.0)(yaml@2.9.0)
 
+  apps/capture-daemon:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../../packages/fold
+      '@_89/fold-activity':
+        specifier: workspace:*
+        version: link:../../packages/fold-activity
+      '@_89/fold-trajectory':
+        specifier: workspace:*
+        version: link:../../packages/fold-trajectory
+      '@_89/super-brain-client':
+        specifier: workspace:*
+        version: link:../../packages/super-brain-client
+      '@_89/super-brain-importer':
+        specifier: workspace:*
+        version: link:../importer
+
   apps/importer:
     dependencies:
       '@_89/fold-transcript':
@@ -254,6 +272,9 @@ importers:
       '@_89/fold-sdk':
         specifier: workspace:*
         version: link:../fold-sdk
+      '@_89/fold-trajectory':
+        specifier: workspace:*
+        version: link:../fold-trajectory
       '@_89/fold-transcript':
         specifier: workspace:*
         version: link:../fold-transcript

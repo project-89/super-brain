@@ -113,3 +113,12 @@ on observed Claude Code and Codex JSONL formats found on the development host.
 No transcript source or producer implementation was copied. Test fixtures are
 synthetic; real validation artifacts and imported journals remain under `/tmp`
 and are not repository evidence.
+
+`apps/capture-daemon` is a clean-room implementation over repository-owned
+contracts. On 2026-09-02, the non-Git local `agent-operator-console` worktree was
+inspected only for operational hook and session-registry behavior. No Python
+source was copied and the capture daemon does not import or run that worktree.
+The inspected snapshots were `host/claude_code.py` at SHA-256
+`5734e03341f04094dd7aa2fee44a925157385e4e64104bcc9b01bbd080155c79` and
+`host/fold_events.py` at SHA-256
+`534a4fdabb9507bda0739bb56255371169fa65d9d59d54e1f30f87bb128c35c0`.

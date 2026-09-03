@@ -82,6 +82,42 @@ describe("SuperBrainClient", () => {
     await expect(client(fetchMock).memoryCandidates()).rejects.toEqual(expect.objectContaining<Partial<SuperBrainApiError>>({ status: 403, code: "denied", message: "No" }));
   });
 
+  it("records trajectory trees and runs through server-derived identity routes", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ event: {}, record: { recordType: "tree" } }))
+      .mockResolvedValueOnce(jsonResponse({ event: {}, record: { recordType: "trajectory" } })) as unknown as typeof fetch;
+    const api = client(fetchMock);
+    const stamp = { id: "event-a", t: 1, worldDate: "2026-09-02" };
+    const tree = {
+      taskId: "task-a",
+      rootNodeId: "observe",
+      nodes: [
+        { id: "observe", kind: "observation" as const, label: "Observe" },
+        { id: "done", kind: "outcome" as const, label: "Done" },
+      ],
+      edges: [{ id: "next", sourceId: "observe", targetId: "done", label: "next" }],
+    };
+    await api.recordTrajectoryTree(stamp, tree);
+    await api.recordTrajectory(stamp, {
+      id: "run-a",
+      taskId: "task-a",
+      model: { id: "codex" },
+      outcome: "unknown",
+      steps: [
+        { id: "step-a", stepNumber: 1, role: "decision", content: "Observe" },
+        { id: "step-b", stepNumber: 2, role: "model_output", content: "Done" },
+      ],
+      assignments: {
+        "step-a": { kind: "mapped", nodeId: "observe", method: { kind: "rule", id: "capture" } },
+        "step-b": { kind: "mapped", nodeId: "done", method: { kind: "rule", id: "capture" } },
+      },
+    });
+    expect((fetchMock as any).mock.calls.map((call: [string]) => call[0])).toEqual([
+      "https://brain.example/v1/workspaces/workspace%2Fone/trajectory-tasks",
+      "https://brain.example/v1/workspaces/workspace%2Fone/trajectories",
+    ]);
+  });
+
   it("batches trusted candidate promotions with ordered event stamps", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ accepted: [] })) as unknown as typeof fetch;
     await client(fetchMock).acceptMemoryCandidates(["candidate-a", "candidate-b"]);

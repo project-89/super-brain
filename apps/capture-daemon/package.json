@@ -1,0 +1,28 @@
+{
+  "name": "@_89/super-brain-capture-daemon",
+  "version": "0.0.0",
+  "description": "Headless local capture bridge for coding-agent lifecycle, tool, trajectory, and transcript data",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "super-brain-capture": "./dist/main.js" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup src/index.ts src/main.ts --format esm --dts --clean",
+    "start": "node --enable-source-maps dist/main.js run",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@_89/fold": "workspace:*",
+    "@_89/fold-activity": "workspace:*",
+    "@_89/fold-trajectory": "workspace:*",
+    "@_89/super-brain-client": "workspace:*",
+    "@_89/super-brain-importer": "workspace:*"
+  }
+}

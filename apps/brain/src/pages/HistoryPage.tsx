@@ -203,6 +203,7 @@ export function HistoryPage({
                 <div><dt>Last activity</dt><dd>{runTimestamp(detail.run) === undefined ? "-" : formatRelative(runTimestamp(detail.run)!)}</dd></div>
                 <div><dt>Artifact</dt><dd><FileJson aria-hidden="true" />{Math.ceil(detail.artifact.byteLength / 1024).toLocaleString()} KB</dd></div>
                 <div><dt>Redactions</dt><dd>{detail.artifact.redactionCount.toLocaleString()}</dd></div>
+                <div><dt>Exposed reasoning</dt><dd>{detail.artifact.reasoningPolicy ?? "excluded"}</dd></div>
               </dl>
 
               <section className="history-segments">

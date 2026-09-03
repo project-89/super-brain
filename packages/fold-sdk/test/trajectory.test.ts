@@ -83,6 +83,7 @@ describe("SDK trajectory API", () => {
         trajectoryCount: 1,
         successCount: 1,
         failureCount: 0,
+        unknownCount: 0,
       }),
     ]);
     const report = await sdk.trajectoryReport(context.access, tree.taskId);
@@ -110,9 +111,15 @@ describe("SDK trajectory API", () => {
 
     await sdk.recordTrajectoryTree(context, stamp("tree-event", 2), tree);
     await expect(
+      sdk.recordTrajectoryTree(context, stamp("tree-event", 2), tree),
+    ).resolves.toMatchObject({ record: { recordType: "tree" } });
+    await expect(
       sdk.recordTrajectoryTree(context, stamp("duplicate-tree", 3), tree),
     ).rejects.toBeInstanceOf(FoldSdkConflictError);
     await sdk.recordTrajectory(context, stamp("run-event", 4), trajectory("run-a"));
+    await expect(
+      sdk.recordTrajectory(context, stamp("run-event", 4), trajectory("run-a")),
+    ).resolves.toMatchObject({ record: { recordType: "trajectory" } });
     await expect(
       sdk.recordTrajectory(context, stamp("duplicate-run", 5), trajectory("run-a")),
     ).rejects.toBeInstanceOf(FoldSdkConflictError);

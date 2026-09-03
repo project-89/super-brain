@@ -3,7 +3,11 @@
 ## System Shape
 
 ```text
-Codex / Claude / Hermes / sensors / importers
+Codex / Claude / Hermes
+          |
+ local capture daemon ---- historical importer
+          |                         |
+          +--------- sensors -------+
                   |
         @_89/super-brain-client
         authenticated HTTP + SSE
@@ -40,6 +44,22 @@ The client commits an offset only after its event handler succeeds. Transient
 stream termination reconnects from the last committed cursor; authentication
 and other non-retryable client failures fail closed. This is the same contract
 for Codex, Claude, Hermes, or a future harness.
+
+For local coding agents, `apps/capture-daemon` is the default producer. It binds
+only to loopback, authenticates hook relays with a separate local secret, stores
+secret-redacted raw hook artifacts with `0600` permissions, and acknowledges a
+hook only after canonical delivery work is on disk. A fixed machine sensor
+credential authors Fleet events while session, harness, project, branch, and
+comparison identities remain attached to capture metadata. Restored sessions
+are not heartbeated until a fresh hook proves they are still alive.
+
+`PreToolUse`, `PostToolUse`, failures, file targets, and verification commands
+produce observable trajectory steps automatically. Concise agent reasoning
+checkpoints and human verdicts have explicit local endpoints. Hidden provider
+reasoning is never assumed to exist. Exposed transcript reasoning may be kept
+in the private redacted vault only under the opt-in `include` policy; encrypted
+reasoning is always discarded and raw reasoning is never copied automatically
+into canonical Fold records.
 
 ## Memory Lifecycle
 
@@ -112,6 +132,21 @@ pnpm --filter @_89/super-brain-memory-worker start -- backfill --confirm --auto-
 pnpm --filter @_89/super-brain-memory-worker start -- watch --auto-promote
 ```
 
+Continuous local capture:
+
+```bash
+pnpm --filter @_89/super-brain-capture-daemon build
+SUPER_BRAIN_CAPTURE_TOKEN=replace-sensor-token \
+  pnpm --filter @_89/super-brain-capture-daemon start -- init
+pnpm --filter @_89/super-brain-capture-daemon start -- install-hooks
+pnpm --filter @_89/super-brain-capture-daemon start -- install-service
+```
+
+The sensor token must map to a `sensor` author with workspace `admin` access so
+the same authenticated daemon can append activity and deliver finalized
+transcript metadata. Configuration and state directories are private local
+files, and tokens are never accepted as command-line arguments.
+
 The browser client uses the same API and can be run through Vite's proxy:
 
 ```bash
@@ -134,7 +169,7 @@ cursor is caught up to the 760th run event.
 ## Deployment Boundaries
 
 The implemented service has real persistence, authentication, authorization,
-resumable streams, and automatic memory formation. A public or multi-host
+resumable streams, continuous local capture, and automatic memory formation. A public or multi-host
 deployment must still supply TLS termination, secret rotation or an external
 identity provider, backups and restore testing, distributed rate limiting, and
 an embedding sidecar when semantic ranking is desired. External sensors must

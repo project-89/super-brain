@@ -192,6 +192,7 @@ export interface TrajectoryTaskSummary {
   readonly trajectoryCount: number;
   readonly successCount: number;
   readonly failureCount: number;
+  readonly unknownCount: number;
   readonly lastRecordedAt: number;
 }
 

@@ -322,6 +322,13 @@ export class FoldSdk {
     validateTranscriptEventEnvelope(parsed);
     assertCanAppendEvent(parsed, access);
     const entries = await this.readStoredEntries();
+    const existing = entries.find((entry) => entry.event.id === parsed.id);
+    if (existing !== undefined) {
+      if (existing.status === status && JSON.stringify(existing.event) === JSON.stringify(parsed)) {
+        return existing;
+      }
+      throw new FoldSdkConflictError(`event id is already used: ${parsed.id}`);
+    }
     validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
     const entry = { event: parsed, status } as const;
     await this.store.append(entry);
@@ -623,11 +630,17 @@ export class FoldSdk {
     tree: TrajectoryTreeRecord["tree"],
   ): Promise<TrajectoryTreeMutationResult> {
     return this.enqueue(async () => {
+      const event = makeTrajectoryTreeRecordedEvent(context, stamp, tree);
       const current = await this.trajectoryProjection(context.access);
       if (current.state.trees.has(tree.taskId)) {
+        const entries = await this.readStoredEntries();
+        const existing = entries.find((entry) => entry.event.id === event.id);
+        if (existing !== undefined && JSON.stringify(existing.event) === JSON.stringify(event)) {
+          const record = trajectoryLogRecordsFromEvent(existing.event)[0];
+          if (record?.recordType === "tree") return { event: existing.event, record };
+        }
         throw new FoldSdkConflictError(`trajectory tree already exists for task ${tree.taskId}`);
       }
-      const event = makeTrajectoryTreeRecordedEvent(context, stamp, tree);
       await this.appendInternal(context.access, event, "canon");
       const record = trajectoryLogRecordsFromEvent(event)[0];
       if (record?.recordType !== "tree") {
@@ -646,10 +659,16 @@ export class FoldSdk {
       const current = await this.trajectoryProjection(context.access);
       const tree = current.state.trees.get(input.taskId)?.tree;
       if (tree === undefined) throw new TrajectoryTaskUnavailableError(input.taskId);
+      const event = makeTrajectoryRecordedEvent(context, stamp, tree, input);
       if (current.state.trajectories.has(input.id)) {
+        const entries = await this.readStoredEntries();
+        const existing = entries.find((entry) => entry.event.id === event.id);
+        if (existing !== undefined && JSON.stringify(existing.event) === JSON.stringify(event)) {
+          const record = trajectoryLogRecordsFromEvent(existing.event)[0];
+          if (record?.recordType === "trajectory") return { event: existing.event, record };
+        }
         throw new FoldSdkConflictError(`trajectory already exists: ${input.id}`);
       }
-      const event = makeTrajectoryRecordedEvent(context, stamp, tree, input);
       await this.appendInternal(context.access, event, "canon");
       const record = trajectoryLogRecordsFromEvent(event)[0];
       if (record?.recordType !== "trajectory") {
@@ -673,6 +692,7 @@ export class FoldSdk {
             trajectoryCount: records.length,
             successCount: records.filter((record) => record.trajectory.outcome === "success").length,
             failureCount: records.filter((record) => record.trajectory.outcome === "failure").length,
+            unknownCount: records.filter((record) => record.trajectory.outcome === "unknown").length,
             lastRecordedAt: records.reduce(
               (latest, record) => Math.max(latest, record.recordedAt),
               treeRecord.recordedAt,

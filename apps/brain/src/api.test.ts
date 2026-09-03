@@ -163,6 +163,7 @@ describe("Fold API client", () => {
       trajectoryCount: 0,
       successCount: 0,
       failureCount: 0,
+      unknownCount: 0,
       lastRecordedAt: 1,
     };
 

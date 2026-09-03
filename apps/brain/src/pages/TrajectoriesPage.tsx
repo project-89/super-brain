@@ -2,6 +2,7 @@ import {
   AlertCircle,
   ArrowRight,
   Check,
+  CircleHelp,
   CircleDot,
   GitBranch,
   Import,
@@ -119,7 +120,7 @@ export function TrajectoriesPage({
                 onClick={() => setSelectedTaskId(task.taskId)}
               >
                 <span><strong>{task.taskId}</strong><small>{task.tree.nodes.length} nodes · {task.tree.edges.length} edges</small></span>
-                <span className="trajectory-task-list__counts"><b>{task.successCount}</b><i>{task.failureCount}</i></span>
+                <span className="trajectory-task-list__counts"><b>{task.successCount}</b><i>{task.failureCount}</i>{task.unknownCount > 0 && <small>{task.unknownCount}</small>}</span>
                 <time>{formatRelative(task.lastRecordedAt)}</time>
               </button>
             ))}
@@ -174,7 +175,7 @@ export function TrajectoriesPage({
                       const runDivergence = report.divergences.find(({ trajectoryId }) => trajectoryId === record.trajectory.id)?.divergence;
                       return (
                         <button key={record.trajectory.id} type="button" className={record.trajectory.id === selectedRunId ? "is-selected" : undefined} onClick={() => setSelectedRunId(record.trajectory.id)}>
-                          <span className={`outcome-mark outcome-mark--${record.trajectory.outcome}`}>{record.trajectory.outcome === "success" ? <Check aria-hidden="true" /> : <X aria-hidden="true" />}</span>
+                          <span className={`outcome-mark outcome-mark--${record.trajectory.outcome}`}>{record.trajectory.outcome === "success" ? <Check aria-hidden="true" /> : record.trajectory.outcome === "failure" ? <X aria-hidden="true" /> : <CircleHelp aria-hidden="true" />}</span>
                           <span><strong>{record.trajectory.model.id}</strong><small>{record.trajectory.id}</small></span>
                           <span className={`divergence-badge divergence-badge--${runDivergence?.kind ?? "indeterminate"}`}>{runDivergence?.kind ?? "indeterminate"}</span>
                         </button>

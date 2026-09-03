@@ -90,7 +90,9 @@ Event append authors must exactly match the author bound to the credential.
 Memory authorship, creator scope, principal identity, and workspace are derived
 by the server and cannot be supplied by the request. Trajectory authorship and
 workspace/optional-space scope are derived the same way, but omit creator scope
-because task evidence is collaborative. Space membership is resolved on every
+because task evidence is collaborative. Trajectory requests may attach bounded
+producer identity such as agent, session, project, branch, and comparison key;
+reserved principal and workspace identity remain server-derived. Space membership is resolved on every
 request, so revocation applies immediately to raw records and every projection.
 
 Transcript imports accept only the strict `@_89/fold-transcript` bundle. The

@@ -86,6 +86,7 @@ function withoutPrivateReasoning(record: Record<string, unknown>): Record<string
 export async function storeRedactedArtifact(
   transcript: ParsedTranscript,
   vaultRoot: string,
+  options: { readonly reasoningPolicy?: "exclude" | "include" } = {},
 ): Promise<ParsedTranscript> {
   const { artifact } = transcript.bundle;
   const beforeHash = await fileMetadata(transcript.sourcePath);
@@ -117,7 +118,9 @@ export async function storeRedactedArtifact(
       } catch {
         continue;
       }
-      const safe = isRecord(parsed) ? withoutPrivateReasoning(parsed) : parsed;
+      const safe = isRecord(parsed) && options.reasoningPolicy !== "include"
+        ? withoutPrivateReasoning(parsed)
+        : parsed;
       const redacted = redactJsonValue(safe);
       redactionCount += redacted.count;
       await output.writeFile(`${JSON.stringify(redacted.value)}\n`, "utf8");
@@ -142,6 +145,7 @@ export async function storeRedactedArtifact(
     artifact: {
       ...artifact,
       contentPolicy: "redacted",
+      reasoningPolicy: options.reasoningPolicy === "include" ? "included" : "excluded",
       stored: true,
       redactionCount,
     },

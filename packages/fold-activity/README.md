@@ -10,6 +10,9 @@ Terminal capture primitives for producing canonical Fold sensor records.
 - Terminal state rules are data-driven and source-scoped. `TerminalStateTracker`
   adds bounded history and Gemini transition stability without I/O.
 - Lifecycle, observations, and classifier assertions are separate Fold events.
+- Observable prompts, tool results, file changes, verification results,
+  structured reasoning checkpoints, and human decisions have explicit
+  observation kinds; raw prompt, tool, and transcript bodies are not required.
 - `validateActivityEventEnvelope` requires matching event kinds, terminal node
   kinds, sensor authorship, payload identity, and capture identity. Unrelated
   Fold sensor lifecycles remain outside the terminal activity domain.

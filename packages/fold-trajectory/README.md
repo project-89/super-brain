@@ -7,5 +7,7 @@ eligibility, consensus, first divergence, and review-oracle results.
 
 This package does not claim a general automatic projector. Manual, rule, and
 model assignments remain explicitly identified and `ambiguous`/`unmapped`
-outcomes remain first-class. A real empirical two-model run is still required
-to validate useful mapped coverage.
+outcomes remain first-class. An unverified run uses the separate `unknown`
+outcome and is excluded from success-rate denominators. The local capture daemon
+supplies empirical per-session trees and trajectories; structural merging across
+repeated comparison keys remains an explicit analysis step.

@@ -236,6 +236,7 @@ export interface TranscriptArtifact {
   readonly parser: { readonly id: string; readonly version: string };
   readonly modifiedAt?: string;
   readonly contentPolicy: "metadata-only" | "redacted";
+  readonly reasoningPolicy?: "excluded" | "included";
   readonly stored: boolean;
   readonly redactionCount: number;
 }
@@ -290,7 +291,7 @@ export interface MemoryDraft {
   readonly spaceId?: string;
 }
 
-export type TrajectoryOutcome = "success" | "failure";
+export type TrajectoryOutcome = "success" | "failure" | "unknown";
 export type TrajectoryStepRole =
   | "model_thought"
   | "tool_call"
@@ -362,6 +363,7 @@ export interface TrajectoryTaskSummary {
   readonly trajectoryCount: number;
   readonly successCount: number;
   readonly failureCount: number;
+  readonly unknownCount: number;
   readonly lastRecordedAt: number;
 }
 

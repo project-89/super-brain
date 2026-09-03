@@ -117,7 +117,12 @@ describe("transcript source adapters", () => {
     const stored = await storeRedactedArtifact(parsed, vault);
     const target = join(vault, "claude-code", stored.bundle.artifact.sha256.slice(0, 2), `${stored.bundle.artifact.sha256}.jsonl`);
     const content = await readFile(target, "utf8");
-    expect(stored.bundle.artifact).toMatchObject({ contentPolicy: "redacted", stored: true, redactionCount: 2 });
+    expect(stored.bundle.artifact).toMatchObject({
+      contentPolicy: "redacted",
+      reasoningPolicy: "excluded",
+      stored: true,
+      redactionCount: 2,
+    });
     expect(content).toContain("[REDACTED]");
     expect(content).not.toContain("abcdefghijklmnop");
     expect(content).not.toContain("never store this");
@@ -125,6 +130,18 @@ describe("transcript source adapters", () => {
     expect(content).toContain('"excluded":true');
     expect((await stat(vault)).mode & 0o777).toBe(0o700);
     expect((await stat(target)).mode & 0o777).toBe(0o600);
+  });
+
+  it("stores exposed reasoning only when explicitly enabled", async () => {
+    const path = await fixture("77777777-7777-4777-8777-777777777777.jsonl", [
+      { type: "assistant", sessionId: "77777777-7777-4777-8777-777777777777", cwd: "/work/private", timestamp: "2026-08-20T12:00:00.000Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "inspect the cache" }] } },
+    ]);
+    const parsed = await parseClaudeTranscript(path);
+    const vault = await mkdtemp(join(tmpdir(), "fold-vault-reasoning-"));
+    const stored = await storeRedactedArtifact(parsed, vault, { reasoningPolicy: "include" });
+    const target = join(vault, "claude-code", stored.bundle.artifact.sha256.slice(0, 2), `${stored.bundle.artifact.sha256}.jsonl`);
+    expect(stored.bundle.artifact.reasoningPolicy).toBe("included");
+    expect(await readFile(target, "utf8")).toContain("inspect the cache");
   });
 
   it("rejects an artifact whose source changed after scanning", async () => {

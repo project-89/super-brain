@@ -76,11 +76,17 @@ export interface ActivityEventStamp {
 
 export type TerminalObservationKind =
   | "status_changed"
+  | "prompt_submitted"
   | "login_required"
   | "auth_required"
   | "blocking_prompt"
   | "stall_detected"
   | "tool_running"
+  | "tool_result"
+  | "file_changed"
+  | "verification_result"
+  | "reasoning_checkpoint"
+  | "human_decision"
   | "task_complete"
   | "output";
 

@@ -108,7 +108,8 @@ export function analyzeProjectedTrajectories(
         failures: 0,
       };
       counts.traversals += 1;
-      counts[trajectory.outcome === "success" ? "successes" : "failures"] += 1;
+      if (trajectory.outcome === "success") counts.successes += 1;
+      else if (trajectory.outcome === "failure") counts.failures += 1;
       edgeCounts.set(token.edge.id, counts);
     }
 
@@ -123,27 +124,29 @@ export function analyzeProjectedTrajectories(
       failures: 0,
     };
     counts.samples += 1;
-    counts[trajectory.outcome === "success" ? "successes" : "failures"] += 1;
+    if (trajectory.outcome === "success") counts.successes += 1;
+    else if (trajectory.outcome === "failure") counts.failures += 1;
     routeCounts.set(routeKey, counts);
   }
 
   const edgeOutcomes = new Map<string, EdgeOutcome>();
   for (const [edgeId, counts] of edgeCounts) {
     const edge = edges.byId.get(edgeId)!;
+    const classified = counts.successes + counts.failures;
     edgeOutcomes.set(edgeId, {
       edgeId,
       sourceId: edge.sourceId,
       targetId: edge.targetId,
       ...counts,
-      successRate: counts.traversals === 0 ? 0 : counts.successes / counts.traversals,
+      successRate: classified === 0 ? 0 : counts.successes / classified,
     });
   }
 
   const routes: RouteOutcome[] = [...routeCounts.values()]
-    .map((route) => ({
-      ...route,
-      successRate: route.samples === 0 ? 0 : route.successes / route.samples,
-    }))
+    .map((route) => {
+      const classified = route.successes + route.failures;
+      return { ...route, successRate: classified === 0 ? 0 : route.successes / classified };
+    })
     .sort((left, right) => {
       if (left.successRate !== right.successRate) return right.successRate - left.successRate;
       if (left.samples !== right.samples) return right.samples - left.samples;

@@ -182,7 +182,16 @@ function processObservation(sessions: Map<string, MutableFleetSession>, event: F
     session.lastKnownStatus = "authenticating";
   } else if (observation === "blocking_prompt") {
     session.lastKnownStatus = "blocked";
-  } else if (observation === "stall_detected" || observation === "tool_running") {
+  } else if (
+    observation === "prompt_submitted" ||
+    observation === "stall_detected" ||
+    observation === "tool_running" ||
+    observation === "tool_result" ||
+    observation === "file_changed" ||
+    observation === "verification_result" ||
+    observation === "reasoning_checkpoint" ||
+    observation === "human_decision"
+  ) {
     session.lastKnownStatus = "busy";
   } else if (observation === "task_complete") {
     session.lastKnownStatus = "ready";

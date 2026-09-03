@@ -2305,6 +2305,7 @@ textarea::placeholder {
 .outcome-mark svg { width: 14px; height: 14px; }
 .outcome-mark--success { color: var(--accent); background: var(--accent-soft); }
 .outcome-mark--failure { color: var(--coral); background: var(--coral-soft); }
+.outcome-mark--unknown { color: var(--text-muted); background: var(--surface-muted); }
 
 .divergence-badge,
 .projection-badge {

@@ -10,6 +10,12 @@ import type {
 } from "@_89/fold-epistemic";
 import type { FoldSdkCursor, RankedMemoryRecallResult } from "@_89/fold-sdk";
 import type { TranscriptRun } from "@_89/fold-transcript";
+import type {
+  TrajectoryInput,
+  TrajectoryMutationResult,
+  TrajectoryTreeMutationResult,
+  TrajectoryTreeRecord,
+} from "@_89/fold-trajectory";
 
 export interface SuperBrainClientOptions {
   readonly baseUrl: string;
@@ -185,6 +191,38 @@ export class SuperBrainClient {
   async transcriptRuns(): Promise<readonly TranscriptRun[]> {
     const response = await this.request<{ readonly runs: readonly TranscriptRun[] }>(this.workspacePath("transcript-runs"));
     return response.runs;
+  }
+
+  recordTrajectoryTree(
+    stamp: EventStamp,
+    tree: TrajectoryTreeRecord["tree"],
+    options: { readonly spaceId?: string; readonly captureIdentity?: Readonly<Record<string, string>> } = {},
+  ): Promise<TrajectoryTreeMutationResult> {
+    return this.request(this.workspacePath("trajectory-tasks"), {
+      method: "POST",
+      body: JSON.stringify({
+        stamp,
+        tree,
+        ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }),
+        ...(options.captureIdentity === undefined ? {} : { captureIdentity: options.captureIdentity }),
+      }),
+    });
+  }
+
+  recordTrajectory(
+    stamp: EventStamp,
+    input: TrajectoryInput,
+    options: { readonly spaceId?: string; readonly captureIdentity?: Readonly<Record<string, string>> } = {},
+  ): Promise<TrajectoryMutationResult> {
+    return this.request(this.workspacePath("trajectories"), {
+      method: "POST",
+      body: JSON.stringify({
+        stamp,
+        input,
+        ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }),
+        ...(options.captureIdentity === undefined ? {} : { captureIdentity: options.captureIdentity }),
+      }),
+    });
   }
 
   recallMemories(request: Omit<RecallRequest, "candidates"> = {}): Promise<{ readonly memories: readonly RecalledMemory[] }> {

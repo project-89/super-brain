@@ -81,6 +81,11 @@ tests.
   metadata-only dry runs, writes explicitly requested redacted artifacts to a
   restrictive local vault, and delivers confirmed canonical bundles through
   the authenticated API without modifying source histories.
+- `@_89/super-brain-capture-daemon` is the loopback-only live sensor for Claude
+  Code, Codex, and compatible harnesses. It durably spools lifecycle, prompt,
+  tool, file, verification, structured-reasoning, decision, trajectory, and
+  final transcript-import work before acknowledging a hook. Raw prompt and tool
+  bodies stay in its secret-redacted private vault rather than canonical Fold.
 - `@_89/super-brain-memory-worker` reads only the redacted transcript vault,
   proposes deterministic project-aware memories, and consumes future run
   events from a durable cursor. A narrow opt-in policy automatically promotes

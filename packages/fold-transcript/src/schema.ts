@@ -24,6 +24,7 @@ export const transcriptArtifactSchema = z.object({
   parser: z.object({ id: z.string().trim().min(1), version: z.string().trim().min(1) }).strict(),
   modifiedAt: timestampSchema.optional(),
   contentPolicy: z.enum(["metadata-only", "redacted"]),
+  reasoningPolicy: z.enum(["excluded", "included"]).optional(),
   stored: z.boolean(),
   redactionCount: z.number().int().nonnegative(),
 }).strict();

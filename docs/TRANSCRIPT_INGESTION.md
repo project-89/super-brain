@@ -49,8 +49,11 @@ Canonical Fold records include counts, timestamps, roles, tool/action names,
 status, source, model/client metadata, and project/run context. They do not
 include prompts, assistant text, tool arguments/results, or transcript bodies.
 
-Claude `thinking` blocks and Codex reasoning or encrypted content are excluded.
-When import is explicitly confirmed, the importer writes a new JSONL artifact
+Claude `thinking` blocks and Codex exposed reasoning are excluded by default;
+encrypted content is always excluded. The capture daemon can opt into retaining
+exposed reasoning in the private redacted vault, and records that choice as
+`artifact.reasoningPolicy`. This never promotes reasoning text into canonical
+Fold state. When import is explicitly confirmed, the importer writes a new JSONL artifact
 to a `0700` content-addressed vault tree with `0600` files. Common token, key,
 password, bearer, AWS key, and private-key patterns are replaced with
 `[REDACTED]`. The original file remains untouched.
@@ -128,5 +131,6 @@ consumer cursor and resumes after API or network interruption.
 - The local vault is durable local evidence, not a server-side content service.
 - Historical imports cannot reconstruct ephemeral live signals that were never
   written to transcripts.
-- Live Fleet population still requires authenticated external sensor delivery;
-  no simulated replacement is exposed.
+- Live Fleet population is supplied by the authenticated local capture daemon.
+  Remote machines still require their own sensor credential and capture
+  deployment; no simulated replacement is exposed.

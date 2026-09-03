@@ -251,10 +251,27 @@ const memoryCandidateRejectSchema = z.object({
   reason: z.string().trim().min(1).max(500),
 }).strict();
 
+const trajectoryCaptureIdentitySchema = z.record(z.string().trim().min(1).max(2_000))
+  .superRefine((identity, context) => {
+    if (Object.keys(identity).length > 30) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "capture identity has too many fields" });
+    }
+    for (const reserved of ["principal", "workspace"]) {
+      if (reserved in identity) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [reserved],
+          message: `${reserved} is server-derived`,
+        });
+      }
+    }
+  });
+
 const trajectoryTreeRecordSchema = z
   .object({
     stamp: stampSchema,
     spaceId: z.string().min(1).optional(),
+    captureIdentity: trajectoryCaptureIdentitySchema.optional(),
     tree: sharedDecisionTreeSchema,
   })
   .strict();
@@ -263,6 +280,7 @@ const trajectoryRecordSchema = z
   .object({
     stamp: stampSchema,
     spaceId: z.string().min(1).optional(),
+    captureIdentity: trajectoryCaptureIdentitySchema.optional(),
     input: trajectoryInputSchema,
   })
   .strict();
@@ -858,6 +876,7 @@ function trajectoryContext(
   subject: AuthenticatedSubject,
   access: FoldSdkAccessContext,
   spaceId: string | undefined,
+  identity: Readonly<Record<string, string>> = {},
 ): TrajectoryEventContext {
   return {
     access,
@@ -867,7 +886,7 @@ function trajectoryContext(
         workspace: access.workspaceId,
         ...(spaceId === undefined ? {} : { space: spaceId }),
       },
-      identity: { principal: access.principalId, workspace: access.workspaceId },
+      identity: { ...identity, principal: access.principalId, workspace: access.workspaceId },
     },
   };
 }
@@ -1080,7 +1099,7 @@ async function handleRequest(
     if (method === "POST") {
       const body = trajectoryTreeRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
       const result = await sdk.recordTrajectoryTree(
-        trajectoryContext(subject, access, body.spaceId),
+        trajectoryContext(subject, access, body.spaceId, body.captureIdentity),
         body.stamp,
         body.tree,
       );
@@ -1269,7 +1288,7 @@ async function handleRequest(
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const body = trajectoryRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
     const result = await sdk.recordTrajectory(
-      trajectoryContext(subject, access, body.spaceId),
+      trajectoryContext(subject, access, body.spaceId, body.captureIdentity),
       body.stamp,
       parsedTrajectoryInput(body.input),
     );

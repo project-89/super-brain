@@ -21,11 +21,17 @@ const ACTIVITY_EVENT_NODE_KIND = {
 const ACTIVITY_NODE_KINDS: ReadonlySet<string> = new Set(Object.values(ACTIVITY_EVENT_NODE_KIND));
 const OBSERVATION_KINDS: ReadonlySet<string> = new Set([
   "status_changed",
+  "prompt_submitted",
   "login_required",
   "auth_required",
   "blocking_prompt",
   "stall_detected",
   "tool_running",
+  "tool_result",
+  "file_changed",
+  "verification_result",
+  "reasoning_checkpoint",
+  "human_decision",
   "task_complete",
   "output",
 ]);

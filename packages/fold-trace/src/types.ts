@@ -1,6 +1,6 @@
 import type { CaptureEnvelope } from "@_89/fold";
 
-export type TraceOutcome = "success" | "failure";
+export type TraceOutcome = "success" | "failure" | "unknown";
 export type TraceStepRole =
   | "model_thought"
   | "tool_call"

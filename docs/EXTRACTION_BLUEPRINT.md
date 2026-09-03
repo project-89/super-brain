@@ -37,7 +37,7 @@ The intended dependency direction is:
 @_89/fold + fold-activity + fold-fleet + fold-epistemic + fold-trajectory + fold-transcript --> fold-sdk
 @_89/fold-sdk + fold-storage + fold-postgres --> apps/api --> apps/brain
 fold-transcript --> apps/importer --> apps/api
-apps/api --> super-brain-client --> memory-worker and external harnesses
+apps/api --> super-brain-client --> memory-worker, capture-daemon, and external harnesses
 ```
 
 The diagram shows allowed direction, not a requirement that every pack depend on
@@ -63,6 +63,7 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/super-brain-client` | Harness-neutral authenticated producer and resumable consumer | Local API contract | Implemented with SSE reconnect and durable cursor semantics |
 | `apps/importer` | Read-only historical source adapters and local redacted vault | Local Claude Code and Codex JSONL | Scan and confirmed API delivery implemented |
 | `apps/memory-worker` | Project-aware transcript extraction, proposal, policy promotion, durable subscription | Redacted vault, transcript catalog, local client | Implemented and backfilled |
+| `apps/capture-daemon` | Headless hook receiver, private artifact vault, durable spool, live trajectory and transcript finalization | Agent operator console hook/session mechanics; local contracts | Implemented for Claude Code, Codex, and compatible relays |
 | `apps/api` | Authenticated service over the local SDK | Local packages only | Event, projection, memory, trajectory, transcript, fleet, steering, and reasoning HTTP core implemented |
 | `apps/brain` | Work-focused operator view | Local API; Raven Docs UI patterns where useful | Memory, history, event, state, trajectory, fleet, steering, and reasoning workflows implemented |
 
@@ -90,6 +91,7 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 | narrative-canon | Five generator choke points in `image-generator.ts`, `gpt-image-generator.ts`, `video-generator.ts`, `seedance-generator.ts`, `music-generator.ts` | `packages/fold-activity` contract | Define generation-lineage records locally. Narrative Studio instrumentation remains in its own repository until the contract is proven. FABLE is a film fixture/agent name, not this codebase. |
 | Embers | `docs/design/v0.3/intention.md`; drive, wear, causal-log, pressure, and intention symbols | `packages/fold-drives` | Reimplemented as immutable incremental state plus canonical samples and discrete records. Exact threshold, clamp-order, wear, intention, urgency, and eligibility fixtures pass locally. Practices, capabilities, prose, and host cognition are excluded. |
 | Raven | UUIDv7 ordering, workspace/space/creator scope, memory lifecycle and access-control behavior | `packages/fold-epistemic`, `apps/brain` | Clean-room core implemented after pinned schema, write-path, vector-recall, and guard inventory. Local tests correct missing post-ranking creator and explicit space checks. The client adapts committed shell, compact filter, list/detail, and metadata interaction evidence without importing Raven code. |
+| agent-operator-console | Local hook receiver and session registration behavior from hashed non-Git snapshots | `apps/capture-daemon` | Clean-room TypeScript implementation with loopback authentication, private vault, durable spool, richer tool/verification capture, API delivery, and no runtime dependency on the console. |
 
 ## Implementation Order
 
@@ -106,8 +108,8 @@ commit for every repository is in `EVIDENCE_MANIFEST.md`.
 6. **Sensing and fleet:** terminal normalization, canonical lifecycle and
    observations, complete source identity, heartbeat freshness, boot
    reconstruction, orphan planning, scoped SDK/API delivery,
-   and the operator view are implemented. Authenticated external sensor wiring
-   and runtime actuation remain host integrations.
+   and the operator view are implemented. The local capture daemon supplies
+   authenticated sensor wiring; runtime actuation remains a host integration.
 7. **Domain completion:** drive, wear, intention, project-aware memory,
    candidate/decision ledger, tombstone, recall-time access, pgvector derived
    ranking, and proposal review are implemented.
@@ -160,8 +162,8 @@ The first `@_89/fold-sdk` slice establishes the service-facing boundary:
 
 1. A minimal asynchronous store port is satisfied directly by the local
    `FoldJournal` and keeps filesystem concerns out of the SDK bundle.
-2. Appends validate canonical events, capture scope, duplicate IDs, and
-   same-time producer ordering before writing.
+2. Appends validate canonical events, capture scope, conflicting IDs, and
+   same-time producer ordering before writing. An exact event retry is a no-op.
 3. Reads enforce current workspace, creator, and space access before returning
    records or building Fold state; raw personal-memory projections are not part
    of the public API.
@@ -203,7 +205,8 @@ checkpoints, and an optional real pgvector ranker.
    capture identity. Providers see only an authorized minimized corpus, and
    their output passes through post-ranking authorization.
 5. Trajectory tree/run writes use server-derived collaborative scope and expose
-   JSON-safe task analysis without accepting client-authored capture identity.
+   JSON-safe task analysis while accepting bounded supplemental producer
+   identity; principal and workspace identity remain server-derived.
 6. Workspace IDs become opaque hashed filenames. A singleton SDK serializes each
    workspace, complete-line journal appends are fsynced, and a single-host
    writer lease is acquired before the HTTP socket binds.
@@ -224,7 +227,7 @@ checkpoints, and an optional real pgvector ranker.
     replay validation, and idempotent retries; project/run history is readable to
     authorized workspace members and reserved from generic append.
 
-External identity providers, authenticated external sensor credentials,
+External identity providers, remote sensor credential provisioning,
 recovery actuation, deployment TLS, distributed proxy rate limiting,
 multi-host failover, and production embedding/model sidecars remain explicit
 deployment work. Automated transcript salience and policy promotion are local
@@ -257,7 +260,7 @@ operational features.
 9. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
-Real two-model capture, production semantic embeddings/model reasoning,
+Repeated cross-model comparison and tree merging, production semantic embeddings/model reasoning,
 general graph layout, event authoring,
 identity-provider login, and deployment-specific secret delivery remain
 follow-on product work.

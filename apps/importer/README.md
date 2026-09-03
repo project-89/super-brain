@@ -12,8 +12,10 @@ pnpm --filter @_89/super-brain-importer start -- scan --source all
 The library adapters stream source JSONL, preserve source-qualified project/run
 identity, and emit bounded canonical metadata chunks. Transcript text is not
 placed in Fold records. `storeRedactedArtifact` is an explicit local operation
-that strips private thinking/reasoning blocks, scans secrets, and writes a
-content-addressed `0600` artifact into a caller-selected vault.
+that excludes exposed thinking/reasoning by default, always removes encrypted
+content, scans secrets, and writes a content-addressed `0600` artifact into a
+caller-selected vault. A caller may opt into retaining exposed reasoning in
+that private vault; the canonical bundle records the policy but not the text.
 
 Source directories are never modified.
 

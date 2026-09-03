@@ -437,7 +437,7 @@ describe("Fold HTTP API", () => {
     }
   });
 
-  it("returns a stable conflict for duplicate events", async () => {
+  it("accepts exact event retries without creating duplicates", async () => {
     const api = await startApi();
     try {
       const body = { event: apiEvent({ id: "event-a", t: 1 }) };
@@ -453,7 +453,10 @@ describe("Fold HTTP API", () => {
         token: "token-a",
         body,
       });
-      expect(duplicate).toMatchObject({ status: 409, body: { error: { code: "fold_conflict" } } });
+      expect(duplicate).toMatchObject({ status: 201, body: { entry: { event: { id: "event-a" } } } });
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", {
+        token: "token-a",
+      })).body.entries).toHaveLength(1);
     } finally {
       await api.close();
     }
@@ -782,6 +785,7 @@ describe("Fold HTTP API", () => {
         body: {
           stamp: { id: "trajectory-tree-event", t: 200, worldDate: "2026-08-19" },
           spaceId: "space-a",
+          captureIdentity: { agent: "codex", session: "session-a", repo: "project-a" },
           tree: trajectoryTree,
         },
       });
@@ -792,7 +796,13 @@ describe("Fold HTTP API", () => {
             author: { kind: "human", id: "user-a" },
             capture: {
               scope: { workspace: "workspace-1", space: "space-a" },
-              identity: { principal: "user-a", workspace: "workspace-1" },
+              identity: {
+                agent: "codex",
+                session: "session-a",
+                repo: "project-a",
+                principal: "user-a",
+                workspace: "workspace-1",
+              },
             },
           },
           record: { recordType: "tree", actorId: "user-a" },
@@ -809,6 +819,7 @@ describe("Fold HTTP API", () => {
           body: {
             stamp: { id: `trajectory-run-event-${index}`, t: 201 + index, worldDate: "2026-08-19" },
             spaceId: "space-a",
+            captureIdentity: { agent: "codex", session: `session-${index}`, repo: "project-a" },
             input,
           },
         });

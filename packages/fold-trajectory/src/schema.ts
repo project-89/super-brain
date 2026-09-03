@@ -56,7 +56,7 @@ export const rawTrajectorySchema = z.object({
   id: nonEmpty,
   taskId: nonEmpty,
   model: z.object({ id: nonEmpty, version: nonEmpty.optional() }).strict(),
-  outcome: z.enum(["success", "failure"]),
+  outcome: z.enum(["success", "failure", "unknown"]),
   capture: captureEnvelopeSchema,
   steps: z.array(traceStepSchema).min(1),
 }).strict();

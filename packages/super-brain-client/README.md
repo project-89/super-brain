@@ -1,6 +1,6 @@
 # Super Brain client
 
-Harness-neutral client for authenticated Fold ingestion, project-aware memory recall, memory-candidate review, resumable SSE consumption, and durable consumer offsets.
+Harness-neutral client for authenticated Fold ingestion, project-aware memory recall, memory-candidate review, trajectory delivery, resumable SSE consumption, and durable consumer offsets.
 
 ```ts
 import { SuperBrainClient } from "@_89/super-brain-client";

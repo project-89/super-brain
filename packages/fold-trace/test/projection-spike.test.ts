@@ -156,6 +156,20 @@ describe("two-model projection feasibility spike", () => {
     expect(analysis.edgeOutcomes.has("edge_failure")).toBe(false);
   });
 
+  it("does not count an unverified outcome as a failure", () => {
+    const unknown = projectTrajectory({ ...modelA, id: "trace_unknown", outcome: "unknown" }, tree, assignmentsA);
+    const analysis = analyzeProjectedTrajectories([
+      projectTrajectory(modelA, tree, assignmentsA),
+      unknown,
+    ], tree);
+    expect(analysis.edgeOutcomes.get("edge_expiry")).toMatchObject({
+      traversals: 2,
+      successes: 1,
+      failures: 0,
+      successRate: 1,
+    });
+  });
+
   it("finds the first divergent edge before later projection gaps", () => {
     const projectedA = projectTrajectory(modelA, tree, assignmentsA);
     const projectedB = projectTrajectory(modelB, tree, assignmentsB);
