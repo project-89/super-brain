@@ -25,12 +25,12 @@ export function initialConnection(): ConnectionSettings {
     localStorage.removeItem(SETTINGS_KEY);
   }
   return {
-    baseUrl: normalizedBaseUrl(stored.baseUrl ?? import.meta.env.VITE_FOLD_API_BASE_URL ?? "/api"),
-    organizationId: (stored.organizationId ?? import.meta.env.VITE_FOLD_ORGANIZATION ?? "local").trim(),
-    workspaceId: (stored.workspaceId ?? import.meta.env.VITE_FOLD_WORKSPACE ?? "").trim(),
-    token: sessionStorage.getItem(TOKEN_KEY) ?? import.meta.env.VITE_FOLD_TOKEN ?? "",
-    captureBaseUrl: normalizedBaseUrl(stored.captureBaseUrl ?? import.meta.env.VITE_CAPTURE_BASE_URL ?? "/capture"),
-    captureOperatorToken: sessionStorage.getItem(CAPTURE_TOKEN_KEY) ?? import.meta.env.VITE_CAPTURE_OPERATOR_TOKEN ?? "",
+    baseUrl: normalizedBaseUrl(import.meta.env.VITE_FOLD_API_BASE_URL ?? stored.baseUrl ?? "/api"),
+    organizationId: (import.meta.env.VITE_FOLD_ORGANIZATION ?? stored.organizationId ?? "local").trim(),
+    workspaceId: (import.meta.env.VITE_FOLD_WORKSPACE ?? stored.workspaceId ?? "").trim(),
+    token: import.meta.env.VITE_FOLD_TOKEN ?? sessionStorage.getItem(TOKEN_KEY) ?? "",
+    captureBaseUrl: normalizedBaseUrl(import.meta.env.VITE_CAPTURE_BASE_URL ?? stored.captureBaseUrl ?? "/capture"),
+    captureOperatorToken: import.meta.env.VITE_CAPTURE_OPERATOR_TOKEN ?? sessionStorage.getItem(CAPTURE_TOKEN_KEY) ?? "",
   };
 }
 
