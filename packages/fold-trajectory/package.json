@@ -26,6 +26,6 @@
     "@_89/fold-eval": "workspace:*",
     "@_89/fold-trace": "workspace:*",
     "@_89/fold-epistemic": "workspace:*",
-    "zod": "^3.25.0"
+    "zod": "^4.5.4"
   }
 }
