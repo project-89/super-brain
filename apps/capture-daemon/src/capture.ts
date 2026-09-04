@@ -13,7 +13,14 @@ import { RecordAnonymizer } from "@_89/super-brain-importer";
 
 import { refreshProject, resolveProject } from "./project.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
-import { DurableSpool, HookVault, StateStore } from "./storage.js";
+import { mergeRecoveredSteps, recoverCapturedSteps } from "./recovery.js";
+import {
+  DurableSpool,
+  HookVault,
+  SessionStepStore,
+  StateStore,
+  TranscriptSnapshotStore,
+} from "./storage.js";
 import type {
   CaptureConfig,
   CapturedStep,
@@ -21,10 +28,13 @@ import type {
   CaptureState,
   HookSource,
   SpoolJob,
+  StoredHookArtifact,
+  TrajectoryFinalizationReason,
   VaultArtifact,
 } from "./types.js";
 
 const TRANSCRIPT_DELTA_MAX_BYTES = 8 * 1024 * 1024;
+const HOOK_RETRY_WINDOW_MS = 30_000;
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -131,9 +141,6 @@ function eventStamp(artifact: VaultArtifact, index: number, label: string) {
 }
 
 function stepFor(session: CaptureSession, input: Omit<CapturedStep, "id" | "stepNumber">): CaptureSession {
-  if (session.steps.length >= 2_000) {
-    return { ...session, truncatedStepCount: (session.truncatedStepCount ?? 0) + 1 };
-  }
   const stepNumber = session.steps.length + 1;
   return {
     ...session,
@@ -170,12 +177,136 @@ function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
   return remaining;
 }
 
+function completedResponse(step: CapturedStep): boolean {
+  return step.role === "model_output" && step.content === "Agent completed a response";
+}
+
+function promptStart(step: CapturedStep): boolean {
+  return step.role === "decision" && step.content === "User submitted a task prompt";
+}
+
+function currentUnitSteps(session: CaptureSession): readonly CapturedStep[] {
+  const start = session.currentUnitStartStepNumber ??
+    ((session.completedUnitCount ?? 0) === 0 ? 1 : undefined);
+  if (start === undefined) return [];
+  return session.steps.slice(Math.max(0, start - 1), session.currentUnitEndStepNumber).map((step, index) => ({
+    ...step,
+    id: `step-${index + 1}`,
+    stepNumber: index + 1,
+  }));
+}
+
+function completeCurrentUnit(session: CaptureSession): CaptureSession {
+  const {
+    currentUnitStartStepNumber: _start,
+    currentUnitEndStepNumber: _end,
+    ...remaining
+  } = session;
+  return {
+    ...remaining,
+    evaluationUnitVersion: 2,
+    completedUnitCount: (session.completedUnitCount ?? 0) + 1,
+    finalizedThroughStepNumber: session.steps.length,
+  };
+}
+
+function migrateEvaluationUnits(session: CaptureSession): CaptureSession {
+  if (session.evaluationUnitVersion === 2) return session;
+  const completed = session.steps.filter(completedResponse);
+  const lastCompleted = completed.at(-1)?.stepNumber ?? 0;
+  const openPrompt = [...session.steps].reverse().find((step) =>
+    promptStart(step) && step.stepNumber > lastCompleted
+  );
+  const {
+    evaluationUnitVersion: _version,
+    currentUnitStartStepNumber: _start,
+    currentUnitEndStepNumber: _end,
+    completedUnitCount: _completed,
+    finalizedThroughStepNumber: _finalizedThrough,
+    ...base
+  } = session;
+  return {
+    ...base,
+    evaluationUnitVersion: 2,
+    completedUnitCount: 0,
+    ...(openPrompt === undefined ? {} : { currentUnitStartStepNumber: openPrompt.stepNumber }),
+  };
+}
+
+interface ClosedEvaluationUnit {
+  readonly startStepNumber: number;
+  readonly endStepNumber: number;
+  readonly reason: "stop" | "prompt-boundary";
+  readonly boundaryStep: CapturedStep;
+  readonly promptStep?: CapturedStep;
+}
+
+function closedEvaluationUnits(session: CaptureSession): readonly ClosedEvaluationUnit[] {
+  const after = session.finalizedThroughStepNumber ?? 0;
+  let start: number | undefined;
+  let prompt: CapturedStep | undefined;
+  let lastBoundary = after;
+  const units: ClosedEvaluationUnit[] = [];
+  for (const step of session.steps) {
+    if (step.stepNumber <= after) continue;
+    if (promptStart(step)) {
+      if (start !== undefined && step.stepNumber > start) {
+        units.push({
+          startStepNumber: start,
+          endStepNumber: step.stepNumber - 1,
+          reason: "prompt-boundary",
+          boundaryStep: step,
+          ...(prompt === undefined ? {} : { promptStep: prompt }),
+        });
+        lastBoundary = step.stepNumber - 1;
+      }
+      start = step.stepNumber;
+      prompt = step;
+      continue;
+    }
+    if (!completedResponse(step)) continue;
+    const unitStart = start ?? lastBoundary + 1;
+    if (unitStart <= step.stepNumber) {
+      units.push({
+        startStepNumber: unitStart,
+        endStepNumber: step.stepNumber,
+        reason: "stop",
+        boundaryStep: step,
+        ...(prompt === undefined ? {} : { promptStep: prompt }),
+      });
+    }
+    lastBoundary = step.stepNumber;
+    start = undefined;
+    prompt = undefined;
+  }
+  return units;
+}
+
+function eventTimeFromStep(step: CapturedStep): number | undefined {
+  const match = /^capture-(\d{13})-/.exec(step.eventId ?? "");
+  if (match === null) return undefined;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+function unitOutcome(steps: readonly CapturedStep[]): "success" | "failure" | undefined {
+  let outcome: "success" | "failure" | undefined;
+  for (const step of steps) {
+    if (step.role === "tool_call" && /edit|write|patch|notebook/i.test(step.toolName ?? "")) {
+      outcome = undefined;
+    }
+    if (/\bverification passed$/.test(step.content)) outcome = "success";
+    if (/\bverification failed$/.test(step.content)) outcome = "failure";
+  }
+  return outcome;
+}
+
 function trajectoryTaskId(session: CaptureSession, privacy: RecordAnonymizer): string {
   const projectId = privacy.alias("project", session.project.id);
   const sessionId = privacy.alias("session", session.sessionId);
   return session.comparisonKey === undefined
-    ? `capture-session:${session.source}:${sessionId}`
-    : `capture-task:${projectId}:${session.comparisonKey}`;
+    ? `capture-session-v2:${session.source}:${sessionId}`
+    : `capture-task-v2:${projectId}:${session.comparisonKey}`;
 }
 
 function sharedNodeId(step: {
@@ -199,13 +330,47 @@ export class CaptureEngine {
     readonly vault: HookVault,
     readonly spool: DurableSpool,
     readonly privacy = new RecordAnonymizer("none"),
+    readonly stepStore = new SessionStepStore(config.stateRoot),
+    readonly transcriptSnapshots = new TranscriptSnapshotStore(config.stateRoot, {
+      reasoningPolicy: config.reasoningPolicy,
+      retainEncryptedReasoning: config.retainEncryptedReasoning,
+    }),
   ) {}
 
   async initialize(): Promise<void> {
     this.state = await this.stateStore.load();
+    await this.stepStore.initialize();
+    await this.spool.initialize();
     const sessions = { ...this.state.sessions };
     let changed = false;
     for (const [key, session] of Object.entries(sessions)) {
+      let hydrated = await this.stepStore.synchronize(session);
+      if ((hydrated.truncatedStepCount ?? 0) > 0) {
+        const artifacts = await this.vault.sessionArtifacts(hydrated.source, hydrated.sessionId);
+        const recovered = mergeRecoveredSteps(hydrated.steps, recoverCapturedSteps(artifacts));
+        if (recovered.recoveredCount > 0) {
+          hydrated = await this.stepStore.replace(hydrated, recovered.steps);
+          const remaining = Math.max(0, (session.truncatedStepCount ?? 0) - recovered.recoveredCount);
+          const { truncatedStepCount: _truncated, ...withoutTruncation } = hydrated;
+          hydrated = {
+            ...withoutTruncation,
+            ...(remaining === 0 ? {} : { truncatedStepCount: remaining }),
+            recoveredStepCount: (session.recoveredStepCount ?? 0) + recovered.recoveredCount,
+          };
+        }
+      }
+      hydrated = migrateEvaluationUnits(hydrated);
+      hydrated = await this.backfillCompletedUnits(hydrated);
+      sessions[key] = hydrated;
+      if (
+        session.steps.length > 0 ||
+        hydrated.stepCount !== session.stepCount ||
+        hydrated.truncatedStepCount !== session.truncatedStepCount ||
+        hydrated.currentUnitStartStepNumber !== session.currentUnitStartStepNumber ||
+        hydrated.completedUnitCount !== session.completedUnitCount ||
+        hydrated.finalizedThroughStepNumber !== session.finalizedThroughStepNumber ||
+        hydrated.evaluationUnitVersion !== session.evaluationUnitVersion
+      ) changed = true;
       if (session.source !== "unknown") continue;
       const concrete = Object.values(sessions).filter((candidate) =>
         candidate.source !== "unknown" && candidate.sessionId === session.sessionId
@@ -215,11 +380,10 @@ export class CaptureEngine {
         changed = true;
       }
     }
+    this.state = { ...this.state, sessions };
     if (changed) {
-      this.state = { ...this.state, sessions };
       await this.stateStore.save(this.state);
     }
-    await this.spool.initialize();
   }
 
   snapshot(): {
@@ -228,11 +392,19 @@ export class CaptureEngine {
     readonly unfinishedSessions: number;
     readonly staleSessions: number;
     readonly receivedHooks: number;
+    readonly duplicateHooks: number;
     readonly lastHookAt?: string;
     readonly truncatedSteps: number;
+    readonly finalizedSessions: number;
+    readonly finalizedUnits: number;
+    readonly oldestUnfinishedAgeMs?: number;
   } {
     const sessions = Object.values(this.state.sessions);
     const now = Date.now();
+    const unfinishedAges = sessions
+      .filter((session) => !session.finalized)
+      .map((session) => now - Date.parse(session.lastSeenAt))
+      .filter((age) => Number.isFinite(age) && age >= 0);
     return {
       activeSessions: sessions.filter((session) => session.active).length,
       knownSessions: sessions.length,
@@ -241,8 +413,12 @@ export class CaptureEngine {
         !session.finalized && now - Date.parse(session.lastSeenAt) >= this.config.orphanAfterMs
       ).length,
       receivedHooks: this.state.receivedHooks ?? 0,
+      duplicateHooks: this.state.duplicateHooks ?? 0,
       ...(this.state.lastHookAt === undefined ? {} : { lastHookAt: this.state.lastHookAt }),
       truncatedSteps: sessions.reduce((total, session) => total + (session.truncatedStepCount ?? 0), 0),
+      finalizedSessions: sessions.filter((session) => session.finalized).length,
+      finalizedUnits: sessions.reduce((total, session) => total + (session.completedUnitCount ?? 0), 0),
+      ...(unfinishedAges.length === 0 ? {} : { oldestUnfinishedAgeMs: Math.max(...unfinishedAges) }),
     };
   }
 
@@ -394,6 +570,8 @@ export class CaptureEngine {
       ...(observedPermissionMode === undefined ? {} : { permissionMode: observedPermissionMode }),
       ...(observedTurnId === undefined ? {} : { currentTurnId: observedTurnId }),
       steps: [],
+      evaluationUnitVersion: 2,
+      completedUnitCount: 0,
       finalized: false,
       active: true,
       lastSeenAt: artifact.receivedAt,
@@ -402,6 +580,7 @@ export class CaptureEngine {
       nodeKind: "observation",
       role: "decision",
       content: "Coding-agent session started",
+      artifactId: artifact.id,
     });
     return { key, session, resumed: false, created: true };
   }
@@ -410,6 +589,19 @@ export class CaptureEngine {
     const payload = object(payloadInput);
     if (payload === undefined) throw new TypeError("hook payload must be a JSON object");
     const artifact = await this.nextArtifact(source, payload);
+    const previousArtifactTime = this.state.seenArtifactTimes?.[artifact.id];
+    if (
+      previousArtifactTime !== undefined &&
+      artifact.eventTime - previousArtifactTime <= HOOK_RETRY_WINDOW_MS
+    ) {
+      this.state = {
+        ...this.state,
+        duplicateHooks: (this.state.duplicateHooks ?? 0) + 1,
+        lastHookAt: artifact.receivedAt,
+      };
+      await this.stateStore.save(this.state);
+      return { artifactId: artifact.id };
+    }
     this.state = {
       ...this.state,
       receivedHooks: (this.state.receivedHooks ?? 0) + 1,
@@ -433,6 +625,13 @@ export class CaptureEngine {
 
     const name = hookName(payload);
     if (name === "UserPromptSubmit") {
+      if (session.currentUnitStartStepNumber !== undefined && currentUnitSteps(session).length > 0) {
+        const abandoned = withoutVerifiedOutcome(session);
+        if (await this.enqueueTrajectory(abandoned, artifact, index, "prompt-boundary")) {
+          index += 2;
+          session = completeCurrentUnit(abandoned);
+        }
+      }
       const prompt = text(payload.prompt) ?? text(payload.user_prompt) ?? "";
       const explicitTaskKey = text(payload.task_key) ?? text(payload.taskId) ?? text(payload.comparison_key);
       const normalizedPrompt = prompt.trim().toLocaleLowerCase().replace(/\s+/g, " ");
@@ -441,10 +640,18 @@ export class CaptureEngine {
         : normalizedPrompt.length === 0
           ? undefined
           : `prompt-${privateDigest(this.privacy, "prompt", normalizedPrompt).slice(0, 24)}`;
+      const {
+        comparisonKey: _comparisonKey,
+        taskKey: _taskKey,
+        steeringIntentionIds: _steeringIntentionIds,
+        currentUnitStartStepNumber: _currentUnitStart,
+        ...resetSession
+      } = withoutVerifiedOutcome(session);
       session = {
-        ...session,
-        ...(session.comparisonKey !== undefined || comparisonKey === undefined ? {} : { comparisonKey }),
-        ...(session.taskKey !== undefined || explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
+        ...resetSession,
+        currentUnitStartStepNumber: resetSession.steps.length + 1,
+        ...(comparisonKey === undefined ? {} : { comparisonKey }),
+        ...(explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
       };
       session = await this.observe(session, artifact, index++, {
         kind: "prompt_submitted",
@@ -687,7 +894,37 @@ export class CaptureEngine {
           reviewText: `VERDICT: ${verdict === "success" ? "approve" : "reject"}${confidence === undefined ? "" : `\nCONFIDENCE: ${confidence}`}`,
         }),
       };
+    } else if (name === "SteeringApplied") {
+      const intentionIds = Array.isArray(payload.intention_ids)
+        ? payload.intention_ids
+            .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+            .map((value) => bounded(value.trim(), 500))
+            .slice(0, 20)
+        : [];
+      if (intentionIds.length === 0) throw new TypeError("steering application requires intention_ids");
+      session = await this.observe(session, artifact, index++, {
+        kind: "steering_applied",
+        data: {
+          intentionIds,
+          artifactId: artifact.id,
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+        },
+      });
+      session = {
+        ...stepFor(session, {
+          nodeKind: "decision",
+          role: "decision",
+          content: "Operator steering applied",
+          artifactId: artifact.id,
+          eventId: session.lastEventId!,
+          ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+        }),
+        steeringIntentionIds: [...new Set([...(session.steeringIntentionIds ?? []), ...intentionIds])],
+      };
     } else if (name === "Stop") {
+      const reasoning = await this.captureExposedReasoning(session, artifact, index);
+      session = reasoning.session;
+      index = reasoning.nextIndex;
       const assistantMessage = text(payload.last_assistant_message) ?? text(payload.lastAssistantMessage) ?? "";
       session = await this.observe(session, artifact, index++, {
         kind: "task_complete",
@@ -708,6 +945,10 @@ export class CaptureEngine {
         eventId: session.lastEventId!,
         ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
+      if (await this.enqueueTrajectory(session, artifact, index, "stop")) {
+        index += 2;
+        session = completeCurrentUnit(session);
+      }
     } else if (name === "SessionEnd") {
       const reasoning = await this.captureExposedReasoning(session, artifact, index);
       session = reasoning.session;
@@ -719,21 +960,11 @@ export class CaptureEngine {
         text(payload.reason) === undefined ? undefined : bounded(text(payload.reason)!, 500),
       ));
       if (!session.finalized) {
-        await this.enqueueTrajectory(session, artifact, index, "session-end");
-        index += 2;
-        if (session.transcriptPath !== undefined && (source === "claude-code" || source === "codex")) {
-          const transcriptJob: SpoolJob = {
-            version: 1,
-            kind: "transcript",
-            id: `capture-${artifact.eventTime.toString().padStart(13, "0")}-950-transcript-${artifact.id.slice(0, 12)}`,
-            createdAt: artifact.receivedAt,
-            notBefore: new Date(artifact.eventTime + 2_000).toISOString(),
-            deadlineAt: new Date(artifact.eventTime + 30 * 60_000).toISOString(),
-            source,
-            path: session.transcriptPath,
-          };
-          await this.spool.enqueue(transcriptJob);
+        if (await this.enqueueTrajectory(session, artifact, index, "session-end")) {
+          index += 2;
+          session = completeCurrentUnit(session);
         }
+        await this.enqueueTranscript(session, artifact);
       }
       session = { ...session, active: false, finalized: true, finalizationReason: "session-end" };
     }
@@ -741,6 +972,8 @@ export class CaptureEngine {
     const eventsSinceSnapshot = (session.observedEventCount ?? 0) - (session.lastTreeSnapshotEventCount ?? 0);
     if (
       name !== "SessionEnd" &&
+      name !== "Stop" &&
+      session.currentUnitStartStepNumber !== undefined &&
       this.config.treeSnapshotEveryEvents > 0 &&
       session.comparisonKey !== undefined &&
       eventsSinceSnapshot >= this.config.treeSnapshotEveryEvents
@@ -752,9 +985,17 @@ export class CaptureEngine {
       session = { ...session, lastTreeSnapshotEventCount: session.observedEventCount ?? 0 };
     }
 
+    session = await this.stepStore.synchronize(session);
+    const seenArtifacts = [...this.state.seenArtifacts, artifact.id].slice(-10_000);
+    const retainedArtifacts = new Set(seenArtifacts);
+    const seenArtifactTimes = Object.fromEntries([
+      ...Object.entries(this.state.seenArtifactTimes ?? {}).filter(([id]) => retainedArtifacts.has(id)),
+      [artifact.id, artifact.eventTime],
+    ]);
     this.state = {
       ...this.state,
-      seenArtifacts: [...this.state.seenArtifacts, artifact.id].slice(-10_000),
+      seenArtifacts,
+      seenArtifactTimes,
       sessions: { ...this.state.sessions, [ensured.key]: session },
     };
     await this.stateStore.save(this.state);
@@ -832,12 +1073,90 @@ export class CaptureEngine {
     return { session: next, nextIndex };
   }
 
+  private async backfillCompletedUnits(session: CaptureSession): Promise<CaptureSession> {
+    const units = closedEvaluationUnits(session);
+    if (units.length === 0) return session;
+    const artifacts = await this.vault.sessionArtifacts(session.source, session.sessionId);
+    const artifactsById = new Map(artifacts.map((artifact) => [artifact.id, artifact]));
+    let completedUnitCount = session.completedUnitCount ?? 0;
+    let finalizedThroughStepNumber = session.finalizedThroughStepNumber;
+    for (const unit of units) {
+      const promptArtifact = unit.promptStep?.artifactId === undefined
+        ? undefined
+        : artifactsById.get(unit.promptStep.artifactId);
+      const promptPayload = promptArtifact?.payload;
+      const promptText = promptPayload === undefined
+        ? undefined
+        : text(promptPayload.prompt) ?? text(promptPayload.user_prompt);
+      const explicitTaskKey = promptPayload === undefined
+        ? undefined
+        : text(promptPayload.task_key) ?? text(promptPayload.taskId) ?? text(promptPayload.comparison_key);
+      const normalizedPrompt = promptText?.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+      const comparisonKey = explicitTaskKey !== undefined
+        ? `task-${privateDigest(this.privacy, "task-key", explicitTaskKey).slice(0, 24)}`
+        : normalizedPrompt === undefined || normalizedPrompt.length === 0
+          ? undefined
+          : `prompt-${privateDigest(this.privacy, "prompt", normalizedPrompt).slice(0, 24)}`;
+      const steps = session.steps.slice(unit.startStepNumber - 1, unit.endStepNumber);
+      const humanDecision = [...steps].reverse()
+        .map((step) => step.artifactId === undefined ? undefined : artifactsById.get(step.artifactId)?.payload)
+        .find((payload) => payload !== undefined && hookName(payload) === "HumanDecision");
+      const explicitOutcome = humanDecision?.verdict === "success" || humanDecision?.verdict === "failure"
+        ? humanDecision.verdict
+        : undefined;
+      const inferredOutcome = unitOutcome(steps);
+      const {
+        comparisonKey: _comparisonKey,
+        taskKey: _taskKey,
+        currentUnitStartStepNumber: _currentUnitStart,
+        currentUnitEndStepNumber: _currentUnitEnd,
+        ...baseSession
+      } = withoutVerifiedOutcome(session);
+      const scoped: CaptureSession = {
+        ...baseSession,
+        currentUnitStartStepNumber: unit.startStepNumber,
+        currentUnitEndStepNumber: unit.endStepNumber,
+        completedUnitCount,
+        ...(comparisonKey === undefined ? {} : { comparisonKey }),
+        ...(explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
+        ...(inferredOutcome === undefined ? {} : { lastVerification: inferredOutcome }),
+        ...(explicitOutcome === undefined ? {} : {
+          explicitOutcome,
+          reviewText: `VERDICT: ${explicitOutcome === "success" ? "approve" : "reject"}`,
+        }),
+      };
+      const storedBoundary = unit.boundaryStep.artifactId === undefined
+        ? undefined
+        : artifactsById.get(unit.boundaryStep.artifactId);
+      const eventTime = eventTimeFromStep(unit.boundaryStep) ?? storedBoundary?.eventTime ?? Date.parse(session.lastSeenAt);
+      const safeEventTime = (Number.isFinite(eventTime) ? eventTime : Date.now()) +
+        (completedUnitCount + 1) / 10_000;
+      const artifact: VaultArtifact = {
+        id: unit.boundaryStep.artifactId ?? hash(`backfill:${session.source}:${session.sessionId}:${unit.endStepNumber}`),
+        eventTime: safeEventTime,
+        receivedAt: new Date(safeEventTime).toISOString(),
+        path: "",
+      };
+      if (await this.enqueueTrajectory(scoped, artifact, 0, unit.reason)) {
+        completedUnitCount += 1;
+        finalizedThroughStepNumber = unit.endStepNumber;
+      }
+    }
+    return {
+      ...session,
+      evaluationUnitVersion: 2,
+      completedUnitCount,
+      ...(finalizedThroughStepNumber === undefined ? {} : { finalizedThroughStepNumber }),
+    };
+  }
+
   private treeFor(
     session: CaptureSession,
     outcome?: "success" | "failure" | "unknown",
   ): TrajectoryTreeRecord["tree"] {
     const taskId = trajectoryTaskId(session, this.privacy);
-    const steps = session.steps.length > 0 ? session.steps : [{
+    const unitSteps = currentUnitSteps(session);
+    const steps = unitSteps.length > 0 ? unitSteps : [{
       id: "step-1",
       stepNumber: 1,
       nodeKind: "observation" as const,
@@ -877,7 +1196,7 @@ export class CaptureEngine {
 
   private captureIdentity(
     session: CaptureSession,
-    finalizationReason?: "session-end" | "orphan-timeout",
+    finalizationReason?: TrajectoryFinalizationReason,
   ): Readonly<Record<string, string>> {
     return {
       agent: session.agent,
@@ -896,10 +1215,22 @@ export class CaptureEngine {
         : { worktree: privateDigest(this.privacy, "worktree", session.project.worktreeDigest) }),
       ...(session.harnessVersion === undefined ? {} : { harnessVersion: session.harnessVersion }),
       ...((session.truncatedStepCount ?? 0) === 0 ? {} : { truncatedSteps: String(session.truncatedStepCount) }),
+      ...((session.recoveredStepCount ?? 0) === 0 ? {} : { recoveredSteps: String(session.recoveredStepCount) }),
       ...((finalizationReason ?? session.finalizationReason) === undefined
         ? {}
         : { finalizationReason: (finalizationReason ?? session.finalizationReason)! }),
       ...(session.comparisonKey === undefined ? {} : { comparison: session.comparisonKey }),
+      ...((session.steeringIntentionIds?.length ?? 0) === 0
+        ? {}
+        : {
+            steeringIntentions: session.steeringIntentionIds!
+              .map((id) => this.privacy.alias("intention", id))
+              .join(","),
+          }),
+      ...(session.currentUnitStartStepNumber === undefined
+        ? {}
+        : { unitStartStep: String(session.currentUnitStartStepNumber) }),
+      unit: String((session.completedUnitCount ?? 0) + 1),
     };
   }
 
@@ -925,22 +1256,45 @@ export class CaptureEngine {
     await this.spool.enqueue(job);
   }
 
+  private async enqueueTranscript(session: CaptureSession, artifact: VaultArtifact): Promise<void> {
+    if (
+      session.transcriptPath === undefined ||
+      (session.source !== "claude-code" && session.source !== "codex")
+    ) return;
+    let path = session.transcriptPath;
+    let ownedSnapshot = false;
+    try {
+      path = await this.transcriptSnapshots.store(session.source, session.transcriptPath);
+      ownedSnapshot = true;
+    } catch (error) {
+      const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+      const changing = error instanceof Error && error.message.includes("changed while");
+      if (!missing && !changing) throw error;
+    }
+    await this.spool.enqueue({
+      version: 1,
+      kind: "transcript",
+      id: `capture-${artifact.eventTime.toString().padStart(13, "0")}-950-transcript-${artifact.id.slice(0, 12)}`,
+      createdAt: artifact.receivedAt,
+      notBefore: new Date(artifact.eventTime + (ownedSnapshot ? 0 : 2_000)).toISOString(),
+      deadlineAt: new Date(artifact.eventTime + (ownedSnapshot ? 7 * 24 * 60 * 60_000 : 30 * 60_000)).toISOString(),
+      source: session.source,
+      path,
+      ...(ownedSnapshot ? { ownedSnapshot: true as const } : {}),
+    });
+  }
+
   private async enqueueTrajectory(
     session: CaptureSession,
     artifact: VaultArtifact,
     index: number,
-    finalizationReason?: "session-end" | "orphan-timeout",
-  ): Promise<void> {
+    finalizationReason?: TrajectoryFinalizationReason,
+  ): Promise<boolean> {
+    const steps = currentUnitSteps(session);
+    if (steps.length === 0) return false;
     const outcome = session.explicitOutcome ?? session.lastVerification ?? "unknown";
     const tree = this.treeFor(session, outcome);
     const taskId = tree.taskId;
-    const steps = session.steps.length > 0 ? session.steps : [{
-      id: "step-1",
-      stepNumber: 1,
-      nodeKind: "observation" as const,
-      role: "decision" as const,
-      content: "Coding-agent session observed",
-    }];
     const finalStepId = `step-${steps.length + 1}`;
     const allSteps: TrajectoryInput["steps"] = [
       ...steps.map((step) => traceStep(step, this.privacy)),
@@ -948,7 +1302,9 @@ export class CaptureEngine {
         id: finalStepId,
         stepNumber: steps.length + 1,
         role: "model_output",
-        content: outcome === "unknown" ? "Session ended without a verified outcome" : `Session outcome: ${outcome}`,
+        content: outcome === "unknown"
+          ? `${finalizationReason === "stop" || finalizationReason === "prompt-boundary" ? "Turn" : "Session"} ended without a verified outcome`
+          : `Evaluation outcome: ${outcome}`,
         artifactId: artifact.id,
         ...(session.currentTurnId === undefined ? {} : { turnId: this.privacy.alias("turn", session.currentTurnId) }),
       },
@@ -961,7 +1317,7 @@ export class CaptureEngine {
       }]),
     );
     const input: TrajectoryInput = {
-      id: `trajectory:${session.source}:${this.privacy.alias("session", session.sessionId)}`,
+      id: `trajectory:${session.source}:${this.privacy.alias("session", session.sessionId)}:unit-${(session.completedUnitCount ?? 0) + 1}`,
       taskId,
       model: {
         id: session.model ?? session.agent,
@@ -984,6 +1340,7 @@ export class CaptureEngine {
       captureIdentity,
     };
     await this.spool.enqueue(job);
+    return true;
   }
 
   private async heartbeatInternal(nowMs: number): Promise<void> {
@@ -1022,7 +1379,7 @@ export class CaptureEngine {
       eventTime,
       path: "",
     };
-    let session = {
+    let session: CaptureSession = {
       ...withoutVerifiedOutcome(sessionInput),
       active: false,
       finalized: true,
@@ -1038,19 +1395,10 @@ export class CaptureEngine {
       "offline",
       `Capture finalized after ${this.config.orphanAfterMs}ms without a hook`,
     ));
-    await this.enqueueTrajectory(session, artifact, index, "orphan-timeout");
-    if (session.transcriptPath !== undefined && (session.source === "claude-code" || session.source === "codex")) {
-      await this.spool.enqueue({
-        version: 1,
-        kind: "transcript",
-        id: `capture-${artifact.eventTime.toString().padStart(13, "0")}-950-transcript-${artifact.id.slice(0, 12)}`,
-        createdAt: receivedAt,
-        notBefore: new Date(eventTime + 2_000).toISOString(),
-        deadlineAt: new Date(eventTime + 30 * 60_000).toISOString(),
-        source: session.source,
-        path: session.transcriptPath,
-      });
+    if (await this.enqueueTrajectory(session, artifact, index, "orphan-timeout")) {
+      session = completeCurrentUnit(session);
     }
+    await this.enqueueTranscript(session, artifact);
     this.state = { ...this.state, sessions: { ...this.state.sessions, [key]: session } };
   }
 }

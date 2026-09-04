@@ -64,11 +64,12 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
     return { ...snapshot, memories, transcriptProjects, transcriptRuns };
   }
   if (page === "memory") {
-    const [memories, memoryCandidates] = await Promise.all([
+    const [memories, memoryCandidates, events] = await Promise.all([
       client.recallMemories({ scope: { kind: "all" }, limit: 100 }),
       client.listMemoryCandidates({ status: "proposed", limit: 1_000 }),
+      client.listEvents({ kinds: ["memory.feedback-recorded"], limit: 5_000 }),
     ]);
-    return { ...snapshot, memories, memoryCandidates };
+    return { ...snapshot, memories, memoryCandidates, events };
   }
   if (page === "history") {
     const [transcriptProjects, transcriptRuns] = await Promise.all([

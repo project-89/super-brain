@@ -296,9 +296,20 @@ async function main(): Promise<void> {
     const config = await readCaptureConfig(configPath(args));
     const result = await new DurableSpool(config.stateRoot).retryFailed(
       args.includes("--confirm"),
-      { rebaseEvents: args.includes("--rebase-events") },
+      {
+        rebaseEvents: args.includes("--rebase-events"),
+        rebaseTrajectories: args.includes("--rebase-trajectories"),
+      },
     );
     process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "retry" : "dry-run", ...result }, null, 2)}\n`);
+    return;
+  }
+  if (command === "resolve-failed") {
+    const reason = option(args, "--reason");
+    if (reason === undefined) throw new TypeError("resolve-failed requires --reason TEXT");
+    const config = await readCaptureConfig(configPath(args));
+    const result = await new DurableSpool(config.stateRoot).resolveFailed(reason, args.includes("--confirm"));
+    process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "resolve" : "dry-run", ...result }, null, 2)}\n`);
     return;
   }
   if (command === "status") {
@@ -315,7 +326,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "help") {
-    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed> [--config PATH]\n");
+    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed|resolve-failed> [--config PATH]\n");
     return;
   }
   throw new Error(`unknown command: ${command}`);

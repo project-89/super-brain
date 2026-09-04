@@ -1,10 +1,12 @@
+import { createHash } from "node:crypto";
+
 import type { FoldEvent } from "@_89/fold";
-import type { MemoryCandidateView } from "@_89/fold-epistemic";
+import type { MemoryCandidateView, PersonalMemory } from "@_89/fold-epistemic";
 import { transcriptRecordsFromEvent, type TranscriptRun } from "@_89/fold-transcript";
 import { trajectoryLogRecordsFromEvent } from "@_89/fold-trajectory";
 import { SuperBrainApiError, SuperBrainClient } from "@_89/super-brain-client";
 
-import { extractLiveMemoryCandidates, extractMemoryCandidates } from "./extractor.js";
+import { deterministicCandidateId, extractLiveMemoryCandidates, extractMemoryCandidates } from "./extractor.js";
 import type { ExtractedCandidate, RunExtraction } from "./types.js";
 import { readVaultMessages } from "./vault.js";
 
@@ -15,6 +17,19 @@ export interface WorkerOptions {
   readonly maxCandidatesPerRun?: number;
   readonly audience?: "personal" | "workspace";
   readonly autoPromote?: boolean;
+  readonly continuousCognition?: boolean;
+  readonly cognitionEveryEvents?: number;
+}
+
+const COGNITION_PROMPTS = [
+  { kind: "synthesis", question: "What reusable principle is supported across otherwise separate projects? Cite only the supplied memories." },
+  { kind: "contradiction", question: "Which accepted memories across projects appear to conflict or require a scope qualification? Cite only the supplied memories." },
+  { kind: "procedure", question: "What repeatable cross-project procedure can be derived from the accepted evidence? Cite only the supplied memories." },
+  { kind: "investigation", question: "What high-value unresolved cross-project investigation is warranted by the accepted evidence? Cite only the supplied memories." },
+] as const;
+
+function digestInteger(value: string): number {
+  return createHash("sha256").update(value).digest().readUInt32BE(0);
 }
 
 export class TranscriptMemoryWorker {
@@ -238,6 +253,54 @@ export class TranscriptMemoryWorker {
     return this.acceptCandidateIds(candidateIds);
   }
 
+  async synthesizeAcrossProjects(event: Pick<FoldEvent, "id" | "kind" | "at">): Promise<{
+    readonly proposed: number;
+    readonly skippedReason?: string;
+  }> {
+    if (this.options.continuousCognition !== true) return { proposed: 0, skippedReason: "continuous cognition disabled" };
+    const every = this.options.cognitionEveryEvents ?? 25;
+    if (!Number.isInteger(every) || every < 1 || every > 100_000) {
+      throw new TypeError("cognitionEveryEvents must be an integer within [1, 100000]");
+    }
+    if (digestInteger(event.id) % every !== 0) return { proposed: 0, skippedReason: "not selected by durable cadence" };
+    const prompt = COGNITION_PROMPTS[digestInteger(`${event.id}:kind`) % COGNITION_PROMPTS.length]!;
+    const result = await this.options.client.askReasoning({ question: prompt.question, limit: 10 });
+    if (result.provider.kind !== "model") return { proposed: 0, skippedReason: "model reasoning provider unavailable" };
+    const memories = (await Promise.all(result.citations.map((memoryId) => this.options.client.memoryById(memoryId))))
+      .filter((memory): memory is PersonalMemory => memory !== undefined);
+    const projectIds = [...new Set(memories.flatMap((memory) => memory.projectIds))].sort();
+    if (projectIds.length < 2) return { proposed: 0, skippedReason: "cross-project evidence unavailable" };
+    const evidence = [...new Map(memories
+      .flatMap((memory) => memory.evidence ?? [])
+      .map((item) => [JSON.stringify([item.eventId, item.projectId ?? "", item.runId ?? "", item.turnId ?? ""]), item]))
+      .values()].slice(0, 20);
+    if (evidence.length === 0) return { proposed: 0, skippedReason: "canonical evidence unavailable" };
+    const summary = result.answer.replace(/\s+/g, " ").trim().slice(0, 500);
+    if (summary.length === 0) return { proposed: 0, skippedReason: "model returned an empty synthesis" };
+    const candidate: ExtractedCandidate = {
+      id: deterministicCandidateId(
+        event.at.t,
+        `continuous-cognition-v1\0${prompt.kind}\0${result.provider.id}\0${result.citations.join("\0")}\0${result.answer}`,
+      ),
+      projectIds,
+      source: "continuous-cognition",
+      summary,
+      content: {
+        kind: prompt.kind,
+        synthesis: result.answer,
+        citations: [...result.citations],
+        provider: result.provider.id,
+        triggerEventId: event.id,
+      },
+      tags: ["continuous-cognition", "cross-project", prompt.kind],
+      evidence,
+      confidence: 0.65,
+      salience: 0.75,
+      extractor: { kind: "model", id: result.provider.id, version: "1" },
+    };
+    return { proposed: await this.propose([candidate]) };
+  }
+
   async archiveRuns(): Promise<{ readonly runs: readonly TranscriptRun[]; readonly eventIds: ReadonlyMap<string, string> }> {
     const [runs, entries] = await Promise.all([
       this.options.client.transcriptRuns(),
@@ -265,7 +328,7 @@ export class TranscriptMemoryWorker {
     await this.options.client.consumeEvents({
       consumerId: options.consumerId,
       replay: options.replay ?? "tail",
-      kinds: ["transcript.run-imported", "terminal.observation", "trajectory.recorded"],
+      kinds: ["transcript.run-imported", "terminal.observation", "trajectory.recorded", "memory.recorded", "memory.revised"],
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       onEvent: async ({ entry }) => {
         if (entry.event.kind === "transcript.run-imported") {
@@ -275,6 +338,9 @@ export class TranscriptMemoryWorker {
           await this.processLiveEvent(entry.event);
         } else if (entry.event.kind === "trajectory.recorded") {
           await this.promoteSuccessfulTrajectoryEvidence(entry.event);
+        }
+        if (["trajectory.recorded", "memory.recorded", "memory.revised"].includes(entry.event.kind)) {
+          await this.synthesizeAcrossProjects(entry.event);
         }
       },
     });

@@ -1,5 +1,6 @@
 import type { JsonValue } from "@_89/fold";
 import type { SteeringSnapshot } from "@_89/fold-sdk";
+import { z } from "zod";
 
 export type ReasoningProviderKind = "extractive" | "model";
 
@@ -61,6 +62,86 @@ export class LocalEvidenceReasoner implements ReasoningProvider {
       ].join(" "),
       citations: evidence.map(({ memoryId }) => memoryId),
     };
+  }
+}
+
+export interface HttpModelReasonerOptions {
+  readonly url: string;
+  readonly model: string;
+  readonly token?: string;
+  readonly timeoutMs?: number;
+  readonly maxEvidence?: number;
+  readonly maxInputCharacters?: number;
+  readonly fetch?: typeof fetch;
+}
+
+export class HttpModelReasoner implements ReasoningProvider {
+  readonly descriptor: ReasoningProviderDescriptor;
+  private readonly url: string;
+  private readonly model: string;
+  private readonly token: string | undefined;
+  private readonly timeoutMs: number;
+  private readonly maxEvidence: number;
+  private readonly maxInputCharacters: number;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(options: HttpModelReasonerOptions) {
+    const url = new URL(options.url);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new TypeError("reasoning provider URL must use HTTP or HTTPS");
+    }
+    this.url = url.toString();
+    this.model = options.model.trim();
+    if (this.model.length === 0) throw new TypeError("reasoning provider model is required");
+    this.token = options.token;
+    this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.maxEvidence = options.maxEvidence ?? 10;
+    this.maxInputCharacters = options.maxInputCharacters ?? 50_000;
+    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 100 || this.timeoutMs > 300_000) {
+      throw new TypeError("reasoning provider timeout must be an integer within [100, 300000]");
+    }
+    if (!Number.isInteger(this.maxEvidence) || this.maxEvidence < 1 || this.maxEvidence > 100) {
+      throw new TypeError("reasoning provider evidence limit must be an integer within [1, 100]");
+    }
+    if (!Number.isInteger(this.maxInputCharacters) || this.maxInputCharacters < 1_000 || this.maxInputCharacters > 1_000_000) {
+      throw new TypeError("reasoning provider input budget must be an integer within [1000, 1000000]");
+    }
+    this.fetchImpl = options.fetch ?? fetch;
+    this.descriptor = { id: `http-model:${this.model}`, kind: "model" };
+  }
+
+  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+    const evidence: ReasoningEvidence[] = [];
+    let usedCharacters = request.question.length;
+    for (const candidate of request.evidence.slice(0, this.maxEvidence)) {
+      const characters = candidate.summary.length + JSON.stringify(candidate.content).length +
+        candidate.tags.reduce((total, tag) => total + tag.length, 0);
+      if (usedCharacters + characters > this.maxInputCharacters) break;
+      evidence.push(candidate);
+      usedCharacters += characters;
+    }
+    const headers = new Headers({ "content-type": "application/json" });
+    if (this.token !== undefined) headers.set("authorization", `Bearer ${this.token}`);
+    const response = await this.fetchImpl(this.url, {
+      method: "POST",
+      headers,
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({
+        model: this.model,
+        question: request.question,
+        evidence,
+        ...(request.steering === undefined ? {} : { steering: request.steering }),
+        constraints: {
+          citeOnlyMemoryIds: evidence.map(({ memoryId }) => memoryId),
+          maxAnswerCharacters: 20_000,
+        },
+      }),
+    });
+    if (!response.ok) throw new Error(`reasoning provider failed with HTTP ${response.status}`);
+    return z.object({
+      answer: z.string(),
+      citations: z.array(z.string()),
+    }).strict().parse(await response.json());
   }
 }
 

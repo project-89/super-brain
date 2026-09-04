@@ -259,10 +259,12 @@ operational features.
    metadata through authenticated APIs.
 9. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
+10. Hosted Brain uses Clerk sign-in/sign-out, active organization switching,
+    server-derived workspace discovery, and in-memory token refresh.
 
-Production semantic embeddings/model reasoning, general graph layout, event authoring,
-identity-provider login, and deployment-specific secret delivery remain
-follow-on product work.
+Production semantic embeddings/model reasoning, general graph layout, event
+authoring, and deployment-specific infrastructure remain follow-on product
+work.
 
 ## Narrative Parity Status
 

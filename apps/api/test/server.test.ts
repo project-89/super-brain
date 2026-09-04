@@ -235,6 +235,168 @@ describe("Fold HTTP API", () => {
     }
   });
 
+  it("discovers only the authenticated Clerk organization's workspaces", async () => {
+    const authenticator = {
+      async authenticate(token: string) {
+        return token === "clerk-token" ? {
+          credentialId: "clerk:session:session-a",
+          principalId: "principal-a",
+          author: { kind: "human" as const, id: "principal-a" },
+          identityProvider: "clerk" as const,
+          organizationId: "org-a",
+          organizationRoleLimit: "member" as const,
+        } : undefined;
+      },
+    };
+    const memberships: MembershipResolver = {
+      async resolveAccess(subject, organizationId, workspaceId) {
+        if (subject.organizationId !== organizationId || workspaceId !== "workspace-a") return undefined;
+        return {
+          principalId: subject.principalId,
+          organizationId,
+          organizationRole: "member",
+          workspaceId,
+          workspaceRole: "member",
+          spaceRoles: {},
+        };
+      },
+      async resolveLegacyAccess() { return undefined; },
+    };
+    const administration = {
+      async listPrincipalMemberships(organizationId: string, principalId: string) {
+        expect([organizationId, principalId]).toEqual(["org-a", "principal-a"]);
+        return [{
+          organizationId,
+          organizationRole: "owner" as const,
+          workspaceId: "workspace-a",
+          workspaceRole: "owner" as const,
+        }];
+      },
+      async listRepositoryEnrollments() { return []; },
+      async enrollRepository() { throw new Error("not used"); },
+      async recordPlatformAccess() { throw new Error("not used"); },
+      async listPlatformAccessAudit() { return []; },
+    };
+    const api = await startApi({ authenticator, memberships, tenantAdministration: administration });
+    try {
+      expect(await apiRequest(api.baseUrl, "/v1/session", { token: "clerk-token" })).toMatchObject({
+        status: 200,
+        body: {
+          principalId: "principal-a",
+          identityProvider: "clerk",
+          organizationId: "org-a",
+          memberships: [{
+            organizationRole: "member",
+            workspaceId: "workspace-a",
+            workspaceRole: "member",
+          }],
+        },
+      });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("accepts configured identity webhooks without bearer authentication", async () => {
+    const handled: Uint8Array[] = [];
+    const api = await startApi({
+      identityProvisioningWebhook: {
+        async handle(input) {
+          handled.push(input.body);
+          expect(input.headers["svix-id"]).toBe("event-a");
+          return { applied: true };
+        },
+      },
+    });
+    try {
+      const response = await fetch(`${api.baseUrl}/v1/webhooks/clerk`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "svix-id": "event-a" },
+        body: "{}",
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ applied: true });
+      expect(new TextDecoder().decode(handled[0])).toBe("{}");
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("lets organization admins provision and revoke scoped Clerk machine identities", async () => {
+    const directory = new StaticIdentityDirectory({
+      admin: {
+        principalId: "admin-a",
+        capabilities: ["organization:admin"],
+        organizations: { "org-a": { role: "admin", workspaces: { shared: { role: "admin" } } } },
+      },
+    });
+    const provisioning: any[] = [];
+    const administration: TenantAdministration = {
+      async listRepositoryEnrollments() { return []; },
+      async enrollRepository() { throw new Error("not used"); },
+      async recordPlatformAccess() { throw new Error("not used"); },
+      async listPlatformAccessAudit() { return []; },
+      async applyExternalIdentityProvisioningEvent(input) {
+        provisioning.push(input);
+        return true;
+      },
+      async listIdentityProvisioningAudit(organizationId) {
+        return [{
+          eventId: "event-a",
+          organizationId,
+          provider: "clerk",
+          eventType: "credential.upsert",
+          externalOrganizationId: `internal:${organizationId}`,
+          externalPrincipalId: "api-key:ak_capture",
+          appliedAt: "2026-09-04T00:00:00.000Z",
+        }];
+      },
+    };
+    const api = await startApi({ authenticator: directory, memberships: directory, tenantAdministration: administration });
+    const base = "/v1/organizations/org-a/workspaces/shared/identity-bindings";
+    try {
+      const created = await apiRequest(api.baseUrl, base, {
+        method: "POST",
+        token: "admin",
+        body: {
+          externalPrincipalId: "api-key:ak_capture",
+          workspaceRole: "member",
+        },
+      });
+      expect(created).toMatchObject({
+        status: 201,
+        body: { applied: true, principalId: "clerk:api-key:ak_capture" },
+      });
+      expect(provisioning[0]).toMatchObject({
+        provider: "clerk",
+        type: "credential.upsert",
+        organizationId: "org-a",
+        workspaceId: "shared",
+        organizationRole: "member",
+        workspaceRole: "member",
+      });
+
+      expect(await apiRequest(api.baseUrl, `${base}/api-key%3Aak_capture`, {
+        method: "DELETE",
+        token: "admin",
+      })).toMatchObject({ status: 200, body: { applied: true } });
+      expect(provisioning[1]).toMatchObject({
+        type: "credential.delete",
+        externalPrincipalId: "api-key:ak_capture",
+        organizationId: "org-a",
+        workspaceId: "shared",
+      });
+      expect(await apiRequest(api.baseUrl, "/v1/organizations/org-a/workspaces/shared/identity-audit-log", {
+        token: "admin",
+      })).toMatchObject({
+        status: 200,
+        body: { records: [{ eventId: "event-a", organizationId: "org-a" }] },
+      });
+    } finally {
+      await api.close();
+    }
+  });
+
   it("enforces credential capabilities independently from workspace role", async () => {
     const directory = new StaticIdentityDirectory({
       "read-token": {

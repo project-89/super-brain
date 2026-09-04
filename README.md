@@ -68,6 +68,9 @@ tests.
   durable consumer offsets, and projection checkpoints when
   `FOLD_DATABASE_URL` is configured; the fsynced JSONL store remains the local
   fallback and migration source.
+  Hosted mode verifies Clerk tokens, exposes tenant-safe session discovery,
+  applies signed idempotent organization webhooks, and lets organization admins
+  enroll or revoke scoped machine identities without restarting the API.
   Owner-authorized transcript imports and workspace-readable history queries use
   dedicated routes that cannot be bypassed through generic event append.
   Its runtime adds exact-origin CORS, bounded per-address request limiting,
@@ -77,7 +80,10 @@ tests.
   private personal-memory lifecycle and ranked recall, trajectory import and
   analysis, historical project/run inspection, live agent fleet inspection,
   pull reasoning, human steering, canonical/draft event inspection, and
-  materialized Fold state. It talks only to the local HTTP API.
+  materialized Fold state. It talks only to the authenticated HTTP API.
+  When Clerk is configured it provides sign-in, sign-out, organization
+  switching, server-derived workspace selection, and in-memory token refresh;
+  the manual local connection remains available when Clerk is absent.
 - `@_89/super-brain-importer` streams local Claude Code and Codex JSONL, performs
   metadata-only dry runs, writes explicitly requested redacted artifacts to a
   restrictive local vault, and delivers confirmed canonical bundles through
@@ -87,12 +93,18 @@ tests.
   tool, file, verification, structured-reasoning, decision, trajectory, and
   final transcript-import work before acknowledging a hook. Raw prompt and tool
   bodies stay in its secret-redacted private vault rather than canonical Fold.
+  Append-only step journals remove the old long-session cap, retained encrypted
+  hook evidence repairs historical omissions, and daemon-owned transcript
+  snapshots eliminate mutable source-path delivery races.
 - `@_89/super-brain-memory-worker` reads only the redacted transcript vault,
   proposes deterministic project-aware memories, consolidates repeated evidence,
   and consumes transcript, live-checkpoint, decision, and trajectory events from
   a durable cursor. A narrow opt-in policy automatically promotes high-confidence
   structured observations, explicit human decisions, and reasoning checkpoints
   cited by a verified successful trajectory; ambiguous proposals remain reviewable.
+  With a real model provider it also periodically proposes cited cross-project
+  synthesis, contradictions, procedures, and investigations without silently
+  promoting model output.
 - `@_89/super-brain-mcp-server` gives any MCP-compatible harness authenticated
   memory search, cited context assembly, structured checkpoint and proposal
   capture, and immutable helpful/unhelpful/superseded feedback tools.
@@ -130,9 +142,15 @@ Historical transcript identity, privacy, import, and query behavior is recorded
 in [`docs/TRANSCRIPT_INGESTION.md`](./docs/TRANSCRIPT_INGESTION.md).
 The live architecture, memory lifecycle, harness contract, and PostgreSQL
 operations are documented in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
-The implemented critical-path ledger and remaining deployment choices are in
-[`docs/ROADMAP.md`](./docs/ROADMAP.md).
+The implementation ledger and remaining deployment choices are in
+[`docs/ROADMAP.md`](./docs/ROADMAP.md), with acceptance evidence tracked in
+[`docs/EXECUTION_BACKLOG.md`](./docs/EXECUTION_BACKLOG.md).
 
-The repository remains private. New Fold packages are `UNLICENSED` until package
-ownership and release terms are settled; the imported confidence kernel retains
-its MIT license.
+The repository is public at
+[`project-89/super-brain`](https://github.com/project-89/super-brain). New Fold
+packages remain `UNLICENSED` until package ownership and release terms are
+settled; public visibility does not grant a reuse license. The imported
+confidence kernel retains its MIT license.
+
+Security reports and contribution requirements are documented in
+[`SECURITY.md`](./SECURITY.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md).

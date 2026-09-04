@@ -14,7 +14,7 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { FoldApiClient } from "./api";
 import { initialConnection, saveConnection } from "./connection";
@@ -58,11 +58,18 @@ function initialTheme(): Theme {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-export default function App() {
+export interface AppProps {
+  readonly connectionOverride?: ConnectionSettings;
+  readonly accountControls?: ReactNode;
+}
+
+export default function App({ connectionOverride, accountControls }: AppProps = {}) {
   const [connection, setConnection] = useState<ConnectionSettings>(initialConnection);
   const [page, setPage] = useState<Page>(pageFromHash);
   const [theme, setTheme] = useState<Theme>(initialTheme);
-  const [settingsOpen, setSettingsOpen] = useState(!connection.workspaceId || !connection.token);
+  const [settingsOpen, setSettingsOpen] = useState(
+    connectionOverride === undefined && (!connection.workspaceId || !connection.token),
+  );
   const [memoryDialog, setMemoryDialog] = useState<{ readonly open: boolean; readonly memory?: PersonalMemory }>({ open: false });
   const [forgetMemory, setForgetMemory] = useState<PersonalMemory>();
   const [forgetReason, setForgetReason] = useState("no longer needed");
@@ -70,7 +77,8 @@ export default function App() {
   const [mutationPending, setMutationPending] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [mutationError, setMutationError] = useState<string>();
-  const { snapshot, loading, refreshing, error, refresh } = useSnapshot(connection, page);
+  const effectiveConnection = connectionOverride ?? connection;
+  const { snapshot, loading, refreshing, error, refresh } = useSnapshot(effectiveConnection, page);
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
@@ -89,7 +97,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const api = useMemo(() => new FoldApiClient(connection), [connection]);
+  const api = useMemo(() => new FoldApiClient(effectiveConnection), [effectiveConnection]);
 
   const navigate = (next: Page) => {
     window.location.hash = next;
@@ -157,6 +165,7 @@ export default function App() {
         <MemoryPage
           memories={snapshot.memories}
           candidates={snapshot.memoryCandidates}
+          feedbackEvents={snapshot.events}
           onRank={(options) => api.rankMemories(options)}
           onCreate={() => setMemoryDialog({ open: true })}
           onEdit={(memory) => setMemoryDialog({ open: true, memory })}
@@ -230,7 +239,7 @@ export default function App() {
     return <OverviewPage snapshot={snapshot} navigate={navigate} />;
   };
 
-  const disconnected = !connection.organizationId || !connection.workspaceId || !connection.token;
+  const disconnected = !effectiveConnection.organizationId || !effectiveConnection.workspaceId || !effectiveConnection.token;
   const connectionLabel = disconnected ? "Not connected" : error ? "Connection error" : "Connected";
 
   return (
@@ -243,7 +252,7 @@ export default function App() {
         <div className="topbar__context">
           <div className="workspace-identity">
             <span className={`connection-dot${error || disconnected ? " connection-dot--error" : ""}`} />
-            <span><strong>{connection.workspaceId || "No workspace"}</strong><small>{connection.organizationId || connectionLabel}</small></span>
+            <span><strong>{effectiveConnection.workspaceId || "No workspace"}</strong><small>{effectiveConnection.organizationId || connectionLabel}</small></span>
           </div>
           <div className="topbar__actions">
             <button className={`icon-button${refreshing ? " is-spinning" : ""}`} type="button" onClick={() => void refresh(true)} disabled={refreshing || disconnected} aria-label="Refresh workspace" title="Refresh">
@@ -252,9 +261,12 @@ export default function App() {
             <button className="icon-button" type="button" onClick={() => setTheme((current) => current === "light" ? "dark" : "light")} aria-label={`Use ${theme === "light" ? "dark" : "light"} theme`} title={`Use ${theme === "light" ? "dark" : "light"} theme`}>
               {theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
             </button>
-            <button className="icon-button" type="button" onClick={() => setSettingsOpen(true)} aria-label="Connection settings" title="Connection settings">
-              <Settings aria-hidden="true" />
-            </button>
+            {connectionOverride === undefined && (
+              <button className="icon-button" type="button" onClick={() => setSettingsOpen(true)} aria-label="Connection settings" title="Connection settings">
+                <Settings aria-hidden="true" />
+              </button>
+            )}
+            {accountControls}
           </div>
         </div>
       </header>
@@ -279,7 +291,7 @@ export default function App() {
             <span className="eyebrow">{error.code}</span>
             <h1>Workspace unavailable</h1>
             <p>{error.message}</p>
-            <div><button className="button button--primary" type="button" onClick={() => void refresh()}><RefreshCw aria-hidden="true" />Retry</button><button className="button button--secondary" type="button" onClick={() => setSettingsOpen(true)}><Settings aria-hidden="true" />Connection</button></div>
+            <div><button className="button button--primary" type="button" onClick={() => void refresh()}><RefreshCw aria-hidden="true" />Retry</button>{connectionOverride === undefined && <button className="button button--secondary" type="button" onClick={() => setSettingsOpen(true)}><Settings aria-hidden="true" />Connection</button>}</div>
           </section>
         ) : renderPage()}
         {error !== undefined && snapshot !== undefined && (
@@ -295,7 +307,7 @@ export default function App() {
         ))}
       </nav>
 
-      <ConnectionDialog connection={connection} open={settingsOpen} required={disconnected} onClose={() => setSettingsOpen(false)} onSave={saveSettings} />
+      {connectionOverride === undefined && <ConnectionDialog connection={connection} open={settingsOpen} required={disconnected} onClose={() => setSettingsOpen(false)} onSave={saveSettings} />}
       <MemoryDialog memory={memoryDialog.memory} open={memoryDialog.open} pending={mutationPending} onClose={() => setMemoryDialog({ open: false })} onSave={saveMemory} />
       <TrajectoryImportDialog open={trajectoryImportOpen} pending={mutationPending} onClose={() => setTrajectoryImportOpen(false)} onImport={importTrajectories} />
       <Modal open={forgetMemory !== undefined} title="Forget memory" onClose={() => setForgetMemory(undefined)}>

@@ -46,11 +46,18 @@ operator credentials. Workspace and space roles still apply after capability
 checks.
 
 Hosted deployments can enable Clerk with `CLERK_SECRET_KEY`,
-`CLERK_PUBLISHABLE_KEY`, `FOLD_CLERK_AUTHORIZED_PARTIES`, and
-`FOLD_CLERK_BINDINGS_JSON`. Clerk requires PostgreSQL. Static and Clerk
-authentication may run together during migration. The API accepts Clerk
-session tokens, organization API keys, and M2M tokens; OAuth access tokens are
-not accepted.
+`CLERK_PUBLISHABLE_KEY`, `FOLD_CLERK_AUTHORIZED_PARTIES`,
+`CLERK_WEBHOOK_SIGNING_SECRET`, and PostgreSQL. Static and Clerk authentication
+may run together during migration. The API accepts Clerk session tokens,
+organization API keys, and M2M tokens; OAuth access tokens are not accepted.
+
+`POST /v1/webhooks/clerk` verifies Clerk's Standard Webhooks signature and
+idempotently provisions organization and user-membership changes. New Clerk
+organizations receive `clerk:<organization id>` internally and a `default`
+workspace unless `FOLD_CLERK_DEFAULT_WORKSPACE` is set. Webhook IDs are durably
+audited and exact retries are no-ops. Organization deletion immediately removes
+the external binding and provider-owned memberships while retaining tenant
+records for recovery and retention policy.
 
 Clerk identity is resolved through explicit bindings rather than using Clerk
 IDs as internal tenant keys. A minimal binding document is:
@@ -76,9 +83,11 @@ IDs as internal tenant keys. A minimal binding document is:
 }
 ```
 
-All referenced internal organizations and principals must be bound. Replacing
-the document at restart replaces Clerk-owned bindings and memberships, so a
-removed identity loses access rather than retaining a stale database row.
+`FOLD_CLERK_BINDINGS_JSON` remains available as a mutually exclusive bootstrap
+mode for local migration. All referenced internal organizations and principals
+must be bound. Replacing that document at restart replaces Clerk-owned bindings
+and memberships, so a removed identity loses access rather than retaining a
+stale database row.
 Session tokens must carry an active Clerk organization; its role caps the
 stored organization role. API keys are bound as `api-key:<Clerk key ID>` and
 M2M identities as `machine:<Clerk machine ID>`. Their Clerk scopes must match
@@ -118,6 +127,10 @@ Optional environment:
 - `FOLD_FLEET_ORPHAN_AFTER_MS`, default `86400000` (24 hours). Session
   freshness still becomes unknown after its sensor heartbeat window, while a
   recovery action waits for this longer reconciliation threshold.
+- `CLERK_WEBHOOK_SIGNING_SECRET`, enables signed dynamic organization and user
+  provisioning and cannot be combined with `FOLD_CLERK_BINDINGS_JSON`;
+- `FOLD_CLERK_DEFAULT_WORKSPACE`, default `default`, names the workspace granted
+  by Clerk organization membership events.
 
 Build and run with:
 
@@ -136,8 +149,8 @@ pnpm --filter @_89/super-brain-api start -- install-service
 
 ## Routes
 
-`GET /health` is public. All other routes require
-`Authorization: Bearer <token>`.
+`GET /health` is public. `POST /v1/webhooks/clerk` uses a verified webhook
+signature. All other routes require `Authorization: Bearer <token>`.
 
 The canonical route prefix is
 `/v1/organizations/:organization/workspaces/:workspace`. In the table below,
@@ -148,6 +161,8 @@ organization.
 
 | Method | Route | Behavior |
 | --- | --- | --- |
+| `GET` | `/v1/session` | Active Clerk organization and current workspace memberships |
+| `POST` | `/v1/webhooks/clerk` | Signed, idempotent Clerk organization/user provisioning |
 | `GET`, `POST` | `/:tenant/events` | Access-filtered records or authenticated append |
 | `GET` | `/:tenant/event-stream` | Resumable filtered SSE after an exclusive cursor |
 | `GET`, `POST` | `/:tenant/consumers/:consumerId` | Principal-scoped durable consumer cursor |
@@ -170,6 +185,8 @@ organization.
 | `POST` | `/:tenant/transcript-imports` | Owner/admin idempotent metadata import |
 | `GET`, `POST` | `/:tenant/repository-enrollments` | Organization-admin repository enrollment |
 | `GET` | `/:tenant/audit-log` | Organization-visible platform access audit |
+| `POST`, `DELETE` | `/:tenant/identity-bindings[/:externalId]` | Organization-admin machine identity provisioning or revocation |
+| `GET` | `/:tenant/identity-audit-log` | Organization-visible identity provisioning audit |
 | `GET` | `/:tenant/steering` | Replayed per-actor candidates and intentions |
 | `GET`, `POST` | `/:tenant/steering/:actorId` | Actor state or owner/admin steering action |
 | `POST` | `/:tenant/reasoning/ask` | Noncanonical provider answer over authorized evidence |
@@ -247,8 +264,7 @@ only after enforcing a distributed limit upstream. HTTP request, header,
 keep-alive, per-socket request-count, and shutdown-drain bounds prevent indefinite
 connections.
 
-TLS termination, Clerk tenant-onboarding automation, authenticated external
-sensor provisioning, recovery actuation, embedding/model
+TLS termination, recovery actuation, embedding/model
 sidecars, multi-host failover, and distributed proxy rate limits remain
 deployment concerns rather than implicit behavior in this local service.
 

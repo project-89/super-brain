@@ -4,11 +4,13 @@ import {
   ClerkAuthenticator,
   ClerkBackendTokenVerifier,
   ClerkBindingConfigurationError,
+  ClerkProvisioningWebhook,
   parseClerkBindingConfiguration,
   type ClerkTokenVerifier,
   type ClerkVerifiedIdentity,
   type ExternalIdentityResolver,
 } from "../src/index.js";
+import type { ExternalIdentityProvisioningEvent } from "@_89/fold-postgres";
 
 function backendClient(auth: unknown) {
   return {
@@ -61,6 +63,48 @@ describe("Clerk authentication", () => {
       externalOrganizationId: "org_external",
       organizationRole: "org:admin",
     });
+  });
+
+  it("maps signed organization membership webhooks to deterministic tenant provisioning", async () => {
+    const events: ExternalIdentityProvisioningEvent[] = [];
+    const webhook = new ClerkProvisioningWebhook({
+      async applyExternalIdentityProvisioningEvent(event) {
+        events.push(event);
+        return true;
+      },
+    }, {
+      signingSecret: "whsec_test",
+      defaultWorkspaceId: "primary",
+      async verifier() {
+        return {
+          type: "organizationMembership.created",
+          data: {
+            role: "org:admin",
+            organization: { id: "org_external", name: "Acme" },
+            public_user_data: { user_id: "user_external" },
+          },
+        } as never;
+      },
+    });
+
+    await expect(webhook.handle({
+      url: "https://brain.example/v1/webhooks/clerk",
+      headers: { "svix-id": "event-a" },
+      body: new TextEncoder().encode("{}"),
+    })).resolves.toEqual({ applied: true });
+    expect(events).toEqual([{
+      eventId: "event-a",
+      provider: "clerk",
+      type: "membership.upsert",
+      externalOrganizationId: "org_external",
+      organizationId: "clerk:org_external",
+      organizationName: "Acme",
+      externalPrincipalId: "user:user_external",
+      principalId: "clerk:user:user_external",
+      workspaceId: "primary",
+      organizationRole: "admin",
+      workspaceRole: "admin",
+    }]);
   });
 
   it("normalizes scoped API keys and M2M tokens without trusting their subject as a principal", async () => {

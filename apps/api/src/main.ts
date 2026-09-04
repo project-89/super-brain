@@ -7,12 +7,13 @@ import { CompositeAuthenticator, PostgresMembershipResolver, StaticIdentityDirec
 import {
   ClerkAuthenticator,
   ClerkBackendTokenVerifier,
+  ClerkProvisioningWebhook,
   parseClerkBindingConfiguration,
 } from "./clerk.js";
 import { JournalSdkRegistry, PostgresSdkRegistry } from "./registry.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
-import { LocalEvidenceReasoner } from "./reasoning.js";
+import { HttpModelReasoner, LocalEvidenceReasoner } from "./reasoning.js";
 import { createApiServer } from "./server.js";
 import { HttpMemoryEmbeddingProvider } from "./embeddings.js";
 import { installApiLaunchAgent } from "./install.js";
@@ -95,6 +96,7 @@ async function main(): Promise<void> {
     process.env.CLERK_MACHINE_SECRET_KEY,
     process.env.FOLD_CLERK_AUTHORIZED_PARTIES,
     process.env.FOLD_CLERK_BINDINGS_JSON,
+    process.env.CLERK_WEBHOOK_SIGNING_SECRET,
   ].some((value) => value !== undefined);
   if (directory === undefined && !clerkEnabled) {
     throw new TypeError("FOLD_API_CREDENTIALS_JSON or CLERK_SECRET_KEY is required");
@@ -116,12 +118,27 @@ async function main(): Promise<void> {
     : new PostgresTenantAdministration({ connectionString: databaseUrl, requireRlsEnforcement });
   let clerkConfiguration: ReturnType<typeof parseClerkBindingConfiguration> | undefined;
   let clerkAuthenticator: ClerkAuthenticator | undefined;
+  let clerkProvisioningWebhook: ClerkProvisioningWebhook | undefined;
   if (clerkEnabled) {
     if (tenantAdministration === undefined) throw new TypeError("Clerk tenant administration is unavailable");
-    clerkConfiguration = parseClerkBindingConfiguration(requiredEnvironment(
-      "FOLD_CLERK_BINDINGS_JSON",
-      process.env.FOLD_CLERK_BINDINGS_JSON,
-    ));
+    const webhookSigningSecret = process.env.CLERK_WEBHOOK_SIGNING_SECRET;
+    const bindingConfiguration = process.env.FOLD_CLERK_BINDINGS_JSON;
+    if (webhookSigningSecret !== undefined && bindingConfiguration !== undefined) {
+      throw new TypeError("CLERK_WEBHOOK_SIGNING_SECRET and FOLD_CLERK_BINDINGS_JSON are mutually exclusive");
+    }
+    if (webhookSigningSecret === undefined) {
+      clerkConfiguration = parseClerkBindingConfiguration(requiredEnvironment(
+        "FOLD_CLERK_BINDINGS_JSON",
+        bindingConfiguration,
+      ));
+    } else {
+      clerkProvisioningWebhook = new ClerkProvisioningWebhook(tenantAdministration, {
+        signingSecret: requiredEnvironment("CLERK_WEBHOOK_SIGNING_SECRET", webhookSigningSecret),
+        ...(process.env.FOLD_CLERK_DEFAULT_WORKSPACE === undefined
+          ? {}
+          : { defaultWorkspaceId: requiredEnvironment("FOLD_CLERK_DEFAULT_WORKSPACE", process.env.FOLD_CLERK_DEFAULT_WORKSPACE) }),
+      });
+    }
     clerkAuthenticator = new ClerkAuthenticator(
       new ClerkBackendTokenVerifier({
         secretKey: requiredEnvironment("CLERK_SECRET_KEY", process.env.CLERK_SECRET_KEY),
@@ -182,6 +199,29 @@ async function main(): Promise<void> {
   );
   if (fleetOrphanAfterMs === 0) throw new TypeError("FOLD_FLEET_ORPHAN_AFTER_MS must be greater than zero");
   const corsOrigins = corsOriginsFromEnvironment(process.env.FOLD_API_CORS_ORIGINS);
+  const reasoningUrl = process.env.FOLD_REASONING_URL;
+  const reasoner = reasoningUrl === undefined
+    ? new LocalEvidenceReasoner()
+    : new HttpModelReasoner({
+        url: reasoningUrl,
+        model: requiredEnvironment("FOLD_REASONING_MODEL", process.env.FOLD_REASONING_MODEL),
+        ...(process.env.FOLD_REASONING_TOKEN === undefined ? {} : { token: process.env.FOLD_REASONING_TOKEN }),
+        timeoutMs: nonNegativeIntegerFromEnvironment(
+          "FOLD_REASONING_TIMEOUT_MS",
+          process.env.FOLD_REASONING_TIMEOUT_MS,
+          30_000,
+        ),
+        maxEvidence: nonNegativeIntegerFromEnvironment(
+          "FOLD_REASONING_MAX_EVIDENCE",
+          process.env.FOLD_REASONING_MAX_EVIDENCE,
+          10,
+        ),
+        maxInputCharacters: nonNegativeIntegerFromEnvironment(
+          "FOLD_REASONING_MAX_INPUT_CHARACTERS",
+          process.env.FOLD_REASONING_MAX_INPUT_CHARACTERS,
+          50_000,
+        ),
+      });
   let server: ReturnType<typeof createApiServer>;
   try {
     await registry.open();
@@ -203,8 +243,9 @@ async function main(): Promise<void> {
         : new PostgresMembershipResolver(tenantAdministration),
       sdks: registry,
       memoryRanker: vectorRanker ?? new LocalLexicalMemoryRanker(),
-      reasoner: new LocalEvidenceReasoner(),
+      reasoner,
       ...(tenantAdministration === undefined ? {} : { tenantAdministration }),
+      ...(clerkProvisioningWebhook === undefined ? {} : { identityProvisioningWebhook: clerkProvisioningWebhook }),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),
       ...(corsOrigins === undefined ? {} : { corsOrigins }),
       fleetOrphanAfterMs,

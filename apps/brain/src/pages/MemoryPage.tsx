@@ -3,13 +3,43 @@ import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
 import { formatDateTime, memoryContent, uniqueSorted } from "../format";
-import type { MemoryCandidate, MemoryCandidateView, MemoryScope, PersonalMemory, RankedMemoryRecallResult, RecalledMemory } from "../types";
+import type { FoldLogEntry, MemoryCandidate, MemoryCandidateView, MemoryScope, PersonalMemory, RankedMemoryRecallResult, RecalledMemory } from "../types";
 
 type RecallMode = "filter" | "ranked";
+
+interface FeedbackStats {
+  readonly recalled: number;
+  readonly helpful: number;
+  readonly unhelpful: number;
+  readonly superseded: number;
+  readonly latestAt?: number;
+}
+
+function feedbackByMemory(events: readonly FoldLogEntry[]): ReadonlyMap<string, FeedbackStats> {
+  const stats = new Map<string, FeedbackStats>();
+  for (const { event } of events) {
+    if (event.kind !== "memory.feedback-recorded") continue;
+    for (const change of event.changes) {
+      if (change.nodeKind !== "x.fold.memory-feedback" || change.after === null ||
+        typeof change.after !== "object" || Array.isArray(change.after)) continue;
+      const memoryId = typeof change.after.memoryId === "string" ? change.after.memoryId : undefined;
+      const signal = change.after.signal;
+      if (memoryId === undefined || !["recalled", "helpful", "unhelpful", "superseded"].includes(String(signal))) continue;
+      const current = stats.get(memoryId) ?? { recalled: 0, helpful: 0, unhelpful: 0, superseded: 0 };
+      stats.set(memoryId, {
+        ...current,
+        [signal as "recalled" | "helpful" | "unhelpful" | "superseded"]: current[signal as keyof FeedbackStats] as number + 1,
+        latestAt: Math.max(current.latestAt ?? 0, event.at.t),
+      });
+    }
+  }
+  return stats;
+}
 
 export function MemoryPage({
   memories,
   candidates,
+  feedbackEvents,
   onRank,
   onCreate,
   onEdit,
@@ -21,6 +51,7 @@ export function MemoryPage({
 }: {
   readonly memories: readonly RecalledMemory[];
   readonly candidates: readonly MemoryCandidateView[];
+  readonly feedbackEvents: readonly FoldLogEntry[];
   readonly onRank: (options: {
     readonly query: string;
     readonly scope?: MemoryScope;
@@ -48,6 +79,11 @@ export function MemoryPage({
   const [rankingError, setRankingError] = useState<string>();
   const [rankedFingerprint, setRankedFingerprint] = useState<string>();
   const sources = useMemo(() => uniqueSorted(memories.map(({ memory }) => memory.source)), [memories]);
+  const feedback = useMemo(() => feedbackByMemory(feedbackEvents), [feedbackEvents]);
+  const validatedMemories = useMemo(() => memories.filter(({ memory }) => {
+    const item = feedback.get(memory.id);
+    return item !== undefined && item.helpful + item.unhelpful + item.superseded > 0;
+  }).length, [feedback, memories]);
   const fingerprint = JSON.stringify([query.trim(), source, scope, spaceId.trim()]);
   const localFiltered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -127,6 +163,7 @@ export function MemoryPage({
         {scope === "space" && <label className="compact-field compact-field--space"><span>Space</span><input value={spaceId} onChange={(event) => setSpaceId(event.target.value)} /></label>}
         {mode === "ranked" && <button className="icon-button memory-search-button" type="submit" disabled={rankingPending || !query.trim() || (scope === "space" && !spaceId.trim())} aria-label="Run ranked search" title="Run ranked search"><Search aria-hidden="true" /></button>}
         <span className="result-count">{filtered.length} {filtered.length === 1 ? "memory" : "memories"}</span>
+        <span className="ranking-status">{validatedMemories}/{memories.length} validated · {feedbackEvents.length} feedback signals</span>
         {mode === "ranked" && rankedFingerprint === fingerprint && ranked !== undefined && <span className={`ranking-status ranking-status--${ranked.ranking.kind}`}>{ranked.ranking.kind} / {ranked.ranking.id} / {ranked.ranking.corpusSize} scanned</span>}
         {rankingError !== undefined && <span className="filter-error" role="alert">{rankingError}</span>}
       </form>
@@ -135,7 +172,12 @@ export function MemoryPage({
         <div className="master-list" aria-label="Memories">
           {filtered.length === 0 ? (
             <EmptyState title={mode === "ranked" && rankedFingerprint !== fingerprint ? "Run ranked search" : "No matching memories"} />
-          ) : filtered.map(({ memory, score }) => (
+          ) : filtered.map(({ memory, score }) => {
+            const memoryFeedback = feedback.get(memory.id);
+            const validationCount = memoryFeedback === undefined
+              ? 0
+              : memoryFeedback.helpful + memoryFeedback.unhelpful + memoryFeedback.superseded;
+            return (
             <button
               type="button"
               className={`memory-row${memory.id === selectedId ? " memory-row--selected" : ""}`}
@@ -144,9 +186,10 @@ export function MemoryPage({
             >
               <span className="memory-row__top"><strong>{memory.summary || "Untitled memory"}</strong><time>{formatDateTime(memory.updatedAt)}</time></span>
               <span className="memory-row__excerpt">{memoryContent(memory) || "No content"}</span>
-              <span className="memory-row__meta"><span>{memory.source}</span><span>{memory.spaceId ?? "workspace"}</span><span>r{memory.revision}</span>{score !== undefined && <span>{Math.round(score * 100)}%</span>}</span>
+              <span className="memory-row__meta"><span>{memory.source}</span><span>{memory.spaceId ?? "workspace"}</span><span>r{memory.revision}</span><span>{memoryFeedback?.recalled ?? 0} recalls</span><span>{validationCount === 0 ? "unvalidated" : `${validationCount} judgments`}</span>{score !== undefined && <span>{Math.round(score * 100)}%</span>}</span>
             </button>
-          ))}
+            );
+          })}
         </div>
 
         <article className="detail-pane">
@@ -170,6 +213,9 @@ export function MemoryPage({
                 <div><dt>Projects</dt><dd>{selected.projectIds.length > 0 ? selected.projectIds.join(", ") : "All projects"}</dd></div>
                 <div><dt>Created</dt><dd>{formatDateTime(selected.createdAt)}</dd></div>
                 <div><dt>Updated</dt><dd>{formatDateTime(selected.updatedAt)}</dd></div>
+                <div><dt>Recall</dt><dd>{feedback.get(selected.id)?.recalled ?? 0}</dd></div>
+                <div><dt>Validation</dt><dd>{(() => { const item = feedback.get(selected.id); return item === undefined || item.helpful + item.unhelpful + item.superseded === 0 ? "Unvalidated" : `${item.helpful} helpful / ${item.unhelpful} unhelpful / ${item.superseded} superseded`; })()}</dd></div>
+                <div><dt>Last feedback</dt><dd>{feedback.get(selected.id)?.latestAt === undefined ? "Never" : formatDateTime(feedback.get(selected.id)!.latestAt!)}</dd></div>
               </dl>
               {selected.tags.length > 0 && <div className="tag-list" aria-label="Tags">{selected.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
               <div className="memory-content"><pre>{memoryContent(selected) || "No content"}</pre></div>

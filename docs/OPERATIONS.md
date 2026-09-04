@@ -57,11 +57,16 @@ credentials during migration:
 export CLERK_SECRET_KEY=sk_live_replace
 export CLERK_PUBLISHABLE_KEY=pk_live_replace
 export FOLD_CLERK_AUTHORIZED_PARTIES=https://brain.example.com
-export FOLD_CLERK_BINDINGS_JSON="$(< /secure/path/clerk-bindings.json)"
+export CLERK_WEBHOOK_SIGNING_SECRET=whsec_replace
 export FOLD_DATABASE_URL=postgres://...
 ```
 
-The binding document format is defined in `apps/api/README.md`. Clerk user IDs
+Configure Clerk to deliver organization created, updated, deleted, and
+organization membership created, updated, and deleted events to
+`POST /v1/webhooks/clerk`. Deliveries are signature-verified, transactionally
+applied, durably deduplicated, and audited. `FOLD_CLERK_BINDINGS_JSON` remains a
+mutually exclusive restart-loaded migration mode; its format is defined in
+`apps/api/README.md`. Clerk user IDs
 use `user:<id>`, organization API keys use `api-key:<id>`, and M2M identities
 use `machine:<id>`. A token is rejected unless both its external principal and
 external organization are bound and the resulting internal principal has a
@@ -72,15 +77,29 @@ Create sensor keys on the backend with only the required Clerk scopes, such as
 sensor author in the `super_brain.author` claim. Do not allow an unprovisioned
 key ID to enter the bindings. M2M tokens require the external organization in
 `super_brain.organizationId`. Removing a binding or provider membership and
-restarting the API revokes its Super Brain access. Clerk API-key validity is
+revoking it through the organization administration route removes Super Brain
+access immediately. Clerk API-key validity is
 checked during verification; session role and membership changes follow
 Clerk's short-lived session-token refresh behavior.
 
-For public deployment, replace restart-loaded binding configuration with a
-signed Clerk webhook or administrative provisioning workflow. That workflow
-must apply organization, principal, and membership changes transactionally and
-must not infer access from email domains, repository URLs, or client-provided
-organization IDs.
+Provision a machine identity into the target workspace after creating it in
+Clerk. The caller must be an organization owner/admin with
+`organization:admin`:
+
+```sh
+curl -fsS -X POST \
+  -H "Authorization: Bearer $FOLD_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"externalPrincipalId":"api-key:ak_capture","workspaceRole":"member"}' \
+  "$FOLD_API_URL/v1/organizations/$FOLD_API_ORGANIZATION/workspaces/$FOLD_API_WORKSPACE/identity-bindings"
+
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $FOLD_API_TOKEN" \
+  "$FOLD_API_URL/v1/organizations/$FOLD_API_ORGANIZATION/workspaces/$FOLD_API_WORKSPACE/identity-bindings/api-key%3Aak_capture"
+```
+
+Provisioning never infers access from email domains, repository URLs, or
+client-provided organization IDs.
 
 ## Tenant Administration
 

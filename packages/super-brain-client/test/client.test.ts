@@ -54,6 +54,37 @@ describe("SuperBrainClient", () => {
     });
   });
 
+  it("records recalled telemetry for every ranked memory when harness context is configured", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        memories: [{ memory: { id: "memory-a" }, score: 0.9 }, { memory: { id: "memory-b" }, score: 0.8 }],
+        ranking: { id: "lexical", kind: "lexical", corpusSize: 2 },
+      }))
+      .mockResolvedValue(jsonResponse({ event: {}, feedback: { signal: "recalled" } })) as unknown as typeof fetch;
+    const api = new SuperBrainClient({
+      baseUrl: "https://brain.example",
+      workspaceId: "workspace/one",
+      token: "secret",
+      fetch: fetchMock,
+      recallTelemetry: { sessionId: "session-a", taskId: "task-a", detail: "test-harness" },
+    });
+    await api.rankMemories({ query: "Which store is canonical?" });
+    expect((fetchMock as any).mock.calls).toHaveLength(3);
+    expect((fetchMock as any).mock.calls.slice(1).map(([url]: [string]) => url)).toEqual([
+      expect.stringContaining("/memories/memory-a/feedback"),
+      expect.stringContaining("/memories/memory-b/feedback"),
+    ]);
+    expect(JSON.parse(String(((fetchMock as any).mock.calls[1][1] as RequestInit).body))).toMatchObject({
+      input: {
+        signal: "recalled",
+        query: "Which store is canonical?",
+        sessionId: "session-a",
+        taskId: "task-a",
+        detail: "test-harness",
+      },
+    });
+  });
+
   it("parses resumable SSE frames split across chunks", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({

@@ -11,7 +11,7 @@ import type {
   RecallRequest,
   RecalledMemory,
 } from "@_89/fold-epistemic";
-import type { FoldSdkCursor, RankedMemoryRecallResult, TrajectoryTaskSummary } from "@_89/fold-sdk";
+import type { FoldSdkCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
 import type { TranscriptRun } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
@@ -26,6 +26,11 @@ export interface SuperBrainClientOptions {
   readonly workspaceId: string;
   readonly token: string;
   readonly fetch?: typeof fetch;
+  readonly recallTelemetry?: {
+    readonly sessionId?: string;
+    readonly taskId?: string;
+    readonly detail?: string;
+  };
 }
 
 export interface EventStamp {
@@ -66,7 +71,7 @@ export interface ReasoningResponse {
     readonly summary: string;
     readonly score?: number;
   }[];
-  readonly steering?: unknown;
+  readonly steering?: SteeringSnapshot;
 }
 
 export interface RepositoryEnrollment {
@@ -176,6 +181,7 @@ export class SuperBrainClient {
   private readonly workspaceId: string;
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly recallTelemetry: SuperBrainClientOptions["recallTelemetry"] | undefined;
 
   constructor(options: SuperBrainClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -183,6 +189,7 @@ export class SuperBrainClient {
     this.workspaceId = options.workspaceId.trim();
     this.token = options.token.trim();
     this.fetchImpl = options.fetch ?? fetch;
+    this.recallTelemetry = options.recallTelemetry;
     if (this.baseUrl.length === 0 || this.workspaceId.length === 0 || this.token.length === 0) {
       throw new TypeError("baseUrl, workspaceId, and token are required");
     }
@@ -316,15 +323,46 @@ export class SuperBrainClient {
     }
   }
 
-  rankMemories(request: Omit<RecallRequest, "candidates"> & { readonly query: string }): Promise<RankedMemoryRecallResult> {
-    return this.request(this.workspacePath("memories/search"), { method: "POST", body: JSON.stringify(request) });
+  async rankMemories(request: Omit<RecallRequest, "candidates"> & { readonly query: string }): Promise<RankedMemoryRecallResult> {
+    const result = await this.request<RankedMemoryRecallResult>(
+      this.workspacePath("memories/search"),
+      { method: "POST", body: JSON.stringify(request) },
+    );
+    await this.recordRecallTelemetry(
+      result.memories.map(({ memory }) => memory.id),
+      request.query,
+      "ranked-memory-search",
+    );
+    return result;
   }
 
-  askReasoning(request: Omit<RecallRequest, "candidates"> & {
+  async askReasoning(request: Omit<RecallRequest, "candidates"> & {
     readonly question: string;
     readonly actorId?: string;
   }): Promise<ReasoningResponse> {
-    return this.request(this.workspacePath("reasoning/ask"), { method: "POST", body: JSON.stringify(request) });
+    const result = await this.request<ReasoningResponse>(
+      this.workspacePath("reasoning/ask"),
+      { method: "POST", body: JSON.stringify(request) },
+    );
+    await this.recordRecallTelemetry(result.citations, request.question, "reasoning-answer");
+    return result;
+  }
+
+  private async recordRecallTelemetry(
+    memoryIds: readonly string[],
+    query: string,
+    operation: string,
+  ): Promise<void> {
+    if (this.recallTelemetry === undefined) return;
+    for (const memoryId of [...new Set(memoryIds)]) {
+      await this.recordMemoryFeedback(memoryId, {
+        signal: "recalled",
+        query,
+        ...(this.recallTelemetry.taskId === undefined ? {} : { taskId: this.recallTelemetry.taskId }),
+        ...(this.recallTelemetry.sessionId === undefined ? {} : { sessionId: this.recallTelemetry.sessionId }),
+        detail: this.recallTelemetry.detail ?? operation,
+      });
+    }
   }
 
   recordMemory(input: Omit<MemoryInput, "id"> & { readonly id?: string }, causedBy?: readonly string[]) {

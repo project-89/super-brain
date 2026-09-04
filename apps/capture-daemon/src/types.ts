@@ -6,6 +6,7 @@ import type { AnonymizationPolicy } from "@_89/super-brain-importer";
 export type HookSource = "claude-code" | "codex" | "hermes" | "unknown";
 export type ReasoningPolicy = "exclude" | "include";
 export type ReasoningTreePolicy = "exclude" | "summaries";
+export type TrajectoryFinalizationReason = "stop" | "prompt-boundary" | "session-end" | "orphan-timeout";
 
 export interface CaptureConfig {
   readonly apiUrl: string;
@@ -70,8 +71,16 @@ export interface CaptureSession {
   readonly currentTurnId?: string;
   readonly comparisonKey?: string;
   readonly taskKey?: string;
+  readonly steeringIntentionIds?: readonly string[];
   readonly steps: readonly CapturedStep[];
+  readonly stepCount?: number;
   readonly truncatedStepCount?: number;
+  readonly recoveredStepCount?: number;
+  readonly evaluationUnitVersion?: 2;
+  readonly currentUnitStartStepNumber?: number;
+  readonly currentUnitEndStepNumber?: number;
+  readonly completedUnitCount?: number;
+  readonly finalizedThroughStepNumber?: number;
   readonly pendingTools?: Readonly<Record<string, {
     readonly artifactId: string;
     readonly startedAt: string;
@@ -98,7 +107,9 @@ export interface CaptureState {
   readonly lastEventTime: number;
   readonly lastHookAt?: string;
   readonly receivedHooks?: number;
+  readonly duplicateHooks?: number;
   readonly seenArtifacts: readonly string[];
+  readonly seenArtifactTimes?: Readonly<Record<string, number>>;
   readonly sessions: Readonly<Record<string, CaptureSession>>;
 }
 
@@ -139,6 +150,7 @@ export type SpoolJob =
       readonly deadlineAt: string;
       readonly source: HookSource;
       readonly path: string;
+      readonly ownedSnapshot?: true;
     };
 
 export interface VaultArtifact {
@@ -146,4 +158,9 @@ export interface VaultArtifact {
   readonly receivedAt: string;
   readonly eventTime: number;
   readonly path: string;
+}
+
+export interface StoredHookArtifact extends Omit<VaultArtifact, "path"> {
+  readonly source: HookSource;
+  readonly payload: Record<string, unknown>;
 }

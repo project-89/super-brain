@@ -53,9 +53,14 @@ async function main(): Promise<void> {
   const audience = option("--audience") ?? "workspace";
   const sampleValue = option("--sample");
   const sample = sampleValue === undefined ? 0 : Number(sampleValue);
+  const cognitionEveryValue = option("--cognition-every");
+  const cognitionEveryEvents = cognitionEveryValue === undefined ? 25 : Number(cognitionEveryValue);
   if (audience !== "personal" && audience !== "workspace") throw new TypeError("--audience must be personal or workspace");
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new TypeError("--limit must be a positive integer");
   if (!Number.isInteger(sample) || sample < 0 || sample > 100) throw new TypeError("--sample must be an integer within [0, 100]");
+  if (!Number.isInteger(cognitionEveryEvents) || cognitionEveryEvents < 1 || cognitionEveryEvents > 100_000) {
+    throw new TypeError("--cognition-every must be an integer within [1, 100000]");
+  }
 
   const client = new SuperBrainClient({ baseUrl, organizationId, workspaceId, token });
   const autoPromote = args.includes("--auto-promote");
@@ -65,6 +70,8 @@ async function main(): Promise<void> {
     maxCandidatesPerRun,
     audience,
     autoPromote,
+    continuousCognition: command === "watch" && !args.includes("--no-continuous-cognition"),
+    cognitionEveryEvents,
     ...(vaultEncryptionKey === undefined ? {} : { vaultEncryptionKey }),
   });
   if (command === "watch") {

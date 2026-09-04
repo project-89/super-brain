@@ -36,6 +36,19 @@ export class CaptureBridge {
 
   async checkpoint(input: CaptureCheckpoint): Promise<{ readonly accepted: true; readonly artifactId: string }> {
     const endpoint = input.kind === "human-decision" ? "decision" : "checkpoint";
+    return this.post(endpoint, input);
+  }
+
+  async steering(intentionIds: readonly string[]): Promise<{ readonly accepted: true; readonly artifactId: string }> {
+    const ids = [...new Set(intentionIds.map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0 || ids.length > 20) throw new TypeError("steering capture requires 1 to 20 intention IDs");
+    return this.post("hook", { hook_event_name: "SteeringApplied", intention_ids: ids });
+  }
+
+  private async post(
+    endpoint: string,
+    input: Readonly<Record<string, unknown>>,
+  ): Promise<{ readonly accepted: true; readonly artifactId: string }> {
     const response = await this.fetchImpl(`${this.options.baseUrl.replace(/\/$/, "")}/${endpoint}`, {
       method: "POST",
       headers: {

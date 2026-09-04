@@ -20,6 +20,11 @@ const api = new SuperBrainClient({
   organizationId: process.env.SUPER_BRAIN_ORGANIZATION ?? process.env.FOLD_API_ORGANIZATION ?? "local",
   workspaceId: required(process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE"),
   token: required(process.env.SUPER_BRAIN_TOKEN ?? process.env.FOLD_API_TOKEN, "SUPER_BRAIN_TOKEN"),
+  recallTelemetry: {
+    ...(process.env.SUPER_BRAIN_SESSION_ID === undefined ? {} : { sessionId: process.env.SUPER_BRAIN_SESSION_ID }),
+    ...(process.env.SUPER_BRAIN_TASK_ID === undefined ? {} : { taskId: process.env.SUPER_BRAIN_TASK_ID }),
+    detail: "super-brain-mcp",
+  },
 });
 
 const captureUrl = process.env.SUPER_BRAIN_CAPTURE_URL;
@@ -70,12 +75,17 @@ server.registerTool("super_brain_context", {
     actorId: z.string().trim().min(1).max(300).optional(),
     limit: z.number().int().min(1).max(10).default(5),
   },
-}, async ({ question, projectIds, actorId, limit }) => jsonResult(await api.askReasoning({
-  question,
-  limit,
-  ...(projectIds === undefined ? {} : { projectIds }),
-  ...(actorId === undefined ? {} : { actorId }),
-})));
+}, async ({ question, projectIds, actorId, limit }) => {
+  const result = await api.askReasoning({
+    question,
+    limit,
+    ...(projectIds === undefined ? {} : { projectIds }),
+    ...(actorId === undefined ? {} : { actorId }),
+  });
+  const intentionIds = result.steering?.intentions.map(({ id }) => id) ?? [];
+  if (capture !== undefined && intentionIds.length > 0) await capture.steering(intentionIds);
+  return jsonResult(result);
+});
 
 server.registerTool("super_brain_checkpoint", {
   title: "Record a Reasoning Checkpoint",

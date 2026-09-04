@@ -242,6 +242,92 @@ integrationDescribe("Postgres Fold store", () => {
       .resolves.toBeUndefined();
   });
 
+  it("applies external identity provisioning once and revokes access without deleting tenant data", async () => {
+    const externalOrganizationId = `org_webhook_${workspaceId}`;
+    const organizationId = `clerk:${externalOrganizationId}`;
+    const principalId = "clerk:user:user_webhook";
+    const base = {
+      provider: "clerk",
+      externalOrganizationId,
+      organizationId,
+      organizationName: "Webhook organization",
+    } as const;
+    await expect(administration.applyExternalIdentityProvisioningEvent({
+      ...base,
+      eventId: `membership-${workspaceId}`,
+      type: "membership.upsert",
+      externalPrincipalId: "user:user_webhook",
+      principalId,
+      organizationRole: "admin",
+      workspaceId: "default",
+      workspaceRole: "admin",
+    })).resolves.toBe(true);
+    await expect(administration.applyExternalIdentityProvisioningEvent({
+      ...base,
+      eventId: `membership-${workspaceId}`,
+      type: "membership.upsert",
+      externalPrincipalId: "user:user_webhook",
+      principalId,
+      organizationRole: "member",
+      workspaceId: "default",
+      workspaceRole: "member",
+    })).resolves.toBe(false);
+    await expect(administration.resolveMembership(organizationId, "default", principalId))
+      .resolves.toMatchObject({ organizationRole: "admin", workspaceRole: "admin" });
+
+    await database.store({ organizationId, workspaceId: "default" }).append(entry("retained-after-revoke", 1));
+    await administration.applyExternalIdentityProvisioningEvent({
+      ...base,
+      eventId: `deleted-${workspaceId}`,
+      type: "organization.delete",
+    });
+    await expect(administration.resolveExternalOrganization("clerk", externalOrganizationId))
+      .resolves.toBeUndefined();
+    await expect(administration.resolveMembership(organizationId, "default", principalId))
+      .resolves.toBeUndefined();
+    await expect(database.store({ organizationId, workspaceId: "default" }).read())
+      .resolves.toMatchObject({ entries: [{ event: { id: "retained-after-revoke" } }] });
+  });
+
+  it("provisions and revokes an organization-scoped machine credential", async () => {
+    const organizationId = `org-machine-${workspaceId}`;
+    const principalId = `clerk:machine:worker-${workspaceId}`;
+    const common = {
+      provider: "clerk",
+      externalOrganizationId: `internal:${organizationId}`,
+      organizationId,
+      externalPrincipalId: `machine:worker-${workspaceId}`,
+      workspaceId: "primary",
+    } as const;
+    await administration.applyExternalIdentityProvisioningEvent({
+      ...common,
+      eventId: `machine-add-${workspaceId}`,
+      type: "credential.upsert",
+      principalId,
+      organizationRole: "member",
+      workspaceRole: "member",
+    });
+    await expect(administration.resolveExternalPrincipal("clerk", common.externalPrincipalId))
+      .resolves.toBe(principalId);
+    await expect(administration.resolveMembership(organizationId, "primary", principalId))
+      .resolves.toMatchObject({ workspaceRole: "member" });
+
+    await administration.applyExternalIdentityProvisioningEvent({
+      ...common,
+      eventId: `machine-delete-${workspaceId}`,
+      type: "credential.delete",
+    });
+    await expect(administration.resolveExternalPrincipal("clerk", common.externalPrincipalId))
+      .resolves.toBeUndefined();
+    await expect(administration.resolveMembership(organizationId, "primary", principalId))
+      .resolves.toBeUndefined();
+    await expect(administration.listIdentityProvisioningAudit(organizationId))
+      .resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ eventType: "credential.upsert", externalPrincipalId: common.externalPrincipalId }),
+        expect.objectContaining({ eventType: "credential.delete", externalPrincipalId: common.externalPrincipalId }),
+      ]));
+  });
+
   it("indexes authorized memory documents and ranks them through pgvector", async () => {
     const ranker = new PostgresVectorMemoryRanker({
       connectionString: connectionString!,

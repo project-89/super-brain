@@ -34,6 +34,7 @@ const OBSERVATION_KINDS: ReadonlySet<string> = new Set([
   "reasoning_checkpoint",
   "reasoning_observed",
   "human_decision",
+  "steering_applied",
   "task_complete",
   "output",
 ]);

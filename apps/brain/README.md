@@ -52,3 +52,10 @@ the proxies with `FOLD_API_PROXY_TARGET` and `SUPER_BRAIN_CAPTURE_PROXY_TARGET`,
 Workspace and base URL preferences use local storage. The bearer token uses
 session storage and is cleared when the browser tab session ends. The capture
 operator token follows the same session-only rule.
+
+For hosted use, configure `VITE_CLERK_PUBLISHABLE_KEY` and
+`VITE_FOLD_API_BASE_URL`. Brain then renders Clerk sign-in, requires an active
+organization, discovers that principal's current workspaces from
+`GET /v1/session`, and keeps the short-lived bearer token only in React state.
+Organization switching refreshes the server-derived workspace list. Without a
+Clerk publishable key, the local connection dialog remains the bootstrap path.

@@ -39,6 +39,12 @@ verifies session, organization API-key, and M2M tokens, then resolves Clerk IDs
 through pre-tenant PostgreSQL binding tables. Internal organization and
 principal identifiers remain provider-independent.
 
+Brain keeps Clerk tokens in memory, requires an active Clerk organization, and
+discovers authorized workspaces through `GET /v1/session`. Signed organization
+and membership webhooks update bindings transactionally and are deduplicated by
+their delivery ID. Organization admins separately bind and revoke scoped API-key
+or M2M principals; both paths append an organization-visible identity audit.
+
 A verified Clerk organization constrains the request to exactly one internal
 organization. Session roles place a ceiling on stored organization privilege;
 API-key and M2M scopes map to the existing route capabilities. PostgreSQL then
@@ -74,8 +80,10 @@ recently restarted local harness.
 `PreToolUse`, `PostToolUse`, failures, file targets, and verification commands
 produce observable trajectory steps automatically. Concise agent reasoning
 checkpoints and human verdicts have explicit local endpoints. Configurable
-periodic snapshots merge the active session path into its shared reasoning tree
-without creating a trajectory run before the session ends. With explicit local
+periodic snapshots merge the active path into its shared reasoning tree. Each
+prompt-to-response turn finalizes as an evaluation unit on `Stop`, so a
+long-lived CLI session can produce useful trajectories without being closed;
+the parent session remains active for fleet continuity. With explicit local
 opt-in, bounded native transcript deltas are captured into the private vault;
 only exposed reasoning summaries become canonical `reasoning_observed` events
 and `model_thought` nodes. Opaque encrypted provider reasoning may be retained
@@ -203,17 +211,21 @@ proposals, and promoted 1,967 high-confidence project-resolved observations.
 The remaining 530 proposals are available for review. The durable subscriber's
 cursor is caught up to the 760th run event.
 
+After long-session recovery and turn-unit backfill, the live capture daemon
+reported 30 finalized units, zero truncated steps, and zero failed jobs. This is
+operational evidence, not yet the 50-run comparative evaluation milestone.
+
 ## Deployment Boundaries
 
 The implemented service has real persistence, scoped authentication,
 authorization, resumable streams, continuous local capture, automatic memory
 formation, encrypted local vaults, integrity-manifest exports, and executable
-PostgreSQL backup/restore checks. A public or multi-host deployment must still
-supply TLS termination, automated secret rotation or an external identity
-provider, a scheduled off-host backup policy, distributed rate limiting, and an
-embedding sidecar when semantic ranking is desired. External sensors must send
-authenticated real events; the API intentionally exposes no simulated fleet
-mutation route.
+PostgreSQL backup/restore checks. Clerk identity and automated tenant membership
+provisioning are implemented, but a public or multi-host deployment must still
+supply its keys and webhook endpoint, TLS termination, a scheduled off-host
+backup policy, distributed rate limiting, monitoring, and an embedding sidecar
+when semantic ranking is desired. External sensors must send authenticated real
+events; the API intentionally exposes no simulated fleet mutation route.
 
 The application now enforces organization/workspace isolation across API,
 workers, caches, vectors, durable cursors, and forced PostgreSQL RLS. Repository

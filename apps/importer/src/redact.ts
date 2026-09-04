@@ -91,6 +91,23 @@ function withoutPrivateReasoning(record: Record<string, unknown>): Record<string
   return record;
 }
 
+export function redactTranscriptRecord(
+  record: unknown,
+  options: {
+    readonly reasoningPolicy?: "exclude" | "include";
+    readonly retainEncryptedReasoning?: boolean;
+    readonly anonymizer?: RecordAnonymizer;
+  } = {},
+): { readonly value: unknown; readonly count: number } {
+  const safe = isRecord(record) && options.reasoningPolicy !== "include"
+    ? withoutPrivateReasoning(record)
+    : record;
+  const anonymized = options.anonymizer?.value(safe) ?? safe;
+  return redactJsonValue(anonymized, {
+    retainEncryptedContent: options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true,
+  });
+}
+
 export async function storeRedactedArtifact(
   transcript: ParsedTranscript,
   vaultRoot: string,
@@ -137,13 +154,7 @@ export async function storeRedactedArtifact(
       } catch {
         continue;
       }
-      const safe = isRecord(parsed) && options.reasoningPolicy !== "include"
-        ? withoutPrivateReasoning(parsed)
-        : parsed;
-      const anonymized = options.anonymizer?.value(safe) ?? safe;
-      const redacted = redactJsonValue(anonymized, {
-        retainEncryptedContent: options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true,
-      });
+      const redacted = redactTranscriptRecord(parsed, options);
       redactionCount += redacted.count;
       const serialized = JSON.stringify(redacted.value);
       await output.writeFile(`${options.encryptionKey === undefined ? serialized : encryptVaultLine(serialized, options.encryptionKey)}\n`, "utf8");

@@ -1,7 +1,10 @@
 # Super Brain Implementation Status
 
-This ledger distinguishes implemented behavior from deployment work. Features
-listed as complete are backed by code and tests; they are not simulated UI.
+This ledger distinguishes implemented local behavior from deployment work.
+Features listed as complete are backed by code and tests; they are not simulated
+UI. Complete in this table does not mean the hosted product or autonomous
+learning vision is complete. The prioritized remaining work and its acceptance
+criteria live in [`EXECUTION_BACKLOG.md`](./EXECUTION_BACKLOG.md).
 
 ## Critical Path
 
@@ -20,7 +23,7 @@ listed as complete are backed by code and tests; they are not simulated UI.
 | Operator UI | Complete | Live fleet, history, memory review/feedback, trajectory evidence, reasoning, steering, raw event, and projected-state views |
 | Capture privacy | Complete | Mandatory secret redaction, optional stable pseudonymous/strict anonymization, separate exposed/opaque reasoning controls, and a dedicated local operator settings credential |
 | Multi-tenant application boundary | Complete | Organization routes and memberships, tenant-keyed storage/workers/vectors/caches, forced PostgreSQL RLS, repository enrollment, and audited platform reads |
-| External identity | Complete | Clerk sessions, organization API keys, and M2M tokens resolve through explicit external-ID bindings with scoped capabilities and fail-closed revocation |
+| External identity | Complete | Clerk browser sessions, organization switching, signed idempotent membership provisioning, scoped API-key/M2M administration, role ceilings, and fail-closed revocation |
 
 ## Deployment Choices
 
@@ -29,8 +32,8 @@ features:
 
 1. Select and operate a real embedding service before enabling pgvector ranking;
    deterministic lexical BM25 remains the complete default.
-2. Configure Clerk production keys, authorized parties, automated tenant
-   onboarding/deprovisioning, TLS, and distributed rate limiting before exposing
+2. Configure Clerk production keys, authorized parties, the implemented signed
+   tenant webhook, TLS, and distributed rate limiting before exposing
    the API outside a trusted local network.
 3. Schedule the supplied PostgreSQL backup and disposable restore verification,
    retain an encrypted off-host copy, and monitor failure/age.
@@ -42,3 +45,19 @@ features:
    automated identity provisioning, non-bypass database role, remote
    artifact/KMS namespacing, quarantine provisioning, and topology-level
    restore/isolation drills.
+
+## Active Execution
+
+The remaining execution order is:
+
+1. let normal capture reach at least 50 finalized evaluation units and run a
+   controlled same-task comparison across two materially different models;
+2. deploy real reasoning and optional embedding providers, then validate live
+   cited cognition and retrieval feedback;
+3. configure and drill the hosted PostgreSQL, Clerk, TLS, rate-limit,
+   quarantine, backup, monitoring, object-storage, and KMS topology;
+4. select the project license before publishing packages or accepting reusable
+   third-party contributions.
+
+Progress must be updated in `EXECUTION_BACKLOG.md`; the absence of source-code
+`TODO` comments is not evidence that these milestones are complete.

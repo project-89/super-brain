@@ -28,6 +28,13 @@ sessions, organization API keys, and internal M2M tokens. Clerk organization
 and principal identifiers resolve through explicit PostgreSQL bindings; they
 are not used as internal resource keys.
 
+Signed Clerk webhooks transactionally maintain organization and human
+membership bindings. Each delivery is durably deduplicated and audited.
+Organization deletion revokes bindings and provider-owned membership without
+deleting retained Fold data. Organization administrators provision and revoke
+workspace-scoped API-key or M2M identities through `identity-bindings`; those
+machine credentials remain independently limited by their Clerk scopes.
+
 ## Repository Enrollment
 
 A repository is associated with an organization in this priority order:
@@ -90,15 +97,17 @@ break-glass procedure outside the product path.
 7. Tenant propagation through capture, importer, memory worker, MCP, Brain,
    migration, export, SSE, and durable consumers.
 8. Adversarial application and PostgreSQL isolation tests.
-9. Clerk authentication, external-ID bindings, scope mapping, role ceilings,
-   and replacement-based identity and membership revocation.
+9. Clerk authentication, browser organization/workspace discovery, signed
+   idempotent provisioning, external-ID bindings, scope mapping, role ceilings,
+   machine-identity administration, and fail-closed revocation.
 
 ## Production Gate
 
 Before public hosting, provision a non-bypass PostgreSQL application role and
 enable `FOLD_REQUIRE_TENANT_RLS=true`; configure the Clerk application,
 authorized parties, identities, machine scopes, and key rotation; automate
-Clerk onboarding/deprovisioning instead of relying on restart-loaded binding
-configuration; prefix any future remote artifact store and KMS keys by tenant;
+Clerk onboarding/deprovisioning with the signed webhook instead of the optional
+restart-loaded migration binding configuration; prefix any future remote
+artifact store and KMS keys by tenant;
 configure a private quarantine workspace; and exercise backup/restore plus
 hostile isolation tests in the production topology.

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import {
   CaptureEngine,
   DurableSpool,
   HookVault,
+  SessionStepStore,
   StateStore,
   hookSource,
   mergedHookSettings,
@@ -15,6 +16,7 @@ import {
   exportCaptureData,
   pruneHookArtifacts,
   type CaptureConfig,
+  type CaptureSession,
 } from "../src/index.js";
 
 function config(root: string): CaptureConfig {
@@ -373,6 +375,183 @@ describe("capture daemon", () => {
     expect(engine.snapshot()).toMatchObject({ activeSessions: 0, unfinishedSessions: 0 });
   });
 
+  it("hydrates durable steps before finalizing a session after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-step-restart-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const state = new StateStore(current.stateRoot);
+    const first = new CaptureEngine(current, state, new HookVault(current.vaultRoot), spool);
+    await first.initialize();
+    const common = { session_id: "restart-steps", cwd: process.cwd() };
+    await first.ingest("codex", { ...common, hook_event_name: "SessionStart" });
+    await first.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Persist every step" });
+    await first.ingest("codex", { ...common, hook_event_name: "Stop", last_assistant_message: "Done" });
+
+    const second = new CaptureEngine(current, state, new HookVault(current.vaultRoot), spool);
+    await second.initialize();
+    await second.ingest("codex", { ...common, hook_event_name: "SessionEnd" });
+    const trajectory = (await spool.list()).map(({ job }) => job)
+      .find((job) => job.kind === "trajectory");
+    expect(trajectory).toMatchObject({ kind: "trajectory" });
+    if (trajectory?.kind !== "trajectory") throw new Error("missing trajectory job");
+    expect(trajectory.input.steps.map(({ content }) => content)).toEqual([
+      "User submitted a task prompt",
+      "Agent completed a response",
+      "Turn ended without a verified outcome",
+    ]);
+  });
+
+  it("finalizes prompt-response turns without waiting for the parent CLI session to end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-turns-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const state = new StateStore(current.stateRoot);
+    const engine = new CaptureEngine(current, state, new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "multi-turn", cwd: process.cwd() };
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Run the alpha check" });
+    await engine.ingest("codex", {
+      ...common,
+      hook_event_name: "PreToolUse",
+      tool_name: "exec_command",
+      tool_use_id: "alpha",
+      tool_input: { command: "pnpm test" },
+    });
+    await engine.ingest("codex", {
+      ...common,
+      hook_event_name: "PostToolUse",
+      tool_name: "exec_command",
+      tool_use_id: "alpha",
+      tool_input: { command: "pnpm test" },
+      tool_response: { exit_code: 0 },
+    });
+    const stop = { ...common, hook_event_name: "Stop", last_assistant_message: "Alpha complete" };
+    await engine.ingest("codex", stop);
+    await engine.ingest("codex", stop);
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Inspect the beta path" });
+    await engine.ingest("codex", {
+      ...common,
+      hook_event_name: "SteeringApplied",
+      intention_ids: ["intention-beta"],
+    });
+    await engine.ingest("codex", { ...common, hook_event_name: "Stop", last_assistant_message: "Beta inspected" });
+    const end = { ...common, hook_event_name: "SessionEnd", reason: "complete" };
+    await engine.ingest("codex", end);
+    const jobsBeforeRetry = await spool.list();
+    await engine.ingest("codex", end);
+
+    const jobs = (await spool.list()).map(({ job }) => job);
+    expect(jobs).toHaveLength(jobsBeforeRetry.length);
+    const trajectories = jobs.filter((job) => job.kind === "trajectory");
+    expect(trajectories).toHaveLength(2);
+    expect(trajectories.map(({ input }) => input.outcome)).toEqual(["success", "unknown"]);
+    expect(trajectories.map(({ input }) => input.id)).toEqual([
+      expect.stringMatching(/:unit-1$/),
+      expect.stringMatching(/:unit-2$/),
+    ]);
+    expect(new Set(trajectories.map(({ input }) => input.taskId)).size).toBe(2);
+    expect(trajectories[0]?.captureIdentity).toMatchObject({ finalizationReason: "stop", unit: "1" });
+    expect(trajectories[1]?.captureIdentity).toMatchObject({
+      finalizationReason: "stop",
+      unit: "2",
+      steeringIntentions: "intention-beta",
+    });
+    expect(engine.snapshot()).toMatchObject({ finalizedSessions: 1, finalizedUnits: 2, duplicateHooks: 2 });
+    expect((await state.load()).sessions["codex:multi-turn"]).toMatchObject({
+      finalized: true,
+      completedUnitCount: 2,
+    });
+  });
+
+  it("finalizes a lossless evaluation unit beyond the former 2,000-step boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-long-finalize-"));
+    const current = config(root);
+    const state = new StateStore(current.stateRoot);
+    const stepStore = new SessionStepStore(current.stateRoot);
+    const steps = Array.from({ length: 2_105 }, (_, index) => ({
+      id: `step-${index + 1}`,
+      stepNumber: index + 1,
+      nodeKind: "action" as const,
+      role: "tool_call" as const,
+      content: `Invoke tool-${index + 1}`,
+      toolName: `tool-${index + 1}`,
+      artifactId: `artifact-${index + 1}`,
+      eventId: `event-${index + 1}`,
+    }));
+    const session: CaptureSession = {
+      sessionId: "long-finalize",
+      source: "codex",
+      agent: "codex",
+      startedAt: "2026-09-04T00:00:00.000Z",
+      project: { id: root, name: "project", root, branch: "main" },
+      steps,
+      currentUnitStartStepNumber: 1,
+      completedUnitCount: 0,
+      finalized: false,
+      active: true,
+      lastSeenAt: "2026-09-04T00:00:00.000Z",
+    };
+    const persisted = await stepStore.synchronize(session);
+    await state.save({
+      version: 1,
+      lastEventTime: 1,
+      seenArtifacts: [],
+      sessions: { "codex:long-finalize": persisted },
+    });
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(
+      current,
+      state,
+      new HookVault(current.vaultRoot),
+      spool,
+      undefined,
+      new SessionStepStore(current.stateRoot),
+    );
+    await engine.initialize();
+    await engine.ingest("codex", {
+      session_id: "long-finalize",
+      cwd: root,
+      hook_event_name: "Stop",
+      last_assistant_message: "Complete",
+    });
+    const trajectory = (await spool.list()).map(({ job }) => job)
+      .find((job) => job.kind === "trajectory");
+    expect(trajectory).toMatchObject({ kind: "trajectory", captureIdentity: { unit: "1" } });
+    if (trajectory?.kind !== "trajectory") throw new Error("missing long trajectory job");
+    expect(trajectory.input.steps).toHaveLength(2_107);
+    expect(trajectory.input.steps.at(-1)).toMatchObject({
+      id: "step-2107",
+      content: "Turn ended without a verified outcome",
+    });
+    expect(engine.snapshot()).toMatchObject({ truncatedSteps: 0, finalizedUnits: 1 });
+  });
+
+  it("queues an owned transcript snapshot before the harness source can disappear", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-transcript-race-"));
+    const current = config(root);
+    const transcript = join(root, "01a06910-6c0e-7e93-a94c-7dfc2c3830be.jsonl");
+    await writeFile(transcript, `${JSON.stringify({
+      type: "session_meta",
+      timestamp: "2026-09-04T00:00:00.000Z",
+      payload: { id: "session-a", cwd: root },
+    })}\n`, "utf8");
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "snapshot-race", transcript_path: transcript, cwd: root };
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionEnd" });
+    await unlink(transcript);
+
+    const transcriptJob = (await spool.list()).map(({ job }) => job)
+      .find((job) => job.kind === "transcript");
+    expect(transcriptJob).toMatchObject({ kind: "transcript", ownedSnapshot: true });
+    if (transcriptJob?.kind !== "transcript") throw new Error("missing transcript job");
+    expect(transcriptJob.path).not.toBe(transcript);
+    await expect(stat(transcriptJob.path)).resolves.toMatchObject({ mode: expect.any(Number) });
+  });
+
   it("previews retention before deleting only expired raw hook artifacts", async () => {
     const root = await mkdtemp(join(tmpdir(), "super-brain-capture-retention-"));
     const current = config(root);
@@ -406,6 +585,37 @@ describe("capture daemon", () => {
     await expect(spool.list()).resolves.toHaveLength(1);
   });
 
+  it("archives an explicitly resolved failed job with its audit evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-resolve-"));
+    const stateRoot = join(root, "state");
+    const spool = new DurableSpool(stateRoot);
+    const current = config(root);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    await engine.ingest("codex", { session_id: "resolve-session", cwd: process.cwd(), hook_event_name: "SessionStart" });
+    const [pending] = await spool.list();
+    await spool.reject(pending!.path, "source artifact is permanently unavailable");
+
+    await expect(spool.resolveFailed("confirmed unavailable")).resolves.toEqual({ matched: 1, resolved: 0 });
+    await expect(spool.snapshot()).resolves.toMatchObject({ failedJobs: 1 });
+    await expect(spool.resolveFailed("confirmed unavailable", true)).resolves.toEqual({ matched: 1, resolved: 1 });
+    await expect(spool.snapshot()).resolves.toMatchObject({ failedJobs: 0 });
+
+    const resolvedRoot = join(stateRoot, "spool", "resolved");
+    const files = await readdir(resolvedRoot);
+    expect(files).toEqual(expect.arrayContaining([
+      expect.stringMatching(/\.json$/),
+      expect.stringMatching(/\.error\.json$/),
+      expect.stringMatching(/\.resolution\.json$/),
+    ]));
+    const resolution = files.find((name) => name.endsWith(".resolution.json"));
+    expect(JSON.parse(await readFile(join(resolvedRoot, resolution!), "utf8"))).toMatchObject({
+      reason: "confirmed unavailable",
+      job: { kind: "event" },
+      failure: { reason: "source artifact is permanently unavailable" },
+    });
+  });
+
   it("explicitly rebases an ordered quarantined event while retaining its source ID", async () => {
     const root = await mkdtemp(join(tmpdir(), "super-brain-capture-rebase-"));
     const spool = new DurableSpool(join(root, "state"));
@@ -423,6 +633,33 @@ describe("capture daemon", () => {
     if (retried!.job.kind !== "event") throw new Error("expected an event job");
     expect(retried!.job.event.capture.identity?.reissuedFrom).toBe(originalId);
     expect(retried!.job.event.changes[0]?.subject.endsWith(`:${retried!.job.id}`)).toBe(true);
+  });
+
+  it("explicitly rebases quarantined trajectory stamps without changing the run identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-trajectory-rebase-"));
+    const spool = new DurableSpool(join(root, "state"));
+    const current = config(root);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "trajectory-rebase", cwd: process.cwd() };
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Rebase the run" });
+    await engine.ingest("codex", { ...common, hook_event_name: "Stop" });
+    const pending = (await spool.list()).find(({ job }) => job.kind === "trajectory");
+    if (pending?.job.kind !== "trajectory") throw new Error("missing trajectory job");
+    const originalJobId = pending.job.id;
+    const originalRunId = pending.job.input.id;
+    const originalTime = pending.job.runStamp.t;
+    await spool.reject(pending.path, "equal-time order conflict");
+    await expect(spool.retryFailed(true, { rebaseTrajectories: true }))
+      .resolves.toMatchObject({ matched: 1, retried: 1, rebased: 1 });
+    const retried = (await spool.list()).find(({ job }) => job.kind === "trajectory");
+    if (retried?.job.kind !== "trajectory") throw new Error("missing retried trajectory job");
+    expect(retried.job.id).not.toBe(originalJobId);
+    expect(retried.job.input.id).toBe(originalRunId);
+    expect(retried.job.runStamp.t).toBeGreaterThan(originalTime);
+    expect(retried.job.captureIdentity.reissuedFrom).toBe(originalJobId);
+    expect(retried.job.treeStamp.id < retried.job.runStamp.id).toBe(true);
   });
 
   it("uses a dedicated read credential for canonical exports", async () => {

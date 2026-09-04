@@ -71,6 +71,59 @@ body {
   color: var(--text);
 }
 
+.auth-shell {
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  gap: 32px;
+  min-height: 100%;
+  padding: 48px 24px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 18px;
+}
+
+.auth-brand svg {
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+}
+
+.auth-status {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+}
+
+.auth-status--error strong {
+  color: var(--danger);
+}
+
+.account-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.account-controls select {
+  max-width: 180px;
+  height: 34px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface);
+}
+
 button,
 input,
 select,

@@ -89,6 +89,7 @@ export type TerminalObservationKind =
   | "reasoning_checkpoint"
   | "reasoning_observed"
   | "human_decision"
+  | "steering_applied"
   | "task_complete"
   | "output";
 

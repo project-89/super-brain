@@ -104,6 +104,12 @@ const repositoryEnrollmentSchema = z.object({
   projectId: z.string().trim().min(1).max(500).optional(),
 }).strict();
 
+const identityBindingSchema = z.object({
+  externalPrincipalId: z.string().trim().regex(/^(?:api-key|machine):[^/\s]+$/).max(500),
+  organizationRole: z.enum(["admin", "member"]).default("member"),
+  workspaceRole: z.enum(["admin", "member"]).default("member"),
+}).strict();
+
 const entitySchema = z
   .object({
     id: z.string().min(1).max(200),
@@ -482,6 +488,9 @@ function sendError(response: ServerResponse, error: ApiHttpError): void {
 
 function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof ApiHttpError) return error;
+  if (error instanceof Error && error.name === "ClerkWebhookVerificationError") {
+    return new ApiHttpError(401, "webhook_verification_failed", "Webhook signature verification failed");
+  }
   if (error instanceof ZodError) {
     return new ApiHttpError(
       400,
@@ -539,11 +548,7 @@ function asHttpError(error: unknown): ApiHttpError {
   return new ApiHttpError(500, "internal_error", "Internal server error");
 }
 
-async function readJsonBody(request: IncomingMessage, maxBodyBytes: number): Promise<unknown> {
-  const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
-  if (contentType !== "application/json") {
-    throw new ApiHttpError(415, "unsupported_media_type", "Content-Type must be application/json");
-  }
+async function readRawBody(request: IncomingMessage, maxBodyBytes: number): Promise<Buffer> {
   const declaredLength = Number(request.headers["content-length"]);
   if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
     throw new ApiHttpError(413, "body_too_large", "Request body exceeds the configured limit");
@@ -559,9 +564,18 @@ async function readJsonBody(request: IncomingMessage, maxBodyBytes: number): Pro
     }
     chunks.push(bytes);
   }
-  if (size === 0) throw new ApiHttpError(400, "invalid_json", "Request body must contain JSON");
+  if (size === 0) throw new ApiHttpError(400, "empty_body", "Request body must not be empty");
+  return Buffer.concat(chunks);
+}
+
+async function readJsonBody(request: IncomingMessage, maxBodyBytes: number): Promise<unknown> {
+  const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new ApiHttpError(415, "unsupported_media_type", "Content-Type must be application/json");
+  }
+  const body = await readRawBody(request, maxBodyBytes);
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(body.toString("utf8"));
   } catch {
     throw new ApiHttpError(400, "invalid_json", "Request body is not valid JSON");
   }
@@ -994,7 +1008,7 @@ async function authenticate(
 }
 
 function routeCapability(resource: string | undefined, resourceId: string | undefined, method: string): ApiCapability | undefined {
-  if (resource === "repository-enrollments" || resource === "audit-log") return "organization:admin";
+  if (resource === "repository-enrollments" || resource === "audit-log" || resource === "identity-bindings" || resource === "identity-audit-log") return "organization:admin";
   if (resource === "event-stream" || resource === "projection") return "events:read";
   if (resource === "events") return method === "GET" ? "events:read" : "events:write";
   if (resource === "consumers") return method === "GET" ? "consumers:read" : "consumers:write";
@@ -1084,7 +1098,47 @@ async function handleRequest(
   if (segments[0] !== "v1") {
     throw new ApiHttpError(404, "not_found", "Route not found");
   }
+  const maxBodyBytes = dependencies.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  if (segments.length === 3 && segments[1] === "webhooks" && segments[2] === "clerk") {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (dependencies.identityProvisioningWebhook === undefined) {
+      throw new ApiHttpError(404, "not_found", "Route not found");
+    }
+    const result = await dependencies.identityProvisioningWebhook.handle({
+      url: `http://${request.headers.host ?? "localhost"}${url.pathname}`,
+      headers: request.headers,
+      body: await readRawBody(request, maxBodyBytes),
+    });
+    sendJson(response, result.applied ? 200 : 202, result);
+    return;
+  }
   const subject = await authenticate(request, dependencies);
+  if (segments.length === 2 && segments[1] === "session") {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const organizationId = subject.organizationId;
+    if (organizationId === undefined) {
+      throw new ApiHttpError(404, "session_tenant_unavailable", "Authenticated session has no active organization");
+    }
+    const discovered = await dependencies.tenantAdministration?.listPrincipalMemberships?.(
+      organizationId,
+      subject.principalId,
+    ) ?? [];
+    const memberships = (await Promise.all(discovered.map((membership) =>
+      dependencies.memberships.resolveAccess(subject, organizationId, membership.workspaceId)
+    ))).filter((membership): membership is NonNullable<typeof membership> => membership !== undefined);
+    sendJson(response, 200, {
+      principalId: subject.principalId,
+      identityProvider: subject.identityProvider ?? "static",
+      organizationId,
+      memberships: memberships.map((membership) => ({
+        organizationId: membership.organizationId,
+        organizationRole: membership.organizationRole,
+        workspaceId: membership.workspaceId,
+        workspaceRole: membership.workspaceRole,
+      })),
+    });
+    return;
+  }
   let workspaceId: string;
   let organizationId: string | undefined;
   let access: Awaited<ReturnType<ApiDependencies["memberships"]["resolveAccess"]>>;
@@ -1143,8 +1197,65 @@ async function handleRequest(
   if (access.platformDataAccess !== true) {
     assertCredentialCapability(subject, routeCapability(resource, resourceId, method));
   }
-  const maxBodyBytes = dependencies.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-
+  if (resource === "identity-bindings") {
+    if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
+      throw new ApiHttpError(403, "organization_admin_required", "Organization administration access is required");
+    }
+    const administration = dependencies.tenantAdministration;
+    const provision = administration?.applyExternalIdentityProvisioningEvent;
+    if (provision === undefined) {
+      throw new ApiHttpError(501, "identity_provisioning_unavailable", "Identity provisioning requires PostgreSQL");
+    }
+    if (resourceId === undefined && method === "POST") {
+      const body = identityBindingSchema.parse(await readJsonBody(request, maxBodyBytes));
+      const principalId = `clerk:${body.externalPrincipalId}`;
+      const applied = await provision.call(administration, {
+        eventId: `admin:${randomUUID()}`,
+        provider: "clerk",
+        type: "credential.upsert",
+        externalOrganizationId: `internal:${access.organizationId}`,
+        organizationId: access.organizationId,
+        externalPrincipalId: body.externalPrincipalId,
+        principalId,
+        organizationRole: body.organizationRole,
+        workspaceId,
+        workspaceRole: body.workspaceRole,
+      });
+      sendJson(response, 201, { applied, principalId });
+      return;
+    }
+    if (resourceId !== undefined && method === "DELETE") {
+      if (!/^(?:api-key|machine):[^/\s]+$/.test(resourceId)) {
+        throw new ApiHttpError(400, "invalid_external_principal", "External principal must be a Clerk API key or machine ID");
+      }
+      const applied = await provision.call(administration, {
+        eventId: `admin:${randomUUID()}`,
+        provider: "clerk",
+        type: "credential.delete",
+        externalOrganizationId: `internal:${access.organizationId}`,
+        organizationId: access.organizationId,
+        externalPrincipalId: resourceId,
+        workspaceId,
+      });
+      sendJson(response, 200, { applied });
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+  if (resource === "identity-audit-log" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
+      throw new ApiHttpError(403, "organization_admin_required", "Organization administration access is required");
+    }
+    const listAudit = dependencies.tenantAdministration?.listIdentityProvisioningAudit;
+    if (listAudit === undefined) {
+      throw new ApiHttpError(501, "identity_provisioning_unavailable", "Identity provisioning requires PostgreSQL");
+    }
+    sendJson(response, 200, {
+      records: await listAudit.call(dependencies.tenantAdministration, access.organizationId),
+    });
+    return;
+  }
   if (resource === "repository-enrollments" && resourceId === undefined) {
     if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
       throw new ApiHttpError(403, "organization_admin_required", "Organization administration access is required");

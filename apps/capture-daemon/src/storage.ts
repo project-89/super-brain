@@ -1,10 +1,26 @@
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { createInterface } from "node:readline";
 
-import { encryptVaultLine, redactJsonValue, RecordAnonymizer } from "@_89/super-brain-importer";
+import {
+  decryptVaultLine,
+  encryptVaultLine,
+  redactJsonValue,
+  redactTranscriptRecord,
+  RecordAnonymizer,
+} from "@_89/super-brain-importer";
 
-import type { CaptureState, HookSource, SpoolJob, VaultArtifact } from "./types.js";
+import type {
+  CapturedStep,
+  CaptureSession,
+  CaptureState,
+  HookSource,
+  SpoolJob,
+  StoredHookArtifact,
+  VaultArtifact,
+} from "./types.js";
 
 const EMPTY_STATE: CaptureState = {
   version: 1,
@@ -93,6 +109,35 @@ function rebaseEventJob(job: Extract<SpoolJob, { readonly kind: "event" }>, even
   };
 }
 
+function rebaseTrajectoryJob(
+  job: Extract<SpoolJob, { readonly kind: "trajectory" | "trajectory-tree" }>,
+  eventTime: number,
+): SpoolJob {
+  const suffix = sha256(job.id).slice(0, 12);
+  const prefix = `capture-${eventTime.toString().padStart(13, "0")}`;
+  const treeStamp = {
+    id: `${prefix}-000-trajectory-tree-retry-${suffix}`,
+    t: eventTime,
+    worldDate: new Date(eventTime).toISOString().slice(0, 10),
+  };
+  const common = {
+    id: `${prefix}-900-retry-${suffix}`,
+    createdAt: new Date(eventTime).toISOString(),
+    treeStamp,
+    captureIdentity: { ...job.captureIdentity, reissuedFrom: job.id },
+  };
+  if (job.kind === "trajectory-tree") return { ...job, ...common };
+  return {
+    ...job,
+    ...common,
+    runStamp: {
+      id: `${prefix}-001-trajectory-run-retry-${suffix}`,
+      t: eventTime,
+      worldDate: new Date(eventTime).toISOString().slice(0, 10),
+    },
+  };
+}
+
 function safeSource(source: HookSource): string {
   return source.replace(/[^a-z0-9-]/g, "-");
 }
@@ -123,7 +168,222 @@ export class StateStore {
   }
 
   save(state: CaptureState): Promise<void> {
-    return atomicPrivateJson(this.path, state);
+    return atomicPrivateJson(this.path, {
+      ...state,
+      sessions: Object.fromEntries(Object.entries(state.sessions).map(([key, session]) => [key, {
+        ...session,
+        steps: [],
+        stepCount: session.steps.length,
+      }])),
+    });
+  }
+}
+
+function capturedStep(value: unknown, path: string, line: number): CapturedStep {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`capture step journal contains a non-object at ${path}:${line}`);
+  }
+  const step = value as Partial<CapturedStep>;
+  if (
+    typeof step.id !== "string" ||
+    !Number.isInteger(step.stepNumber) ||
+    (step.stepNumber ?? 0) < 1 ||
+    !(["decision", "action", "observation"] as const).includes(step.nodeKind as never) ||
+    !(["model_thought", "tool_call", "tool_call_response", "decision", "model_output"] as const)
+      .includes(step.role as never) ||
+    typeof step.content !== "string"
+  ) {
+    throw new Error(`capture step journal contains an invalid step at ${path}:${line}`);
+  }
+  return step as CapturedStep;
+}
+
+function stepEvidenceKey(step: Omit<CapturedStep, "id" | "stepNumber">): string {
+  return JSON.stringify([
+    step.artifactId ?? "",
+    step.eventId ?? "",
+    step.turnId ?? "",
+    step.role,
+    step.nodeKind,
+    step.toolName ?? "",
+    step.content,
+    step.startedAt ?? "",
+    step.durationMs ?? "",
+  ]);
+}
+
+export class SessionStepStore {
+  private readonly root: string;
+  private readonly cache = new Map<string, CapturedStep[]>();
+
+  constructor(stateRoot: string) {
+    this.root = join(stateRoot, "steps");
+  }
+
+  private identity(source: HookSource, sessionId: string): string {
+    return sha256(`${source}\0${sessionId}`);
+  }
+
+  private path(source: HookSource, sessionId: string): string {
+    const identity = this.identity(source, sessionId);
+    return join(this.root, identity.slice(0, 2), `${identity}.jsonl`);
+  }
+
+  async initialize(): Promise<void> {
+    await secureDirectory(this.root);
+  }
+
+  private async read(source: HookSource, sessionId: string): Promise<CapturedStep[]> {
+    const identity = this.identity(source, sessionId);
+    const cached = this.cache.get(identity);
+    if (cached !== undefined) return cached;
+    const path = this.path(source, sessionId);
+    let serialized: string;
+    try {
+      serialized = await readFile(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const empty: CapturedStep[] = [];
+        this.cache.set(identity, empty);
+        return empty;
+      }
+      throw error;
+    }
+    const rawLines = serialized.split("\n");
+    if (rawLines.at(-1) === "") rawLines.pop();
+    const steps: CapturedStep[] = [];
+    let validBytes = 0;
+    for (const [index, line] of rawLines.entries()) {
+      try {
+        const step = capturedStep(JSON.parse(line) as unknown, path, index + 1);
+        if (step.stepNumber !== steps.length + 1 || step.id !== `step-${step.stepNumber}`) {
+          throw new Error(`capture step journal is out of sequence at ${path}:${index + 1}`);
+        }
+        steps.push(step);
+        validBytes += Buffer.byteLength(`${line}\n`);
+      } catch (error) {
+        if (index !== rawLines.length - 1) throw error;
+        const file = await open(path, "r+");
+        try {
+          await file.truncate(validBytes);
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+      }
+    }
+    this.cache.set(identity, steps);
+    return steps;
+  }
+
+  async synchronize(session: CaptureSession): Promise<CaptureSession> {
+    await this.initialize();
+    const existing = await this.read(session.source, session.sessionId);
+    const evidence = new Map(existing.map((step) => [stepEvidenceKey(step), step]));
+    const additions: CapturedStep[] = [];
+    for (const candidate of session.steps) {
+      if (evidence.has(stepEvidenceKey(candidate))) continue;
+      const stepNumber = existing.length + additions.length + 1;
+      const step: CapturedStep = { ...candidate, id: `step-${stepNumber}`, stepNumber };
+      additions.push(step);
+      evidence.set(stepEvidenceKey(step), step);
+    }
+    if (additions.length > 0) {
+      const path = this.path(session.source, session.sessionId);
+      await secureDirectory(dirname(path));
+      const file = await open(path, "a", 0o600);
+      try {
+        await file.writeFile(additions.map((step) => `${JSON.stringify(step)}\n`).join(""), "utf8");
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await chmod(path, 0o600);
+      existing.push(...additions);
+    }
+    return { ...session, steps: [...existing], stepCount: existing.length };
+  }
+
+  async replace(session: CaptureSession, stepsInput: readonly CapturedStep[]): Promise<CaptureSession> {
+    await this.initialize();
+    const steps = stepsInput.map((step, index) => ({
+      ...step,
+      id: `step-${index + 1}`,
+      stepNumber: index + 1,
+    }));
+    const path = this.path(session.source, session.sessionId);
+    await atomicPrivateText(path, steps.map((step) => `${JSON.stringify(step)}\n`).join(""));
+    this.cache.set(this.identity(session.source, session.sessionId), steps);
+    return { ...session, steps, stepCount: steps.length };
+  }
+}
+
+export class TranscriptSnapshotStore {
+  private readonly root: string;
+
+  constructor(
+    stateRoot: string,
+    private readonly options: {
+      readonly reasoningPolicy?: "exclude" | "include";
+      readonly retainEncryptedReasoning?: boolean;
+    } = {},
+  ) {
+    this.root = resolve(stateRoot, "transcript-snapshots");
+  }
+
+  async store(source: HookSource, sourcePath: string): Promise<string> {
+    const before = await stat(sourcePath);
+    if (!before.isFile()) throw new Error(`transcript source is not a regular file: ${sourcePath}`);
+    const directory = join(this.root, safeSource(source));
+    await secureDirectory(directory);
+    const temporary = join(directory, `.${process.pid}.${Date.now()}.${sha256(sourcePath).slice(0, 12)}.tmp`);
+    const output = await open(temporary, "wx", 0o600);
+    const digest = createHash("sha256");
+    try {
+      const lines = createInterface({ input: createReadStream(sourcePath), crlfDelay: Infinity });
+      for await (const line of lines) {
+        if (line.trim().length === 0) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line) as unknown;
+        } catch {
+          parsed = line;
+        }
+        const protectedRecord = redactTranscriptRecord(parsed, this.options);
+        const serialized = `${JSON.stringify(protectedRecord.value)}\n`;
+        digest.update(serialized);
+        await output.writeFile(serialized, "utf8");
+      }
+      const after = await stat(sourcePath);
+      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+        throw new Error("transcript source changed while its durable snapshot was being created");
+      }
+      await output.sync();
+      await output.close();
+      const name = basename(sourcePath).replace(/[^a-zA-Z0-9._-]/g, "_") || "transcript.jsonl";
+      const target = join(directory, `${digest.digest("hex")}-${name}`);
+      try {
+        await stat(target);
+        await unlink(temporary);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await rename(temporary, target);
+        await chmod(target, 0o600);
+      }
+      return target;
+    } catch (error) {
+      await output.close().catch(() => undefined);
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async complete(pathInput: string): Promise<void> {
+    const path = resolve(pathInput);
+    if (path !== this.root && !path.startsWith(`${this.root}${sep}`)) {
+      throw new Error("refusing to remove a transcript outside the snapshot store");
+    }
+    await unlink(path);
   }
 }
 
@@ -162,20 +422,76 @@ export class HookVault {
     );
     return { id, receivedAt, eventTime, path };
   }
+
+  async sessionArtifacts(source: HookSource, sessionId: string): Promise<readonly StoredHookArtifact[]> {
+    const sourceRoot = join(this.root, "hooks", safeSource(source));
+    let prefixes: string[];
+    try {
+      prefixes = await readdir(sourceRoot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const expected = new Set([
+      sessionId,
+      this.options.anonymizer?.alias("session_id", sessionId),
+      this.options.anonymizer?.alias("sessionId", sessionId),
+      this.options.anonymizer?.alias("conversation_id", sessionId),
+    ].filter((value): value is string => value !== undefined));
+    const artifacts: StoredHookArtifact[] = [];
+    for (const prefix of prefixes.sort()) {
+      const directory = join(sourceRoot, prefix);
+      let names: string[];
+      try {
+        names = await readdir(directory);
+      } catch {
+        continue;
+      }
+      for (const name of names.sort()) {
+        const serialized = (await readFile(join(directory, name), "utf8")).trim();
+        if (serialized.length === 0) continue;
+        const parsed = JSON.parse(decryptVaultLine(serialized, this.encryptionKey)) as Partial<StoredHookArtifact>;
+        const payload = parsed.payload;
+        if (typeof payload !== "object" || payload === null || Array.isArray(payload)) continue;
+        const record = payload as Record<string, unknown>;
+        const observedSession = [record.session_id, record.sessionId, record.conversation_id]
+          .find((value): value is string => typeof value === "string");
+        if (observedSession === undefined || !expected.has(observedSession)) continue;
+        if (
+          typeof parsed.id !== "string" ||
+          typeof parsed.receivedAt !== "string" ||
+          typeof parsed.eventTime !== "number"
+        ) continue;
+        artifacts.push({
+          id: parsed.id,
+          source,
+          receivedAt: parsed.receivedAt,
+          eventTime: parsed.eventTime,
+          payload: record,
+        });
+      }
+    }
+    return artifacts.sort((left, right) =>
+      left.eventTime - right.eventTime || left.id.localeCompare(right.id)
+    );
+  }
 }
 
 export class DurableSpool {
   private readonly pending: string;
   private readonly failed: string;
+  private readonly resolved: string;
 
   constructor(stateRoot: string) {
     this.pending = join(stateRoot, "spool", "pending");
     this.failed = join(stateRoot, "spool", "failed");
+    this.resolved = join(stateRoot, "spool", "resolved");
   }
 
   async initialize(): Promise<void> {
     await secureDirectory(this.pending);
     await secureDirectory(this.failed);
+    await secureDirectory(this.resolved);
   }
 
   async enqueue(job: SpoolJob): Promise<void> {
@@ -214,29 +530,76 @@ export class DurableSpool {
   async snapshot(): Promise<SpoolSnapshot> {
     await this.initialize();
     const [pending, failedFiles] = await Promise.all([readdir(this.pending), readdir(this.failed)]);
+    const failedJobs = failedFiles.filter((name) => name.endsWith(".json") && !name.endsWith(".error.json")).sort();
     const failures = failedFiles.filter((name) => name.endsWith(".error.json")).sort();
     const latest = failures.at(-1);
-    if (latest === undefined) {
+    if (failedJobs.length === 0) {
       return {
         pendingJobs: pending.filter((name) => name.endsWith(".json")).length,
         failedJobs: 0,
       };
     }
-    const detail = JSON.parse(await readFile(join(this.failed, latest), "utf8")) as {
+    const detail = latest === undefined ? {} : JSON.parse(await readFile(join(this.failed, latest), "utf8")) as {
       readonly failedAt?: unknown;
       readonly reason?: unknown;
     };
     return {
       pendingJobs: pending.filter((name) => name.endsWith(".json")).length,
-      failedJobs: failures.length,
+      failedJobs: failedJobs.length,
       ...(typeof detail.failedAt === "string" ? { lastFailureAt: detail.failedAt } : {}),
       ...(typeof detail.reason === "string" ? { lastFailure: detail.reason.slice(0, 500) } : {}),
     };
   }
 
+  async resolveFailed(
+    reason: string,
+    confirm = false,
+  ): Promise<{ readonly matched: number; readonly resolved: number }> {
+    await this.initialize();
+    const normalizedReason = reason.trim();
+    if (normalizedReason.length === 0) throw new TypeError("failed-job resolution requires a reason");
+    const names = (await readdir(this.failed))
+      .filter((name) => name.endsWith(".json") && !name.endsWith(".error.json"))
+      .sort();
+    if (!confirm) return { matched: names.length, resolved: 0 };
+    let resolved = 0;
+    for (const name of names) {
+      const source = join(this.failed, name);
+      const errorPath = join(this.failed, `${name}.error.json`);
+      const job = JSON.parse(await readFile(source, "utf8")) as SpoolJob;
+      let failure: unknown;
+      try {
+        failure = JSON.parse(await readFile(errorPath, "utf8")) as unknown;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const target = join(this.resolved, name);
+      try {
+        await stat(target);
+        throw new Error(`cannot resolve failed job because an archived job has the same name: ${name}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      await atomicPrivateJson(`${target}.resolution.json`, {
+        resolvedAt: new Date().toISOString(),
+        reason: normalizedReason.slice(0, 2_000),
+        job: { id: job.id, kind: job.kind, createdAt: job.createdAt },
+        ...(failure === undefined ? {} : { failure }),
+      });
+      await rename(source, target);
+      try {
+        await rename(errorPath, `${target}.error.json`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      resolved += 1;
+    }
+    return { matched: names.length, resolved };
+  }
+
   async retryFailed(
     confirm = false,
-    options: { readonly rebaseEvents?: boolean } = {},
+    options: { readonly rebaseEvents?: boolean; readonly rebaseTrajectories?: boolean } = {},
   ): Promise<{ readonly matched: number; readonly retried: number; readonly rebased: number }> {
     await this.initialize();
     const names = (await readdir(this.failed))
@@ -251,7 +614,9 @@ export class DurableSpool {
       const job = JSON.parse(await readFile(source, "utf8")) as SpoolJob;
       const retryJob = options.rebaseEvents === true && job.kind === "event"
         ? rebaseEventJob(job, rebaseStart + index)
-        : job;
+        : options.rebaseTrajectories === true && (job.kind === "trajectory" || job.kind === "trajectory-tree")
+          ? rebaseTrajectoryJob(job, rebaseStart + index)
+          : job;
       const targetName = `${retryJob.id.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`;
       const target = join(this.pending, targetName);
       try {

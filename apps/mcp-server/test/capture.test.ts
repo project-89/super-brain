@@ -24,4 +24,26 @@ describe("MCP capture bridge", () => {
     expect(new Headers(init.headers).get("x-super-brain-hook-token")).toBe("hook-secret");
     expect(JSON.parse(String(init.body))).toMatchObject({ session_id: "session-a", cwd: "/workspace/project-a" });
   });
+
+  it("captures applied steering intention identity", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ accepted: true, artifactId: "artifact-b" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch;
+    const bridge = new CaptureBridge({
+      baseUrl: "http://127.0.0.1:3210",
+      token: "hook-secret",
+      source: "codex",
+      sessionId: "session-a",
+      fetch: fetchMock,
+    });
+    await bridge.steering(["intention-a", "intention-a", "intention-b"]);
+    const [url, init] = (fetchMock as any).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://127.0.0.1:3210/hook");
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      hook_event_name: "SteeringApplied",
+      intention_ids: ["intention-a", "intention-b"],
+      session_id: "session-a",
+    });
+  });
 });

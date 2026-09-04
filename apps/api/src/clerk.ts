@@ -1,9 +1,11 @@
 import { createClerkClient, type ClerkClient } from "@clerk/backend";
+import { verifyWebhook, type WebhookEvent } from "@clerk/backend/webhooks";
 import { authorSchema, type Author } from "@_89/fold";
 import type {
   ExternalOrganizationBinding,
   ExternalPrincipalBinding,
   TenantMembershipRecord,
+  ExternalIdentityProvisioningEvent,
 } from "@_89/fold-postgres";
 import { z } from "zod";
 
@@ -54,6 +56,11 @@ export interface ExternalIdentityResolver {
   resolveExternalPrincipal(provider: string, externalId: string): Promise<string | undefined>;
 }
 
+export interface ClerkProvisioningStore {
+  applyExternalIdentityProvisioningEvent(input: ExternalIdentityProvisioningEvent): Promise<boolean>;
+  resolveExternalOrganization?(provider: string, externalId: string): Promise<string | undefined>;
+}
+
 export interface ClerkBindingConfiguration {
   readonly organizations: readonly ExternalOrganizationBinding[];
   readonly principals: readonly ExternalPrincipalBinding[];
@@ -62,6 +69,10 @@ export interface ClerkBindingConfiguration {
 
 export class ClerkBindingConfigurationError extends Error {
   override readonly name = "ClerkBindingConfigurationError";
+}
+
+export class ClerkWebhookVerificationError extends Error {
+  override readonly name = "ClerkWebhookVerificationError";
 }
 
 function claims(value: unknown): z.infer<typeof integrationClaimsSchema>["super_brain"] {
@@ -196,6 +207,116 @@ export class ClerkAuthenticator implements Authenticator {
       identityProvider: "clerk",
       organizationId,
     };
+  }
+}
+
+function provisionedOrganizationId(externalId: string): string {
+  return `clerk:${externalId}`;
+}
+
+function provisionedPrincipalId(externalUserId: string): string {
+  return `clerk:user:${externalUserId}`;
+}
+
+function provisionedRole(role: string): {
+  readonly organizationRole: TenantMembershipRecord["organizationRole"];
+  readonly workspaceRole: TenantMembershipRecord["workspaceRole"];
+} {
+  const normalized = role.replace(/^org:/, "");
+  if (normalized === "owner") return { organizationRole: "owner", workspaceRole: "owner" };
+  if (normalized === "admin") return { organizationRole: "admin", workspaceRole: "admin" };
+  return { organizationRole: "member", workspaceRole: "member" };
+}
+
+export class ClerkProvisioningWebhook {
+  constructor(
+    private readonly store: ClerkProvisioningStore,
+    private readonly options: {
+      readonly signingSecret: string;
+      readonly defaultWorkspaceId?: string;
+      readonly verifier?: (request: Request, options: { readonly signingSecret: string }) => Promise<WebhookEvent>;
+    },
+  ) {
+    if (options.signingSecret.trim().length === 0) throw new TypeError("Clerk webhook signing secret is required");
+  }
+
+  async handle(input: {
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string | readonly string[] | undefined>>;
+    readonly body: Uint8Array;
+  }): Promise<{ readonly applied: boolean }> {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(input.headers)) {
+      if (typeof value === "string") headers.set(name, value);
+      else for (const entry of value ?? []) headers.append(name, entry);
+    }
+    const body = input.body.buffer.slice(
+      input.body.byteOffset,
+      input.body.byteOffset + input.body.byteLength,
+    ) as ArrayBuffer;
+    const request = new Request(input.url, { method: "POST", headers, body });
+    let event: WebhookEvent;
+    try {
+      event = await (this.options.verifier ?? verifyWebhook)(request, {
+        signingSecret: this.options.signingSecret,
+      });
+    } catch {
+      throw new ClerkWebhookVerificationError("Clerk webhook signature is invalid");
+    }
+    const eventId = headers.get("svix-id")?.trim();
+    if (eventId === undefined || eventId.length === 0) throw new TypeError("Clerk webhook id is required");
+
+    const organizationId = async (externalId: string) =>
+      await this.store.resolveExternalOrganization?.("clerk", externalId) ?? provisionedOrganizationId(externalId);
+
+    if (event.type === "organization.created" || event.type === "organization.updated") {
+      return {
+        applied: await this.store.applyExternalIdentityProvisioningEvent({
+          eventId,
+          provider: "clerk",
+          type: "organization.upsert",
+          externalOrganizationId: event.data.id,
+          organizationId: await organizationId(event.data.id),
+          organizationName: event.data.name,
+        }),
+      };
+    }
+    if (event.type === "organization.deleted") {
+      if (event.data.id === undefined) throw new TypeError("deleted Clerk organization has no id");
+      return {
+        applied: await this.store.applyExternalIdentityProvisioningEvent({
+          eventId,
+          provider: "clerk",
+          type: "organization.delete",
+          externalOrganizationId: event.data.id,
+          organizationId: await organizationId(event.data.id),
+        }),
+      };
+    }
+    if (
+      event.type === "organizationMembership.created" ||
+      event.type === "organizationMembership.updated" ||
+      event.type === "organizationMembership.deleted"
+    ) {
+      const externalOrganizationId = event.data.organization.id;
+      const externalUserId = event.data.public_user_data.user_id;
+      const roles = provisionedRole(event.data.role);
+      return {
+        applied: await this.store.applyExternalIdentityProvisioningEvent({
+          eventId,
+          provider: "clerk",
+          type: event.type === "organizationMembership.deleted" ? "membership.delete" : "membership.upsert",
+          externalOrganizationId,
+          organizationId: await organizationId(externalOrganizationId),
+          organizationName: event.data.organization.name,
+          externalPrincipalId: `user:${externalUserId}`,
+          principalId: provisionedPrincipalId(externalUserId),
+          workspaceId: this.options.defaultWorkspaceId ?? "default",
+          ...roles,
+        }),
+      };
+    }
+    return { applied: false };
   }
 }
 

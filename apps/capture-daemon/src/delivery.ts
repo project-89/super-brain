@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 
 import { SuperBrainApiError, SuperBrainClient } from "@_89/super-brain-client";
-import { mergeSharedDecisionTrees } from "@_89/fold-trace";
+import { mergeSharedDecisionTrees, ProjectionValidationError } from "@_89/fold-trace";
 import {
   deliverTranscriptBundle,
   parseClaudeTranscript,
@@ -11,7 +11,7 @@ import {
   TranscriptDeliveryError,
 } from "@_89/super-brain-importer";
 
-import { DurableSpool } from "./storage.js";
+import { DurableSpool, TranscriptSnapshotStore } from "./storage.js";
 import type { CaptureConfig, SpoolJob } from "./types.js";
 
 function errorMessage(error: unknown): string {
@@ -19,6 +19,7 @@ function errorMessage(error: unknown): string {
 }
 
 function permanentApiError(error: unknown): boolean {
+  if (error instanceof ProjectionValidationError) return true;
   if (error instanceof SuperBrainApiError) return error.status >= 400 && error.status < 500 && error.status !== 429;
   if (error instanceof TranscriptDeliveryError && error.status !== undefined) {
     return error.status >= 400 && error.status < 500 && error.status !== 429;
@@ -31,6 +32,7 @@ export class SpoolProcessor {
   private timer: NodeJS.Timeout | undefined;
   private processing: Promise<void> | undefined;
   private readonly retryAt = new Map<string, number>();
+  private readonly snapshots: TranscriptSnapshotStore;
 
   constructor(
     private readonly config: CaptureConfig,
@@ -44,6 +46,7 @@ export class SpoolProcessor {
       workspaceId: config.workspaceId,
       token: config.apiToken,
     });
+    this.snapshots = new TranscriptSnapshotStore(config.stateRoot);
   }
 
   start(intervalMs = 500): void {
@@ -113,6 +116,9 @@ export class SpoolProcessor {
       if ((this.retryAt.get(path) ?? 0) > Date.now()) continue;
       try {
         await this.deliver(job);
+        if (job.kind === "transcript" && job.ownedSnapshot === true) {
+          await this.snapshots.complete(job.path);
+        }
         this.retryAt.delete(path);
         await this.spool.complete(path);
       } catch (error) {

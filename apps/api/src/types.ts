@@ -9,6 +9,8 @@ import type { FoldLogEntry } from "@_89/fold";
 import type { ReasoningProvider } from "./reasoning.js";
 import type { RequestRateLimiter } from "./rate-limit.js";
 import type {
+  ExternalIdentityProvisioningEvent,
+  IdentityProvisioningAuditRecord,
   PlatformAccessAuditRecord,
   RepositoryEnrollment,
 } from "@_89/fold-postgres";
@@ -124,6 +126,29 @@ export interface TenantAdministration {
     organizationId: string,
     workspaceId: string,
   ): Promise<readonly PlatformAccessAuditRecord[]>;
+  listPrincipalMemberships?(
+    organizationId: string,
+    principalId: string,
+  ): Promise<readonly {
+    readonly organizationId: string;
+    readonly organizationRole: OrganizationRole;
+    readonly workspaceId: string;
+    readonly workspaceRole: FoldSdkAccessContext["workspaceRole"];
+  }[]>;
+  applyExternalIdentityProvisioningEvent?(
+    input: ExternalIdentityProvisioningEvent,
+  ): Promise<boolean>;
+  listIdentityProvisioningAudit?(
+    organizationId: string,
+  ): Promise<readonly IdentityProvisioningAuditRecord[]>;
+}
+
+export interface IdentityProvisioningWebhook {
+  handle(input: {
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string | readonly string[] | undefined>>;
+    readonly body: Uint8Array;
+  }): Promise<{ readonly applied: boolean }>;
 }
 
 export interface ApiDependencies {
@@ -139,6 +164,7 @@ export interface ApiDependencies {
   readonly eventStreamPollMs?: number;
   readonly fleetOrphanAfterMs?: number;
   readonly tenantAdministration?: TenantAdministration;
+  readonly identityProvisioningWebhook?: IdentityProvisioningWebhook;
 }
 
 export interface StaticWorkspaceMembership {
