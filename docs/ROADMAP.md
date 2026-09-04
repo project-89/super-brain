@@ -20,6 +20,7 @@ listed as complete are backed by code and tests; they are not simulated UI.
 | Operator UI | Complete | Live fleet, history, memory review/feedback, trajectory evidence, reasoning, steering, raw event, and projected-state views |
 | Capture privacy | Complete | Mandatory secret redaction, optional stable pseudonymous/strict anonymization, separate exposed/opaque reasoning controls, and a dedicated local operator settings credential |
 | Multi-tenant application boundary | Complete | Organization routes and memberships, tenant-keyed storage/workers/vectors/caches, forced PostgreSQL RLS, repository enrollment, and audited platform reads |
+| External identity | Complete | Clerk sessions, organization API keys, and M2M tokens resolve through explicit external-ID bindings with scoped capabilities and fail-closed revocation |
 
 ## Deployment Choices
 
@@ -28,8 +29,9 @@ features:
 
 1. Select and operate a real embedding service before enabling pgvector ranking;
    deterministic lexical BM25 remains the complete default.
-2. Put TLS, a durable identity/rotation system, and distributed rate limiting in
-   front of the API before exposing it outside a trusted local network.
+2. Configure Clerk production keys, authorized parties, automated tenant
+   onboarding/deprovisioning, TLS, and distributed rate limiting before exposing
+   the API outside a trusted local network.
 3. Schedule the supplied PostgreSQL backup and disposable restore verification,
    retain an encrypted off-host copy, and monitor failure/age.
 4. Provision one scoped sensor or harness credential per remote machine or agent
@@ -37,5 +39,6 @@ features:
 5. Add a manual project merge/split workflow only when real ambiguous identities
    appear. The stored resolution state already preserves that uncertainty.
 6. Before public hosting, complete the production gate in `MULTI_TENANCY.md`:
-   external identity integration, non-bypass database role, remote artifact/KMS
-   namespacing, quarantine provisioning, and topology-level restore/isolation drills.
+   automated identity provisioning, non-bypass database role, remote
+   artifact/KMS namespacing, quarantine provisioning, and topology-level
+   restore/isolation drills.

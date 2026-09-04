@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CompositeAuthenticator,
+  PostgresMembershipResolver,
   StaticCredentialConfigurationError,
   StaticIdentityDirectory,
 } from "../src/index.js";
@@ -110,5 +112,42 @@ describe("static identity directory", () => {
     ).toThrow(/invalid/);
     expect(() => StaticIdentityDirectory.fromJson("{"))
       .toThrow(/not valid JSON/);
+  });
+
+  it("composes providers and enforces token-bound organization and role limits", async () => {
+    const fallback = {
+      async authenticate(token: string) {
+        return token === "external" ? {
+          credentialId: "clerk:session:a",
+          principalId: "principal-a",
+          author: { kind: "human" as const, id: "principal-a" },
+          identityProvider: "clerk" as const,
+          organizationId: "organization-a",
+          organizationRoleLimit: "member" as const,
+        } : undefined;
+      },
+    };
+    const composite = new CompositeAuthenticator([
+      { async authenticate() { return undefined; } },
+      fallback,
+    ]);
+    const subject = (await composite.authenticate("external"))!;
+    const memberships = new PostgresMembershipResolver({
+      async resolveMembership(organizationId, workspaceId, principalId) {
+        return {
+          organizationId,
+          organizationRole: "owner",
+          workspaceId,
+          workspaceRole: "admin",
+          principalId,
+          spaceRoles: {},
+        };
+      },
+    });
+
+    await expect(memberships.resolveAccess(subject, "organization-b", "workspace-a"))
+      .resolves.toBeUndefined();
+    await expect(memberships.resolveAccess(subject, "organization-a", "workspace-a"))
+      .resolves.toMatchObject({ organizationRole: "member", workspaceRole: "admin" });
   });
 });

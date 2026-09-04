@@ -49,6 +49,16 @@ export interface TenantMembershipRecord {
   readonly spaceRoles: Readonly<Record<string, "admin" | "writer" | "reader">>;
 }
 
+export interface ExternalOrganizationBinding {
+  readonly externalId: string;
+  readonly organizationId: string;
+}
+
+export interface ExternalPrincipalBinding {
+  readonly externalId: string;
+  readonly principalId: string;
+}
+
 interface RepositoryEnrollmentRow extends QueryResultRow {
   readonly id: string;
   readonly organization_id: string;
@@ -203,6 +213,21 @@ export class PostgresTenantAdministration {
         FOREIGN KEY (organization_id, workspace_id)
           REFERENCES ${this.table("fold_workspaces")}(organization_id, id)
       )`);
+      await client.query(`CREATE TABLE IF NOT EXISTS ${this.table("fold_external_organization_bindings")} (
+        provider text NOT NULL,
+        external_id text NOT NULL,
+        organization_id text NOT NULL REFERENCES ${this.table("fold_organizations")}(id),
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (provider, external_id),
+        UNIQUE (provider, organization_id)
+      )`);
+      await client.query(`CREATE TABLE IF NOT EXISTS ${this.table("fold_external_principal_bindings")} (
+        provider text NOT NULL,
+        external_id text NOT NULL,
+        principal_id text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (provider, external_id)
+      )`);
       for (const tableName of [
         "fold_workspaces",
         "fold_organization_memberships",
@@ -262,9 +287,10 @@ export class PostgresTenantAdministration {
       VALUES ($1, $2, $2) ON CONFLICT (organization_id, id) DO NOTHING`, [organizationId, workspaceId]);
   }
 
-  async replaceStaticMemberships(records: readonly TenantMembershipRecord[]): Promise<void> {
+  private async replaceMemberships(sourceInput: string, records: readonly TenantMembershipRecord[]): Promise<void> {
     if (this.closed) throw new Error("PostgreSQL tenant administration is closed");
     await this.ready;
+    const source = required(sourceInput, "membership source");
     const byOrganization = new Map<string, TenantMembershipRecord[]>();
     for (const record of records) {
       const organizationId = required(record.organizationId, "organizationId");
@@ -286,9 +312,9 @@ export class PostgresTenantAdministration {
           await this.ensureTenant(client, organizationId, required(record.workspaceId, "workspaceId"));
         }
         await client.query(`DELETE FROM ${this.table("fold_workspace_memberships")}
-          WHERE organization_id = $1 AND source = 'static'`, [organizationId]);
+          WHERE organization_id = $1 AND source = $2`, [organizationId, source]);
         await client.query(`DELETE FROM ${this.table("fold_organization_memberships")}
-          WHERE organization_id = $1 AND source = 'static'`, [organizationId]);
+          WHERE organization_id = $1 AND source = $2`, [organizationId, source]);
         const organizationPrincipals = new Map<string, TenantMembershipRecord["organizationRole"]>();
         for (const record of organizationRecords) {
           const previous = organizationPrincipals.get(record.principalId);
@@ -298,21 +324,103 @@ export class PostgresTenantAdministration {
           organizationPrincipals.set(record.principalId, record.organizationRole);
           await client.query(`INSERT INTO ${this.table("fold_workspace_memberships")}
             (organization_id, workspace_id, principal_id, role, space_roles, source)
-            VALUES ($1, $2, $3, $4, $5::jsonb, 'static')`, [
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6)`, [
             organizationId,
             record.workspaceId,
             record.principalId,
             record.workspaceRole,
             JSON.stringify(record.spaceRoles),
+            source,
           ]);
         }
         for (const [principalId, role] of organizationPrincipals) {
           await client.query(`INSERT INTO ${this.table("fold_organization_memberships")}
             (organization_id, principal_id, role, source)
-            VALUES ($1, $2, $3, 'static')`, [organizationId, principalId, role]);
+            VALUES ($1, $2, $3, $4)`, [organizationId, principalId, role, source]);
         }
       });
     }
+  }
+
+  replaceStaticMemberships(records: readonly TenantMembershipRecord[]): Promise<void> {
+    return this.replaceMemberships("static", records);
+  }
+
+  replaceProviderMemberships(
+    providerInput: string,
+    records: readonly TenantMembershipRecord[],
+  ): Promise<void> {
+    return this.replaceMemberships(`identity:${required(providerInput, "identity provider")}`, records);
+  }
+
+  async replaceExternalIdentityBindings(
+    providerInput: string,
+    organizations: readonly ExternalOrganizationBinding[],
+    principals: readonly ExternalPrincipalBinding[],
+  ): Promise<void> {
+    if (this.closed) throw new Error("PostgreSQL tenant administration is closed");
+    await this.ready;
+    const provider = required(providerInput, "identity provider");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`DELETE FROM ${this.table("fold_external_organization_bindings")}
+        WHERE provider = $1`, [provider]);
+      await client.query(`DELETE FROM ${this.table("fold_external_principal_bindings")}
+        WHERE provider = $1`, [provider]);
+      for (const binding of organizations) {
+        const externalId = required(binding.externalId, "external organization id");
+        const organizationId = required(binding.organizationId, "organizationId");
+        await client.query(`INSERT INTO ${this.table("fold_organizations")} (id, display_name)
+          VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`, [organizationId]);
+        await client.query(`INSERT INTO ${this.table("fold_external_organization_bindings")}
+          (provider, external_id, organization_id) VALUES ($1, $2, $3)`, [
+          provider,
+          externalId,
+          organizationId,
+        ]);
+      }
+      for (const binding of principals) {
+        await client.query(`INSERT INTO ${this.table("fold_external_principal_bindings")}
+          (provider, external_id, principal_id) VALUES ($1, $2, $3)`, [
+          provider,
+          required(binding.externalId, "external principal id"),
+          required(binding.principalId, "principalId"),
+        ]);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async resolveExternalOrganization(
+    providerInput: string,
+    externalIdInput: string,
+  ): Promise<string | undefined> {
+    if (this.closed) throw new Error("PostgreSQL tenant administration is closed");
+    await this.ready;
+    const result = await this.pool.query<{ readonly organization_id: string }>(`
+      SELECT organization_id FROM ${this.table("fold_external_organization_bindings")}
+      WHERE provider = $1 AND external_id = $2
+    `, [required(providerInput, "identity provider"), required(externalIdInput, "external organization id")]);
+    return result.rows[0]?.organization_id;
+  }
+
+  async resolveExternalPrincipal(
+    providerInput: string,
+    externalIdInput: string,
+  ): Promise<string | undefined> {
+    if (this.closed) throw new Error("PostgreSQL tenant administration is closed");
+    await this.ready;
+    const result = await this.pool.query<{ readonly principal_id: string }>(`
+      SELECT principal_id FROM ${this.table("fold_external_principal_bindings")}
+      WHERE provider = $1 AND external_id = $2
+    `, [required(providerInput, "identity provider"), required(externalIdInput, "external principal id")]);
+    return result.rows[0]?.principal_id;
   }
 
   resolveMembership(

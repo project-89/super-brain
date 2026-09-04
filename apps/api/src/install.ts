@@ -8,6 +8,11 @@ const execFileAsync = promisify(execFile);
 
 const API_ENVIRONMENT_KEYS = [
   "FOLD_API_CREDENTIALS_JSON",
+  "CLERK_SECRET_KEY",
+  "CLERK_PUBLISHABLE_KEY",
+  "CLERK_MACHINE_SECRET_KEY",
+  "FOLD_CLERK_AUTHORIZED_PARTIES",
+  "FOLD_CLERK_BINDINGS_JSON",
   "FOLD_API_HOST",
   "FOLD_API_PORT",
   "FOLD_DATA_DIR",
@@ -26,14 +31,35 @@ function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-function environmentFrom(source: NodeJS.ProcessEnv): Record<string, string> {
+export function apiServiceEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
   const environment: Record<string, string> = {};
   for (const key of API_ENVIRONMENT_KEYS) {
     const value = source[key];
     if (value !== undefined && value.length > 0) environment[key] = value;
   }
-  if (environment.FOLD_API_CREDENTIALS_JSON === undefined) {
-    throw new TypeError("FOLD_API_CREDENTIALS_JSON is required to install the API service");
+  if (
+    environment.FOLD_API_CREDENTIALS_JSON === undefined &&
+    environment.CLERK_SECRET_KEY === undefined
+  ) {
+    throw new TypeError("FOLD_API_CREDENTIALS_JSON or CLERK_SECRET_KEY is required to install the API service");
+  }
+  const clerkConfigured = [
+    "CLERK_SECRET_KEY",
+    "CLERK_PUBLISHABLE_KEY",
+    "CLERK_MACHINE_SECRET_KEY",
+    "FOLD_CLERK_AUTHORIZED_PARTIES",
+    "FOLD_CLERK_BINDINGS_JSON",
+  ].some((key) => environment[key] !== undefined);
+  if (clerkConfigured) {
+    for (const key of [
+      "CLERK_SECRET_KEY",
+      "CLERK_PUBLISHABLE_KEY",
+      "FOLD_CLERK_AUTHORIZED_PARTIES",
+      "FOLD_CLERK_BINDINGS_JSON",
+      "FOLD_DATABASE_URL",
+    ] as const) {
+      if (environment[key] === undefined) throw new TypeError(`${key} is required for Clerk authentication`);
+    }
   }
   return environment;
 }
@@ -75,7 +101,7 @@ export async function installApiLaunchAgent(
   ]);
   await writeFile(path, apiLaunchAgentPlist({
     executable,
-    environment: environmentFrom(source),
+    environment: apiServiceEnvironment(source),
     workingDirectory: process.cwd(),
     stateRoot,
   }), { encoding: "utf8", mode: 0o600 });

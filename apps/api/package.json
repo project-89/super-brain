@@ -29,6 +29,7 @@
     "@_89/fold-storage": "workspace:*",
     "@_89/fold-transcript": "workspace:*",
     "@_89/fold-trajectory": "workspace:*",
+    "@clerk/backend": "^3.17.1",
     "zod": "^3.25.0"
   }
 }

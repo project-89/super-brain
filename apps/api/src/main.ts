@@ -3,7 +3,12 @@ import { fileURLToPath } from "node:url";
 
 import { PostgresTenantAdministration, PostgresVectorMemoryRanker } from "@_89/fold-postgres";
 
-import { PostgresMembershipResolver, StaticIdentityDirectory } from "./auth.js";
+import { CompositeAuthenticator, PostgresMembershipResolver, StaticIdentityDirectory } from "./auth.js";
+import {
+  ClerkAuthenticator,
+  ClerkBackendTokenVerifier,
+  parseClerkBindingConfiguration,
+} from "./clerk.js";
 import { JournalSdkRegistry, PostgresSdkRegistry } from "./registry.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
@@ -47,6 +52,31 @@ function booleanFromEnvironment(name: string, value: string | undefined): boolea
   throw new TypeError(`${name} must be true or false`);
 }
 
+function requiredEnvironment(name: string, value: string | undefined): string {
+  if (value === undefined || value.trim().length === 0) throw new TypeError(`${name} is required`);
+  return value;
+}
+
+function commaSeparatedEnvironment(name: string, value: string | undefined): readonly string[] {
+  const entries = requiredEnvironment(name, value).split(",").map((entry) => entry.trim());
+  if (entries.some((entry) => entry.length === 0)) {
+    throw new TypeError(`${name} must be a comma-separated list without empty entries`);
+  }
+  const origins = entries.map((entry) => {
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      throw new TypeError(`${name} entries must be absolute HTTP(S) origins`);
+    }
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== entry) {
+      throw new TypeError(`${name} entries must be absolute HTTP(S) origins`);
+    }
+    return url.origin;
+  });
+  return [...new Set(origins)];
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2).filter((argument) => argument !== "--");
   const command = args[0] ?? "serve";
@@ -56,12 +86,24 @@ async function main(): Promise<void> {
   }
   if (command !== "serve") throw new TypeError("supported commands: serve, install-service");
   const credentials = process.env.FOLD_API_CREDENTIALS_JSON;
-  if (credentials === undefined || credentials.trim().length === 0) {
-    throw new TypeError("FOLD_API_CREDENTIALS_JSON is required");
+  const directory = credentials === undefined || credentials.trim().length === 0
+    ? undefined
+    : StaticIdentityDirectory.fromJson(credentials);
+  const clerkEnabled = [
+    process.env.CLERK_SECRET_KEY,
+    process.env.CLERK_PUBLISHABLE_KEY,
+    process.env.CLERK_MACHINE_SECRET_KEY,
+    process.env.FOLD_CLERK_AUTHORIZED_PARTIES,
+    process.env.FOLD_CLERK_BINDINGS_JSON,
+  ].some((value) => value !== undefined);
+  if (directory === undefined && !clerkEnabled) {
+    throw new TypeError("FOLD_API_CREDENTIALS_JSON or CLERK_SECRET_KEY is required");
   }
-  const directory = StaticIdentityDirectory.fromJson(credentials);
   const dataDirectory = process.env.FOLD_DATA_DIR ?? join(process.cwd(), ".data", "fold");
   const databaseUrl = process.env.FOLD_DATABASE_URL;
+  if (clerkEnabled && (databaseUrl === undefined || databaseUrl.trim().length === 0)) {
+    throw new TypeError("Clerk authentication requires FOLD_DATABASE_URL");
+  }
   const requireRlsEnforcement = booleanFromEnvironment(
     "FOLD_REQUIRE_TENANT_RLS",
     process.env.FOLD_REQUIRE_TENANT_RLS,
@@ -72,6 +114,40 @@ async function main(): Promise<void> {
   const tenantAdministration = databaseUrl === undefined || databaseUrl.trim().length === 0
     ? undefined
     : new PostgresTenantAdministration({ connectionString: databaseUrl, requireRlsEnforcement });
+  let clerkConfiguration: ReturnType<typeof parseClerkBindingConfiguration> | undefined;
+  let clerkAuthenticator: ClerkAuthenticator | undefined;
+  if (clerkEnabled) {
+    if (tenantAdministration === undefined) throw new TypeError("Clerk tenant administration is unavailable");
+    clerkConfiguration = parseClerkBindingConfiguration(requiredEnvironment(
+      "FOLD_CLERK_BINDINGS_JSON",
+      process.env.FOLD_CLERK_BINDINGS_JSON,
+    ));
+    clerkAuthenticator = new ClerkAuthenticator(
+      new ClerkBackendTokenVerifier({
+        secretKey: requiredEnvironment("CLERK_SECRET_KEY", process.env.CLERK_SECRET_KEY),
+        publishableKey: requiredEnvironment("CLERK_PUBLISHABLE_KEY", process.env.CLERK_PUBLISHABLE_KEY),
+        authorizedParties: commaSeparatedEnvironment(
+          "FOLD_CLERK_AUTHORIZED_PARTIES",
+          process.env.FOLD_CLERK_AUTHORIZED_PARTIES,
+        ),
+        ...(process.env.CLERK_MACHINE_SECRET_KEY === undefined
+          ? {}
+          : {
+              machineSecretKey: requiredEnvironment(
+                "CLERK_MACHINE_SECRET_KEY",
+                process.env.CLERK_MACHINE_SECRET_KEY,
+              ),
+            }),
+      }),
+      tenantAdministration,
+    );
+  }
+  const authenticators = [directory, clerkAuthenticator].filter(
+    (provider): provider is NonNullable<typeof provider> => provider !== undefined,
+  );
+  const authenticator = authenticators.length === 1
+    ? authenticators[0]!
+    : new CompositeAuthenticator(authenticators);
   const embeddingUrl = process.env.FOLD_EMBEDDING_URL;
   let vectorRanker: PostgresVectorMemoryRanker | undefined;
   if (embeddingUrl !== undefined) {
@@ -110,12 +186,20 @@ async function main(): Promise<void> {
   try {
     await registry.open();
     if (tenantAdministration !== undefined) {
-      await tenantAdministration.replaceStaticMemberships(directory.configuredMemberships());
+      await tenantAdministration.replaceStaticMemberships(directory?.configuredMemberships() ?? []);
+      if (clerkConfiguration !== undefined) {
+        await tenantAdministration.replaceExternalIdentityBindings(
+          "clerk",
+          clerkConfiguration.organizations,
+          clerkConfiguration.principals,
+        );
+        await tenantAdministration.replaceProviderMemberships("clerk", clerkConfiguration.memberships);
+      }
     }
     server = createApiServer({
-      authenticator: directory,
+      authenticator,
       memberships: tenantAdministration === undefined
-        ? directory
+        ? directory!
         : new PostgresMembershipResolver(tenantAdministration),
       sdks: registry,
       memoryRanker: vectorRanker ?? new LocalLexicalMemoryRanker(),

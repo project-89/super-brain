@@ -208,6 +208,40 @@ integrationDescribe("Postgres Fold store", () => {
       .resolves.toMatchObject([{ principalId: "support-a", reason: "Investigating incident SB-42" }]);
   });
 
+  it("replaces and revokes external identity bindings and provider memberships", async () => {
+    const organizationId = `org-clerk-${workspaceId}`;
+    const principalId = "principal-clerk";
+    await administration.replaceExternalIdentityBindings(
+      "clerk",
+      [{ externalId: "org_external", organizationId }],
+      [{ externalId: "user:user_external", principalId }],
+    );
+    await administration.replaceProviderMemberships("clerk", [{
+      organizationId,
+      organizationRole: "admin",
+      workspaceId: "workspace-clerk",
+      workspaceRole: "member",
+      principalId,
+      spaceRoles: {},
+    }]);
+
+    await expect(administration.resolveExternalOrganization("clerk", "org_external"))
+      .resolves.toBe(organizationId);
+    await expect(administration.resolveExternalPrincipal("clerk", "user:user_external"))
+      .resolves.toBe(principalId);
+    await expect(administration.resolveMembership(organizationId, "workspace-clerk", principalId))
+      .resolves.toMatchObject({ organizationRole: "admin", workspaceRole: "member" });
+
+    await administration.replaceExternalIdentityBindings("clerk", [], []);
+    await administration.replaceProviderMemberships("clerk", []);
+    await expect(administration.resolveExternalOrganization("clerk", "org_external"))
+      .resolves.toBeUndefined();
+    await expect(administration.resolveExternalPrincipal("clerk", "user:user_external"))
+      .resolves.toBeUndefined();
+    await expect(administration.resolveMembership(organizationId, "workspace-clerk", principalId))
+      .resolves.toBeUndefined();
+  });
+
   it("indexes authorized memory documents and ranks them through pgvector", async () => {
     const ranker = new PostgresVectorMemoryRanker({
       connectionString: connectionString!,

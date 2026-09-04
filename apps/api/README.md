@@ -7,8 +7,9 @@ trajectory, fleet, steering, and transcript catalog behavior.
 
 ## Configuration
 
-`FOLD_API_CREDENTIALS_JSON` is required. It maps bearer tokens to a principal,
-an optional fixed Fold author, and explicit organization/workspace memberships:
+At least one authentication provider is required. `FOLD_API_CREDENTIALS_JSON`
+is the local and self-hosted provider. It maps bearer tokens to a principal, an
+optional fixed Fold author, and explicit organization/workspace memberships:
 
 ```json
 {
@@ -43,6 +44,62 @@ audit administration in addition to the organization role. `platform:data-read` 
 audited, expiring support access. Omitting it preserves full access for local
 operator credentials. Workspace and space roles still apply after capability
 checks.
+
+Hosted deployments can enable Clerk with `CLERK_SECRET_KEY`,
+`CLERK_PUBLISHABLE_KEY`, `FOLD_CLERK_AUTHORIZED_PARTIES`, and
+`FOLD_CLERK_BINDINGS_JSON`. Clerk requires PostgreSQL. Static and Clerk
+authentication may run together during migration. The API accepts Clerk
+session tokens, organization API keys, and M2M tokens; OAuth access tokens are
+not accepted.
+
+Clerk identity is resolved through explicit bindings rather than using Clerk
+IDs as internal tenant keys. A minimal binding document is:
+
+```json
+{
+  "organizations": { "org_clerk": "organization-1" },
+  "principals": {
+    "user:user_clerk": "user-a",
+    "api-key:ak_capture": "capture-a",
+    "machine:machine_worker": "memory-worker"
+  },
+  "memberships": [
+    {
+      "organizationId": "organization-1",
+      "organizationRole": "owner",
+      "workspaceId": "workspace-1",
+      "workspaceRole": "owner",
+      "principalId": "user-a",
+      "spaceRoles": {}
+    }
+  ]
+}
+```
+
+All referenced internal organizations and principals must be bound. Replacing
+the document at restart replaces Clerk-owned bindings and memberships, so a
+removed identity loses access rather than retaining a stale database row.
+Session tokens must carry an active Clerk organization; its role caps the
+stored organization role. API keys are bound as `api-key:<Clerk key ID>` and
+M2M identities as `machine:<Clerk machine ID>`. Their Clerk scopes must match
+an API capability directly or use the `super-brain:` prefix. For example,
+`super-brain:events:write` grants only `events:write`.
+
+An organization API key used by capture can carry this backend-issued Clerk
+claim to bind its Fold author:
+
+```json
+{
+  "super_brain": {
+    "author": { "kind": "sensor", "id": "urn:sensor:capture:host-a" }
+  }
+}
+```
+
+M2M tokens also require `super_brain.organizationId` containing the external
+Clerk organization ID. `CLERK_MACHINE_SECRET_KEY` is optional when a separate
+Clerk machine secret is configured. `FOLD_CLERK_AUTHORIZED_PARTIES` is a
+comma-separated list of exact HTTP(S) origins allowed in session-token `azp`.
 
 Optional environment:
 
@@ -190,8 +247,8 @@ only after enforcing a distributed limit upstream. HTTP request, header,
 keep-alive, per-socket request-count, and shutdown-drain bounds prevent indefinite
 connections.
 
-TLS termination, credential rotation, external identity providers,
-authenticated external sensor producers, recovery actuation, embedding/model
+TLS termination, Clerk tenant-onboarding automation, authenticated external
+sensor provisioning, recovery actuation, embedding/model
 sidecars, multi-host failover, and distributed proxy rate limits remain
 deployment concerns rather than implicit behavior in this local service.
 

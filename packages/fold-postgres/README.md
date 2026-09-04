@@ -11,7 +11,9 @@ It owns organization-scoped durable tables for:
 - rebuildable projection checkpoints;
 - semantic memory embeddings;
 - organizations, workspaces, memberships, repository enrollments, and
-  append-only platform-access audits.
+  append-only platform-access audits;
+- pre-tenant external organization and principal identity bindings used by
+  authentication providers such as Clerk.
 
 Writes take an organization/workspace-scoped PostgreSQL advisory transaction lock. Event IDs
 remain unique, and same-time producer IDs must be monotonic. Batch appends are
@@ -40,3 +42,8 @@ All tenant tables have forced PostgreSQL row-level security. Operations set
 organization/workspace predicates. Shared deployments must construct stores
 with `requireRlsEnforcement: true`; this rejects superuser and `BYPASSRLS`
 application roles at startup.
+
+External identity bindings are control-plane lookup tables because they must be
+resolved before a tenant is known. They contain mappings only, never Fold
+content, and are replaced per provider alongside provider-owned memberships so
+removed identities fail closed.

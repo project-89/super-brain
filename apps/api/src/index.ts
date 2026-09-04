@@ -1,4 +1,5 @@
 export * from "./auth.js";
+export * from "./clerk.js";
 export * from "./registry.js";
 export * from "./recall.js";
 export * from "./reasoning.js";

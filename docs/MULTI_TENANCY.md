@@ -22,9 +22,11 @@ membership on the server; clients must not be trusted to assert it.
 The API authenticates a credential and resolves current organization/workspace
 membership before opening any SDK or storage handle. PostgreSQL persists the
 organization and workspace catalogs and current membership projection. The
-static credential adapter remains the local bootstrap identity provider; a
-hosted deployment should replace its authentication half with the selected
-external identity provider while retaining the same membership interface.
+static credential adapter remains the local bootstrap identity provider.
+Hosted deployments can compose it with the Clerk adapter, which accepts
+sessions, organization API keys, and internal M2M tokens. Clerk organization
+and principal identifiers resolve through explicit PostgreSQL bindings; they
+are not used as internal resource keys.
 
 ## Repository Enrollment
 
@@ -88,13 +90,15 @@ break-glass procedure outside the product path.
 7. Tenant propagation through capture, importer, memory worker, MCP, Brain,
    migration, export, SSE, and durable consumers.
 8. Adversarial application and PostgreSQL isolation tests.
+9. Clerk authentication, external-ID bindings, scope mapping, role ceilings,
+   and replacement-based identity and membership revocation.
 
 ## Production Gate
 
 Before public hosting, provision a non-bypass PostgreSQL application role and
-enable `FOLD_REQUIRE_TENANT_RLS=true`; connect the authentication port to a
-durable external identity provider with token rotation and revocation; prefix
-any future remote artifact store and KMS keys by tenant; configure a private
-quarantine workspace; and exercise backup/restore plus hostile isolation tests
-in the production topology. None of those deployment integrations are
-represented as simulated product behavior.
+enable `FOLD_REQUIRE_TENANT_RLS=true`; configure the Clerk application,
+authorized parties, identities, machine scopes, and key rotation; automate
+Clerk onboarding/deprovisioning instead of relying on restart-loaded binding
+configuration; prefix any future remote artifact store and KMS keys by tenant;
+configure a private quarantine workspace; and exercise backup/restore plus
+hostile isolation tests in the production topology.

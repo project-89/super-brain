@@ -46,6 +46,42 @@ Credential rotation is a configuration replacement plus a process restart:
 add the replacement token, move clients, remove the old token, then restart the
 API. Tokens are hashed in process but the configuration remains secret material.
 
+## Clerk Identity
+
+Hosted authentication accepts Clerk sessions, organization API keys, and M2M
+tokens while PostgreSQL remains authoritative for workspace membership and
+tenant isolation. Configure either Clerk alone or Clerk alongside static
+credentials during migration:
+
+```sh
+export CLERK_SECRET_KEY=sk_live_replace
+export CLERK_PUBLISHABLE_KEY=pk_live_replace
+export FOLD_CLERK_AUTHORIZED_PARTIES=https://brain.example.com
+export FOLD_CLERK_BINDINGS_JSON="$(< /secure/path/clerk-bindings.json)"
+export FOLD_DATABASE_URL=postgres://...
+```
+
+The binding document format is defined in `apps/api/README.md`. Clerk user IDs
+use `user:<id>`, organization API keys use `api-key:<id>`, and M2M identities
+use `machine:<id>`. A token is rejected unless both its external principal and
+external organization are bound and the resulting internal principal has a
+workspace membership.
+
+Create sensor keys on the backend with only the required Clerk scopes, such as
+`super-brain:events:write` and `super-brain:transcripts:write`, and include the
+sensor author in the `super_brain.author` claim. Do not allow an unprovisioned
+key ID to enter the bindings. M2M tokens require the external organization in
+`super_brain.organizationId`. Removing a binding or provider membership and
+restarting the API revokes its Super Brain access. Clerk API-key validity is
+checked during verification; session role and membership changes follow
+Clerk's short-lived session-token refresh behavior.
+
+For public deployment, replace restart-loaded binding configuration with a
+signed Clerk webhook or administrative provisioning workflow. That workflow
+must apply organization, principal, and membership changes transactionally and
+must not infer access from email domains, repository URLs, or client-provided
+organization IDs.
+
 ## Tenant Administration
 
 Organization owners and admins can enroll a credential-free repository remote

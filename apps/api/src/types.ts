@@ -18,25 +18,31 @@ export interface AuthenticatedSubject {
   readonly principalId: string;
   readonly author: Author;
   readonly capabilities?: readonly ApiCapability[];
+  readonly identityProvider?: "static" | "clerk";
+  readonly organizationId?: string;
+  readonly organizationRoleLimit?: OrganizationRole;
 }
 
-export type ApiCapability =
-  | "events:read"
-  | "events:write"
-  | "memories:read"
-  | "memories:write"
-  | "trajectories:read"
-  | "trajectories:write"
-  | "transcripts:read"
-  | "transcripts:write"
-  | "fleet:read"
-  | "steering:read"
-  | "steering:write"
-  | "reasoning:read"
-  | "consumers:read"
-  | "consumers:write"
-  | "organization:admin"
-  | "platform:data-read";
+export const API_CAPABILITIES = [
+  "events:read",
+  "events:write",
+  "memories:read",
+  "memories:write",
+  "trajectories:read",
+  "trajectories:write",
+  "transcripts:read",
+  "transcripts:write",
+  "fleet:read",
+  "steering:read",
+  "steering:write",
+  "reasoning:read",
+  "consumers:read",
+  "consumers:write",
+  "organization:admin",
+  "platform:data-read",
+] as const;
+
+export type ApiCapability = (typeof API_CAPABILITIES)[number];
 
 export const DEFAULT_ORGANIZATION_ID = "local";
 

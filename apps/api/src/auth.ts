@@ -12,7 +12,7 @@ import type {
   MembershipResolver,
   OrganizationRole,
 } from "./types.js";
-import { DEFAULT_ORGANIZATION_ID } from "./types.js";
+import { API_CAPABILITIES, DEFAULT_ORGANIZATION_ID } from "./types.js";
 
 const staticWorkspaceMembershipSchema = z
   .object({
@@ -30,24 +30,7 @@ const staticCredentialSchema = z
   .object({
     principalId: z.string().min(1),
     author: authorSchema.optional(),
-    capabilities: z.array(z.enum([
-      "events:read",
-      "events:write",
-      "memories:read",
-      "memories:write",
-      "trajectories:read",
-      "trajectories:write",
-      "transcripts:read",
-      "transcripts:write",
-      "fleet:read",
-      "steering:read",
-      "steering:write",
-      "reasoning:read",
-      "consumers:read",
-      "consumers:write",
-      "organization:admin",
-      "platform:data-read",
-    ])).max(16).optional(),
+    capabilities: z.array(z.enum(API_CAPABILITIES)).max(API_CAPABILITIES.length).optional(),
     workspaces: z.record(staticWorkspaceMembershipSchema).optional(),
     organizations: z.record(staticOrganizationMembershipSchema).optional(),
   })
@@ -150,6 +133,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
           ...(configured.capabilities === undefined
             ? {}
             : { capabilities: [...new Set(configured.capabilities)] as ApiCapability[] }),
+          identityProvider: "static",
         },
         organizations,
       });
@@ -193,7 +177,8 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
       stored.subject.author.kind !== subject.author.kind ||
       stored.subject.author.id !== subject.author.id ||
       stored.subject.author.productionId !== subject.author.productionId ||
-      JSON.stringify(stored.subject.capabilities) !== JSON.stringify(subject.capabilities)
+      JSON.stringify(stored.subject.capabilities) !== JSON.stringify(subject.capabilities) ||
+      stored.subject.identityProvider !== subject.identityProvider
     ) {
       return undefined;
     }
@@ -250,19 +235,27 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
 }
 
 export class PostgresMembershipResolver implements MembershipResolver {
-  constructor(private readonly administration: PostgresTenantAdministration) {}
+  constructor(
+    private readonly administration: Pick<PostgresTenantAdministration, "resolveMembership">,
+  ) {}
 
   async resolveAccess(subject: AuthenticatedSubject, organizationId: string, workspaceId: string) {
+    if (subject.organizationId !== undefined && subject.organizationId !== organizationId) {
+      return undefined;
+    }
     const membership = await this.administration.resolveMembership(
       organizationId,
       workspaceId,
       subject.principalId,
     );
     if (membership === undefined) return undefined;
+    const organizationRole = subject.organizationRoleLimit === undefined
+      ? membership.organizationRole
+      : lessPrivilegedOrganizationRole(membership.organizationRole, subject.organizationRoleLimit);
     return {
       principalId: subject.principalId,
       organizationId,
-      organizationRole: membership.organizationRole,
+      organizationRole,
       workspaceId,
       workspaceRole: membership.workspaceRole,
       spaceRoles: { ...membership.spaceRoles },
@@ -271,5 +264,27 @@ export class PostgresMembershipResolver implements MembershipResolver {
 
   resolveLegacyAccess(subject: AuthenticatedSubject, workspaceId: string) {
     return this.resolveAccess(subject, DEFAULT_ORGANIZATION_ID, workspaceId);
+  }
+}
+
+function lessPrivilegedOrganizationRole(
+  stored: OrganizationRole,
+  limit: OrganizationRole,
+): OrganizationRole {
+  const rank: Readonly<Record<OrganizationRole, number>> = { member: 0, admin: 1, owner: 2 };
+  return rank[stored] <= rank[limit] ? stored : limit;
+}
+
+export class CompositeAuthenticator implements Authenticator {
+  constructor(private readonly providers: readonly Authenticator[]) {
+    if (providers.length === 0) throw new TypeError("at least one authenticator is required");
+  }
+
+  async authenticate(bearerToken: string): Promise<AuthenticatedSubject | undefined> {
+    for (const provider of this.providers) {
+      const subject = await provider.authenticate(bearerToken);
+      if (subject !== undefined) return subject;
+    }
+    return undefined;
   }
 }

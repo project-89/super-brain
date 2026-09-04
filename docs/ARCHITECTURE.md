@@ -31,6 +31,21 @@ rebuilt from those events. Consumer offsets and projection checkpoints are
 durable operational records, not alternate sources of domain truth. The prior
 JSONL journal remains a verified migration and recovery artifact.
 
+## Authentication Boundary
+
+Authentication is a provider port in front of Super Brain authorization. The
+local provider hashes static bearer credentials. The hosted Clerk provider
+verifies session, organization API-key, and M2M tokens, then resolves Clerk IDs
+through pre-tenant PostgreSQL binding tables. Internal organization and
+principal identifiers remain provider-independent.
+
+A verified Clerk organization constrains the request to exactly one internal
+organization. Session roles place a ceiling on stored organization privilege;
+API-key and M2M scopes map to the existing route capabilities. PostgreSQL then
+resolves current workspace/space membership before any SDK, cache, stream,
+cursor, or storage handle is created. Neither a valid Clerk token nor a
+client-selected route grants membership by itself.
+
 ## Harness Contract
 
 Every authorized harness receives a bearer credential with explicit workspace
