@@ -7,6 +7,7 @@ import {
   parseClaudeTranscript,
   parseCodexTranscript,
   storeRedactedArtifact,
+  RecordAnonymizer,
   TranscriptDeliveryError,
 } from "@_89/super-brain-importer";
 
@@ -35,6 +36,7 @@ export class SpoolProcessor {
     private readonly config: CaptureConfig,
     private readonly spool: DurableSpool,
     private readonly vaultEncryptionKey?: Uint8Array,
+    private readonly anonymizer = new RecordAnonymizer("none"),
   ) {
     this.client = new SuperBrainClient({
       baseUrl: config.apiUrl,
@@ -67,7 +69,7 @@ export class SpoolProcessor {
       await this.client.appendEvent(job.event);
       return;
     }
-    if (job.kind === "trajectory") {
+    if (job.kind === "trajectory" || job.kind === "trajectory-tree") {
       const options = { captureIdentity: job.captureIdentity };
       const existing = (await this.client.trajectoryTasks()).find(({ taskId }) => taskId === job.tree.taskId);
       if (existing === undefined) {
@@ -78,7 +80,7 @@ export class SpoolProcessor {
           await this.client.recordTrajectoryTree(job.treeStamp, merged, options);
         }
       }
-      await this.client.recordTrajectory(job.runStamp, job.input, options);
+      if (job.kind === "trajectory") await this.client.recordTrajectory(job.runStamp, job.input, options);
       return;
     }
     await stat(job.path);
@@ -90,6 +92,8 @@ export class SpoolProcessor {
     if (parsed === undefined) throw new Error(`unsupported transcript source: ${job.source}`);
     const stored = await storeRedactedArtifact(parsed, this.config.vaultRoot, {
       reasoningPolicy: this.config.reasoningPolicy,
+      retainEncryptedReasoning: this.config.retainEncryptedReasoning,
+      anonymizer: this.anonymizer,
       ...(this.vaultEncryptionKey === undefined ? {} : { encryptionKey: this.vaultEncryptionKey }),
     });
     await deliverTranscriptBundle(stored.bundle, {

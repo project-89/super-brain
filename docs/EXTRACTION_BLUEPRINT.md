@@ -57,7 +57,7 @@ orthogonal value algebra and does not become part of the Change Record schema.
 | `@_89/fold-transcript` | Historical project, artifact, run, turn, and observable-action metadata | Claude Code and Codex local JSONL formats | Implemented |
 | `@_89/fold-epistemic` | Scoped personal memory and recall-time access enforcement | Raven | Recall-enforced personal memory core implemented |
 | `@_89/fold-drives` | Incremental intention/metabolism state | Embers | Drive, wear, and intention core implemented |
-| `@_89/fold-trajectory` | Scoped tree/run lifecycle and task analysis | Local `fold-trace` and `fold-eval` contracts | Implemented; empirical runs pending |
+| `@_89/fold-trajectory` | Scoped tree/run lifecycle and task analysis | Local `fold-trace` and `fold-eval` contracts | Implemented with empirical live runs and periodic trees |
 | `@_89/fold-sdk` | Stable producer and consumer APIs over the packages above | Local packages only | Scoped log, memory, trajectory, activity, fleet, and transcript core implemented |
 | `@_89/fold-postgres` | Transactional Fold events, durable offsets/checkpoints, optional pgvector projection | Local SDK contracts and PostgreSQL | Implemented and migrated with real pgvector integration coverage |
 | `@_89/super-brain-client` | Harness-neutral authenticated producer and resumable consumer | Local API contract | Implemented with SSE reconnect and durable cursor semantics |
@@ -260,8 +260,7 @@ operational features.
 9. Browser identifier and API-client tests pin UUIDv7 timestamps, same-time
    event ordering, URL encoding, auth headers, memory payloads, and error maps.
 
-Repeated cross-model comparison and tree merging, production semantic embeddings/model reasoning,
-general graph layout, event authoring,
+Production semantic embeddings/model reasoning, general graph layout, event authoring,
 identity-provider login, and deployment-specific secret delivery remain
 follow-on product work.
 

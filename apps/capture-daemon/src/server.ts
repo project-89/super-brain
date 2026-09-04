@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { CaptureEngine } from "./capture.js";
 import { DurableSpool, readRelayFailureSummary } from "./storage.js";
-import type { CaptureConfig, HookSource } from "./types.js";
+import type { CaptureConfig, CapturePolicyPatch, CapturePolicySettings, HookSource } from "./types.js";
 
 function send(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, {
@@ -14,12 +14,35 @@ function send(response: ServerResponse, status: number, body: unknown): void {
   response.end(JSON.stringify(body));
 }
 
-function authorized(request: IncomingMessage, expected: string): boolean {
-  const actual = request.headers["x-super-brain-hook-token"];
+function authorized(request: IncomingMessage, expected: string, header: string): boolean {
+  const actual = request.headers[header];
   if (typeof actual !== "string") return false;
   const left = Buffer.from(actual);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function policy(config: CaptureConfig): CapturePolicySettings {
+  return {
+    reasoningPolicy: config.reasoningPolicy,
+    retainEncryptedReasoning: config.retainEncryptedReasoning,
+    reasoningTreePolicy: config.reasoningTreePolicy,
+    treeSnapshotEveryEvents: config.treeSnapshotEveryEvents,
+    anonymizationPolicy: config.anonymizationPolicy,
+  };
+}
+
+function policyPatch(value: Record<string, unknown>): CapturePolicyPatch {
+  const allowed = new Set([
+    "reasoningPolicy",
+    "retainEncryptedReasoning",
+    "reasoningTreePolicy",
+    "treeSnapshotEveryEvents",
+    "anonymizationPolicy",
+  ]);
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) throw new TypeError(`unknown capture policy fields: ${unknown.join(", ")}`);
+  return value as CapturePolicyPatch;
 }
 
 export function hookSource(headerValue: string | undefined, payloadValue: unknown): HookSource {
@@ -64,6 +87,7 @@ export class CaptureHttpServer {
     private readonly config: CaptureConfig,
     private readonly engine: CaptureEngine,
     private readonly spool: DurableSpool,
+    private readonly updatePolicy?: (patch: CapturePolicyPatch) => Promise<CaptureConfig>,
   ) {}
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
@@ -76,7 +100,11 @@ export class CaptureHttpServer {
         resolve();
       });
     });
-    return { host: this.config.bindHost, port: this.config.port };
+    const address = this.server.address();
+    return {
+      host: this.config.bindHost,
+      port: typeof address === "object" && address !== null ? address.port : this.config.port,
+    };
   }
 
   async close(): Promise<void> {
@@ -94,14 +122,43 @@ export class CaptureHttpServer {
           this.spool.snapshot(),
           readRelayFailureSummary(this.config.stateRoot),
         ]);
-        send(response, 200, { status: "ok", ...this.engine.snapshot(), ...spool, relayFailures });
+        send(response, 200, {
+          status: "ok",
+          ...this.engine.snapshot(),
+          ...spool,
+          relayFailures,
+          policy: {
+            reasoning: this.config.reasoningPolicy,
+            encryptedReasoning: this.config.retainEncryptedReasoning ? "retain" : "exclude",
+            reasoningTrees: this.config.reasoningTreePolicy,
+            anonymization: this.config.anonymizationPolicy,
+            treeSnapshotEveryEvents: this.config.treeSnapshotEveryEvents,
+          },
+        });
+        return;
+      }
+      if (url.pathname === "/settings") {
+        if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) {
+          send(response, 401, { error: "unauthorized" });
+          return;
+        }
+        if (request.method === "GET") {
+          send(response, 200, { policy: policy(this.config), restartRequired: false });
+          return;
+        }
+        if (request.method === "PATCH" && this.updatePolicy !== undefined) {
+          const updated = await this.updatePolicy(policyPatch(object(await jsonBody(request))));
+          send(response, 200, { policy: policy(updated), restartRequired: true });
+          return;
+        }
+        send(response, 405, { error: "method_not_allowed" });
         return;
       }
       if (request.method !== "POST" || !["/hook", "/checkpoint", "/decision"].includes(url.pathname)) {
         send(response, 404, { error: "not_found" });
         return;
       }
-      if (!authorized(request, this.config.hookToken)) {
+      if (!authorized(request, this.config.hookToken, "x-super-brain-hook-token")) {
         send(response, 401, { error: "unauthorized" });
         return;
       }

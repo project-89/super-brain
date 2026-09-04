@@ -3,14 +3,22 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CaptureEngine } from "./capture.js";
-import { defaultConfigPath, enableCaptureVaultEncryption, initializeCaptureConfig, readCaptureConfig } from "./config.js";
+import {
+  defaultConfigPath,
+  enableCaptureVaultEncryption,
+  initializeCaptureConfig,
+  readCaptureConfig,
+  rotateCaptureOperatorToken,
+  updateCaptureConfig,
+} from "./config.js";
 import { SpoolProcessor } from "./delivery.js";
 import { installHermesHook, installHooks, installLaunchAgent } from "./install.js";
 import { CaptureHttpServer } from "./server.js";
+import { readExposedReasoningDelta } from "./reasoning.js";
 import { exportCaptureData, pruneHookArtifacts, verifyCaptureExport } from "./maintenance.js";
 import { DurableSpool, HookVault, recordRelayFailure, StateStore } from "./storage.js";
-import type { HookSource, ReasoningPolicy } from "./types.js";
-import { readVaultKey } from "@_89/super-brain-importer";
+import type { HookSource, ReasoningPolicy, ReasoningTreePolicy } from "./types.js";
+import { readVaultKey, RecordAnonymizer, type AnonymizationPolicy } from "@_89/super-brain-importer";
 
 function option(args: readonly string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -73,18 +81,38 @@ async function relay(args: readonly string[], path = "/hook"): Promise<void> {
 }
 
 async function run(args: readonly string[]): Promise<void> {
-  const config = await readCaptureConfig(configPath(args));
+  const path = configPath(args);
+  const config = await readCaptureConfig(path);
   const vaultEncryptionKey = config.vaultKeyPath === undefined ? undefined : await readVaultKey(config.vaultKeyPath);
+  const anonymizationKey = config.anonymizationPolicy === "none"
+    ? undefined
+    : await readVaultKey(config.anonymizationKeyPath!);
+  const anonymizer = new RecordAnonymizer(config.anonymizationPolicy, anonymizationKey);
   const spool = new DurableSpool(config.stateRoot);
   const engine = new CaptureEngine(
     config,
     new StateStore(config.stateRoot),
-    new HookVault(config.vaultRoot, vaultEncryptionKey),
+    new HookVault(config.vaultRoot, vaultEncryptionKey, {
+      anonymizer,
+      retainEncryptedReasoning: config.reasoningPolicy === "include" && config.retainEncryptedReasoning,
+    }),
     spool,
+    anonymizer,
   );
   await engine.initialize();
-  const processor = new SpoolProcessor(config, spool, vaultEncryptionKey);
-  const server = new CaptureHttpServer(config, engine, spool);
+  const processor = new SpoolProcessor(config, spool, vaultEncryptionKey, anonymizer);
+  const server = new CaptureHttpServer(config, engine, spool, async (patch) => {
+    if (
+      patch.anonymizationPolicy !== undefined &&
+      patch.anonymizationPolicy !== config.anonymizationPolicy &&
+      engine.snapshot().unfinishedSessions > 0
+    ) {
+      throw new Error("anonymization policy cannot change while sessions are unfinished");
+    }
+    const result = await updateCaptureConfig(path, patch);
+    setTimeout(() => process.kill(process.pid, "SIGTERM"), 100).unref();
+    return result.config;
+  });
   await server.start();
   processor.start();
   const heartbeats = setInterval(() => void engine.heartbeat().catch(() => undefined), config.heartbeatIntervalMs);
@@ -125,6 +153,9 @@ async function main(): Promise<void> {
       throw new Error("SUPER_BRAIN_CAPTURE_TOKEN is required for init");
     }
     const reasoning = option(args, "--reasoning") as ReasoningPolicy | undefined;
+    const reasoningTrees = option(args, "--reasoning-trees") as ReasoningTreePolicy | undefined;
+    const anonymization = option(args, "--anonymize") as AnonymizationPolicy | undefined;
+    const treeEvery = option(args, "--tree-every");
     const result = await initializeCaptureConfig({
       path: configPath(args),
       apiToken,
@@ -134,6 +165,15 @@ async function main(): Promise<void> {
       ...(option(args, "--vault") === undefined ? {} : { vaultRoot: option(args, "--vault")! }),
       ...(option(args, "--vault-key") === undefined ? {} : { vaultKeyPath: option(args, "--vault-key")! }),
       ...(reasoning === undefined ? {} : { reasoningPolicy: reasoning }),
+      ...(option(args, "--encrypted-reasoning") === undefined
+        ? {}
+        : { retainEncryptedReasoning: option(args, "--encrypted-reasoning") === "retain" }),
+      ...(reasoningTrees === undefined ? {} : { reasoningTreePolicy: reasoningTrees }),
+      ...(treeEvery === undefined ? {} : { treeSnapshotEveryEvents: Number(treeEvery) }),
+      ...(anonymization === undefined ? {} : { anonymizationPolicy: anonymization }),
+      ...(option(args, "--anonymization-key") === undefined
+        ? {}
+        : { anonymizationKeyPath: option(args, "--anonymization-key")! }),
       force: args.includes("--force"),
     });
     process.stdout.write(`Created ${result.path}\n`);
@@ -155,6 +195,71 @@ async function main(): Promise<void> {
   if (command === "enable-vault-encryption") {
     const result = await enableCaptureVaultEncryption(configPath(args), option(args, "--vault-key"));
     process.stdout.write(`Enabled encrypted vault writes using ${result.keyPath}\n`);
+    return;
+  }
+  if (command === "configure") {
+    const current = await readCaptureConfig(configPath(args));
+    const reasoning = option(args, "--reasoning") as ReasoningPolicy | undefined;
+    const reasoningTrees = option(args, "--reasoning-trees") as ReasoningTreePolicy | undefined;
+    const anonymization = option(args, "--anonymize") as AnonymizationPolicy | undefined;
+    const encryptedReasoning = option(args, "--encrypted-reasoning");
+    if (encryptedReasoning !== undefined && encryptedReasoning !== "retain" && encryptedReasoning !== "exclude") {
+      throw new TypeError("--encrypted-reasoning must be retain or exclude");
+    }
+    const treeEvery = option(args, "--tree-every");
+    if (anonymization !== undefined && anonymization !== current.anonymizationPolicy) {
+      const state = await new StateStore(current.stateRoot).load();
+      if (Object.values(state.sessions).some((session) => !session.finalized)) {
+        throw new Error("anonymization policy cannot change while sessions are unfinished");
+      }
+    }
+    const result = await updateCaptureConfig(configPath(args), {
+      ...(reasoning === undefined ? {} : { reasoningPolicy: reasoning }),
+      ...(encryptedReasoning === undefined ? {} : { retainEncryptedReasoning: encryptedReasoning === "retain" }),
+      ...(reasoningTrees === undefined
+        ? reasoning === "exclude" ? { reasoningTreePolicy: "exclude" } : {}
+        : { reasoningTreePolicy: reasoningTrees }),
+      ...(treeEvery === undefined ? {} : { treeSnapshotEveryEvents: Number(treeEvery) }),
+      ...(anonymization === undefined ? {} : { anonymizationPolicy: anonymization }),
+      ...(option(args, "--anonymization-key") === undefined
+        ? {}
+        : { anonymizationKeyPath: option(args, "--anonymization-key")! }),
+    });
+    const safe = { ...result.config, apiToken: "[REDACTED]", hookToken: "[REDACTED]", operatorToken: "[REDACTED]" };
+    process.stdout.write(`${JSON.stringify({ path: result.path, restartRequired: true, previous: {
+      reasoningPolicy: current.reasoningPolicy,
+      anonymizationPolicy: current.anonymizationPolicy,
+    }, config: safe }, null, 2)}\n`);
+    return;
+  }
+  if (command === "rotate-operator-token") {
+    const result = await rotateCaptureOperatorToken(configPath(args));
+    process.stdout.write(`${JSON.stringify({ path: result.path, restartRequired: true }, null, 2)}\n`);
+    return;
+  }
+  if (command === "inspect-reasoning") {
+    if (!args.includes("--confirm")) {
+      throw new TypeError("inspect-reasoning requires --confirm because it prints private transcript content");
+    }
+    const sessionId = option(args, "--session");
+    if (sessionId === undefined) throw new TypeError("inspect-reasoning requires --session SESSION_ID");
+    const config = await readCaptureConfig(configPath(args));
+    const state = await new StateStore(config.stateRoot).load();
+    const session = Object.values(state.sessions).find((candidate) => candidate.sessionId === sessionId);
+    if (session?.transcriptPath === undefined) throw new Error(`session transcript is unavailable: ${sessionId}`);
+    const limitInput = option(args, "--limit");
+    const limit = limitInput === undefined ? 100 : Number(limitInput);
+    if (!Number.isInteger(limit) || limit <= 0 || limit > 10_000) {
+      throw new TypeError("--limit must be an integer between 1 and 10000");
+    }
+    const result = await readExposedReasoningDelta(session.transcriptPath, session.source);
+    process.stdout.write(`${JSON.stringify({
+      sessionId,
+      exposedReasoningCount: result.items.length,
+      returned: Math.min(limit, result.items.length),
+      truncated: result.items.length > limit,
+      items: result.items.slice(-limit),
+    }, null, 2)}\n`);
     return;
   }
   if (command === "export") {
@@ -204,12 +309,12 @@ async function main(): Promise<void> {
   }
   if (command === "config") {
     const config = await readCaptureConfig(configPath(args));
-    const safe = { ...config, apiToken: "[REDACTED]", hookToken: "[REDACTED]" };
+    const safe = { ...config, apiToken: "[REDACTED]", hookToken: "[REDACTED]", operatorToken: "[REDACTED]" };
     process.stdout.write(`${JSON.stringify(safe, null, 2)}\n`);
     return;
   }
   if (command === "help") {
-    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed> [--config PATH]\n");
+    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed> [--config PATH]\n");
     return;
   }
   throw new Error(`unknown command: ${command}`);

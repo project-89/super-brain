@@ -12,10 +12,10 @@ pnpm --filter @_89/super-brain-importer start -- scan --source all
 The library adapters stream source JSONL, preserve source-qualified project/run
 identity, and emit bounded canonical metadata chunks. Transcript text is not
 placed in Fold records. `storeRedactedArtifact` is an explicit local operation
-that excludes exposed thinking/reasoning by default, always removes encrypted
-content, scans secrets, and writes a content-addressed `0600` artifact into a
-caller-selected vault. A caller may opt into retaining exposed reasoning in
-that private vault; the canonical bundle records the policy but not the text.
+that excludes exposed thinking/reasoning and encrypted provider content by
+default, scans secrets, and writes a content-addressed `0600` artifact into a
+caller-selected vault. A caller may independently opt into exposed and opaque
+reasoning retention; the canonical bundle records each policy but not the text.
 
 Source directories are never modified.
 
@@ -26,10 +26,15 @@ bundle to an owner-authorized Super Brain API:
 ```bash
 FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- import \
   --source all --api-url http://127.0.0.1:3000 --workspace local \
-  --vault ~/.super-brain/transcript-vault --confirm
+  --vault ~/.super-brain/transcript-vault \
+  --reasoning include --encrypted-reasoning retain \
+  --anonymize pseudonymous \
+  --anonymization-key ~/.config/super-brain/anonymization.key \
+  --confirm
 ```
 
-`FOLD_API_URL`, `FOLD_API_WORKSPACE`, and `FOLD_TRANSCRIPT_VAULT` may replace
+`FOLD_API_URL`, `FOLD_API_WORKSPACE`, `FOLD_TRANSCRIPT_VAULT`, and
+`FOLD_ANONYMIZATION_KEY_FILE` may replace
 their command-line options. Credentials are accepted only through
 `FOLD_API_TOKEN`, keeping them out of command arguments and CLI output. Network,
 rate-limit, and transient server failures are retried; an exact rerun is an

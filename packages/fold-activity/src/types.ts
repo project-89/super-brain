@@ -87,6 +87,7 @@ export type TerminalObservationKind =
   | "repository_changed"
   | "verification_result"
   | "reasoning_checkpoint"
+  | "reasoning_observed"
   | "human_decision"
   | "task_complete"
   | "output";

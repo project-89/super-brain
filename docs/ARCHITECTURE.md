@@ -58,11 +58,19 @@ recently restarted local harness.
 
 `PreToolUse`, `PostToolUse`, failures, file targets, and verification commands
 produce observable trajectory steps automatically. Concise agent reasoning
-checkpoints and human verdicts have explicit local endpoints. Hidden provider
-reasoning is never assumed to exist. Exposed transcript reasoning may be kept
-in the private redacted vault only under the opt-in `include` policy; encrypted
-reasoning is always discarded and raw reasoning is never copied automatically
-into canonical Fold records.
+checkpoints and human verdicts have explicit local endpoints. Configurable
+periodic snapshots merge the active session path into its shared reasoning tree
+without creating a trajectory run before the session ends. With explicit local
+opt-in, bounded native transcript deltas are captured into the private vault;
+only exposed reasoning summaries become canonical `reasoning_observed` events
+and `model_thought` nodes. Opaque encrypted provider reasoning may be retained
+as evidence but cannot be read or interpreted by Super Brain.
+
+Secret redaction is mandatory. Optional `pseudonymous` anonymization replaces
+identity fields and absolute path segments with stable keyed aliases so joins
+remain useful; `strict` additionally makes paths and network locations opaque.
+The local settings endpoint uses a dedicated operator token and cannot be
+reached through the agent hook credential.
 
 ## Memory Lifecycle
 
@@ -147,6 +155,11 @@ SUPER_BRAIN_CAPTURE_TOKEN=replace-sensor-token \
   pnpm --filter @_89/super-brain-capture-daemon start -- init
 pnpm --filter @_89/super-brain-capture-daemon start -- install-hooks
 pnpm --filter @_89/super-brain-capture-daemon start -- install-service
+
+# Personal full-evidence mode; restart the service after configuration.
+pnpm --filter @_89/super-brain-capture-daemon start -- configure -- \
+  --reasoning include --encrypted-reasoning retain \
+  --reasoning-trees summaries --tree-every 25 --anonymize none
 ```
 
 The sensor token must map to a `sensor` author with workspace `admin` access so
@@ -184,3 +197,8 @@ provider, a scheduled off-host backup policy, distributed rate limiting, and an
 embedding sidecar when semantic ranking is desired. External sensors must send
 authenticated real events; the API intentionally exposes no simulated fleet
 mutation route.
+
+The current deployment is workspace-isolated at the API and storage-query
+layers, but is not yet a shared hosted multi-tenant service. The organization,
+row-level-security, repository-enrollment, and audited platform-administration
+contract is defined in [MULTI_TENANCY.md](./MULTI_TENANCY.md).

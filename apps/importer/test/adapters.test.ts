@@ -11,6 +11,7 @@ import {
   deliverTranscriptBundle,
   decryptVaultLine,
   ensureVaultKey,
+  RecordAnonymizer,
   listDeliveredTranscriptRunIds,
   scanTranscripts,
   storeRedactedArtifact,
@@ -144,6 +145,43 @@ describe("transcript source adapters", () => {
     const target = join(vault, "claude-code", stored.bundle.artifact.sha256.slice(0, 2), `${stored.bundle.artifact.sha256}.jsonl`);
     expect(stored.bundle.artifact.reasoningPolicy).toBe("included");
     expect(await readFile(target, "utf8")).toContain("inspect the cache");
+  });
+
+  it("retains opaque provider reasoning only when separately enabled", async () => {
+    const path = await fixture("70707070-7070-4777-8777-707070707070.jsonl", [{
+      type: "response_item",
+      timestamp: "2026-08-20T12:00:00.000Z",
+      payload: { type: "reasoning", encrypted_content: "opaque-provider-state", summary: [] },
+    }]);
+    const parsed = await parseCodexTranscript(path);
+    const vault = await mkdtemp(join(tmpdir(), "fold-vault-opaque-reasoning-"));
+    const stored = await storeRedactedArtifact(parsed, vault, {
+      reasoningPolicy: "include",
+      retainEncryptedReasoning: true,
+    });
+    const target = join(vault, "codex", stored.bundle.artifact.sha256.slice(0, 2), `${stored.bundle.artifact.sha256}.jsonl`);
+    expect(stored.bundle.artifact.encryptedReasoningPolicy).toBe("retained");
+    expect(await readFile(target, "utf8")).toContain("opaque-provider-state");
+  });
+
+  it("pseudonymizes transcript identities while preserving every relationship", async () => {
+    const sessionId = "71717171-7171-4777-8777-717171717171";
+    const path = await fixture(`rollout-${sessionId}.jsonl`, [
+      { type: "session_meta", timestamp: "2026-08-20T12:00:00.000Z", payload: { id: sessionId, cwd: "/Users/alice/work/private-repo", git: { branch: "alice/ticket" } } },
+      { type: "turn_context", timestamp: "2026-08-20T12:00:01.000Z", payload: { turn_id: "turn-private", cwd: "/Users/alice/work/private-repo" } },
+      { type: "response_item", timestamp: "2026-08-20T12:00:02.000Z", payload: { type: "function_call", call_id: "call-private", name: "exec_command" } },
+    ]);
+    const parsed = await parseCodexTranscript(path);
+    const vault = await mkdtemp(join(tmpdir(), "fold-vault-pseudonymous-"));
+    const anonymizer = new RecordAnonymizer("pseudonymous", new Uint8Array(32).fill(7));
+    const stored = await storeRedactedArtifact(parsed, vault, { anonymizer });
+    const projectId = stored.bundle.projects[0]!.id;
+    expect(JSON.stringify(stored.bundle)).not.toMatch(/alice|private-repo|turn-private|call-private/);
+    expect(stored.bundle.run.projectId).toBe(projectId);
+    expect(stored.bundle.run.segments[0]?.projectId).toBe(projectId);
+    expect(stored.bundle.chunks[0]?.runId).toBe(stored.bundle.run.id);
+    expect(stored.bundle.chunks[0]?.actions[0]?.turnId).toBe(stored.bundle.chunks[0]?.turns[0]?.id);
+    expect(stored.bundle.artifact.anonymizationPolicy).toBe("pseudonymous");
   });
 
   it("encrypts each redacted vault record with an authenticated key", async () => {

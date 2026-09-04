@@ -25,6 +25,8 @@ export const transcriptArtifactSchema = z.object({
   modifiedAt: timestampSchema.optional(),
   contentPolicy: z.enum(["metadata-only", "redacted"]),
   reasoningPolicy: z.enum(["excluded", "included"]).optional(),
+  encryptedReasoningPolicy: z.enum(["excluded", "retained"]).optional(),
+  anonymizationPolicy: z.enum(["none", "pseudonymous", "strict"]).optional(),
   stored: z.boolean(),
   redactionCount: z.number().int().nonnegative(),
 }).strict();

@@ -7,6 +7,7 @@ import { transcriptImportBundleSchema } from "@_89/fold-transcript";
 
 import { fileMetadata, sha256File } from "./files.js";
 import { isRecord } from "./json.js";
+import { RecordAnonymizer } from "./privacy.js";
 import type { ParsedTranscript } from "./types.js";
 import { decryptedVaultSha256, encryptVaultLine } from "./encryption.js";
 
@@ -32,12 +33,15 @@ function redactString(value: string): { readonly value: string; readonly count: 
   return { value: redacted, count };
 }
 
-export function redactJsonValue(value: unknown): { readonly value: unknown; readonly count: number } {
+export function redactJsonValue(
+  value: unknown,
+  options: { readonly retainEncryptedContent?: boolean } = {},
+): { readonly value: unknown; readonly count: number } {
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) {
     let count = 0;
     const values = value.map((item) => {
-      const result = redactJsonValue(item);
+      const result = redactJsonValue(item, options);
       count += result.count;
       return result.value;
     });
@@ -47,8 +51,11 @@ export function redactJsonValue(value: unknown): { readonly value: unknown; read
     let count = 0;
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
-      if (key === "encrypted_content") continue;
-      const redacted = redactJsonValue(item);
+      if (key === "encrypted_content") {
+        if (options.retainEncryptedContent === true) result[key] = item;
+        continue;
+      }
+      const redacted = redactJsonValue(item, options);
       count += redacted.count;
       result[key] = redacted.value;
     }
@@ -87,7 +94,12 @@ function withoutPrivateReasoning(record: Record<string, unknown>): Record<string
 export async function storeRedactedArtifact(
   transcript: ParsedTranscript,
   vaultRoot: string,
-  options: { readonly reasoningPolicy?: "exclude" | "include"; readonly encryptionKey?: Uint8Array } = {},
+  options: {
+    readonly reasoningPolicy?: "exclude" | "include";
+    readonly retainEncryptedReasoning?: boolean;
+    readonly encryptionKey?: Uint8Array;
+    readonly anonymizer?: RecordAnonymizer;
+  } = {},
 ): Promise<ParsedTranscript> {
   const { artifact } = transcript.bundle;
   const beforeHash = await fileMetadata(transcript.sourcePath);
@@ -104,11 +116,12 @@ export async function storeRedactedArtifact(
   }
   await mkdir(vaultRoot, { recursive: true, mode: 0o700 });
   await chmod(vaultRoot, 0o700);
+  const privateArtifactHash = options.anonymizer?.digest("artifact-content", artifact.sha256) ?? artifact.sha256;
   const target = join(
     vaultRoot,
     artifact.source,
-    artifact.sha256.slice(0, 2),
-    `${artifact.sha256}.jsonl${options.encryptionKey === undefined ? "" : ".enc"}`,
+    privateArtifactHash.slice(0, 2),
+    `${privateArtifactHash}.jsonl${options.encryptionKey === undefined ? "" : ".enc"}`,
   );
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.${process.pid}.tmp`;
@@ -127,7 +140,10 @@ export async function storeRedactedArtifact(
       const safe = isRecord(parsed) && options.reasoningPolicy !== "include"
         ? withoutPrivateReasoning(parsed)
         : parsed;
-      const redacted = redactJsonValue(safe);
+      const anonymized = options.anonymizer?.value(safe) ?? safe;
+      const redacted = redactJsonValue(anonymized, {
+        retainEncryptedContent: options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true,
+      });
       redactionCount += redacted.count;
       const serialized = JSON.stringify(redacted.value);
       await output.writeFile(`${options.encryptionKey === undefined ? serialized : encryptVaultLine(serialized, options.encryptionKey)}\n`, "utf8");
@@ -168,9 +184,15 @@ export async function storeRedactedArtifact(
       ...artifact,
       contentPolicy: "redacted",
       reasoningPolicy: options.reasoningPolicy === "include" ? "included" : "excluded",
+      encryptedReasoningPolicy:
+        options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true ? "retained" : "excluded",
+      anonymizationPolicy: options.anonymizer?.policy ?? "none",
       stored: true,
       redactionCount,
     },
   });
-  return { sourcePath: transcript.sourcePath, bundle };
+  return {
+    sourcePath: transcript.sourcePath,
+    bundle: options.anonymizer?.transcriptBundle(bundle) ?? bundle,
+  };
 }

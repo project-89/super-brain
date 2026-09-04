@@ -11,10 +11,11 @@ structured reasoning checkpoints, human decisions, session trajectories, and a
 stable transcript import after `SessionEnd`. It does not claim success when no
 verification or explicit verdict was observed.
 
-Raw exposed reasoning is excluded from transcript artifacts by default. Setting
-`reasoningPolicy` to `include` stores it only in the private redacted vault; it is
-never copied into canonical events automatically. Encrypted reasoning is always
-discarded by the importer.
+Raw exposed reasoning is excluded from transcript artifacts by default. With
+explicit opt-in, the daemon stores complete incremental transcript deltas in the
+private encrypted/redacted vault and adds exposed summaries to periodic
+canonical reasoning trees. Opaque provider reasoning has a separate retention
+switch; it is preserved as evidence but cannot be decrypted by Super Brain.
 
 New configurations encrypt redacted vault artifacts with a separate AES-256-GCM
 key. Existing configurations can enable future encrypted writes with
@@ -25,6 +26,29 @@ SUPER_BRAIN_CAPTURE_TOKEN=... super-brain-capture init
 super-brain-capture install-hooks
 super-brain-capture install-service
 super-brain-capture status
+```
+
+Capture settings can be changed from the Brain settings dialog with the
+dedicated operator token or from the CLI. Configuration changes restart the
+installed service:
+
+```sh
+super-brain-capture configure --reasoning include \
+  --encrypted-reasoning retain --reasoning-trees summaries \
+  --tree-every 25 --anonymize none
+super-brain-capture rotate-operator-token
+super-brain-capture install-service
+```
+
+`--anonymize pseudonymous` retains stable keyed joins while hiding identity and
+absolute-path segments. `strict` also obscures full paths, URLs, and IP
+addresses. Secret redaction always runs, including in `none` mode. A zero tree
+interval disables periodic snapshots without changing finalization.
+
+Reading exposed local reasoning is an explicit terminal action:
+
+```sh
+super-brain-capture inspect-reasoning --session SESSION_ID --limit 100 --confirm
 ```
 
 Integrity-manifest exports use `SUPER_BRAIN_EXPORT_TOKEN` when the capture

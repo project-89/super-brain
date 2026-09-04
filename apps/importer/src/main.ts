@@ -4,7 +4,8 @@ import { join } from "node:path";
 
 import { deliverTranscriptBundle, listDeliveredTranscriptRunIds } from "./delivery.js";
 import { storeRedactedArtifact } from "./redact.js";
-import { readVaultKey } from "./encryption.js";
+import { ensureVaultKey, readVaultKey } from "./encryption.js";
+import { RecordAnonymizer, type AnonymizationPolicy } from "./privacy.js";
 import { scanTranscripts } from "./scan.js";
 
 const args = process.argv.slice(2).filter((argument) => argument !== "--");
@@ -43,6 +44,9 @@ async function main(): Promise<void> {
     readonly bearerToken: string;
     readonly vaultRoot: string;
     readonly vaultEncryptionKey?: Uint8Array;
+    readonly reasoningPolicy: "exclude" | "include";
+    readonly retainEncryptedReasoning: boolean;
+    readonly anonymizer: RecordAnonymizer;
   } | undefined;
   if (command === "import") {
     if (!hasFlag("--confirm")) {
@@ -56,16 +60,38 @@ async function main(): Promise<void> {
     const bearerToken = process.env.FOLD_API_TOKEN;
     const vaultRoot = option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT;
     const vaultKeyPath = option("--vault-key") ?? process.env.FOLD_TRANSCRIPT_VAULT_KEY_FILE;
+    const reasoningPolicy = option("--reasoning") ?? "exclude";
+    if (reasoningPolicy !== "exclude" && reasoningPolicy !== "include") {
+      throw new TypeError("--reasoning must be exclude or include");
+    }
+    const encryptedReasoning = option("--encrypted-reasoning") ?? "exclude";
+    if (encryptedReasoning !== "exclude" && encryptedReasoning !== "retain") {
+      throw new TypeError("--encrypted-reasoning must be exclude or retain");
+    }
+    const anonymizationPolicy = (option("--anonymize") ?? "none") as AnonymizationPolicy;
+    if (!["none", "pseudonymous", "strict"].includes(anonymizationPolicy)) {
+      throw new TypeError("--anonymize must be none, pseudonymous, or strict");
+    }
+    const anonymizationKeyPath = option("--anonymization-key") ?? process.env.FOLD_ANONYMIZATION_KEY_FILE;
+    if (anonymizationPolicy !== "none" && anonymizationKeyPath === undefined) {
+      throw new TypeError("pseudonymous and strict imports require --anonymization-key or FOLD_ANONYMIZATION_KEY_FILE");
+    }
     if (apiUrl === undefined) throw new TypeError("import requires --api-url or FOLD_API_URL");
     if (workspaceId === undefined) throw new TypeError("import requires --workspace or FOLD_API_WORKSPACE");
     if (bearerToken === undefined) throw new TypeError("import requires FOLD_API_TOKEN");
     if (vaultRoot === undefined) throw new TypeError("import requires --vault or FOLD_TRANSCRIPT_VAULT");
+    const anonymizationKey = anonymizationKeyPath === undefined
+      ? undefined
+      : await ensureVaultKey(anonymizationKeyPath).then(() => readVaultKey(anonymizationKeyPath));
     delivery = {
       apiUrl,
       workspaceId,
       bearerToken,
       vaultRoot,
       ...(vaultKeyPath === undefined ? {} : { vaultEncryptionKey: await readVaultKey(vaultKeyPath) }),
+      reasoningPolicy,
+      retainEncryptedReasoning: reasoningPolicy === "include" && encryptedReasoning === "retain",
+      anonymizer: new RecordAnonymizer(anonymizationPolicy, anonymizationKey),
     };
   }
   const limitValue = option("--limit");
@@ -119,6 +145,9 @@ async function main(): Promise<void> {
     }
     try {
       const stored = await storeRedactedArtifact(transcript, delivery.vaultRoot, {
+        reasoningPolicy: delivery.reasoningPolicy,
+        retainEncryptedReasoning: delivery.retainEncryptedReasoning,
+        anonymizer: delivery.anonymizer,
         ...(delivery.vaultEncryptionKey === undefined ? {} : { encryptionKey: delivery.vaultEncryptionKey }),
       });
       const delivered = await deliverTranscriptBundle(stored.bundle, {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 
-import { encryptVaultLine, redactJsonValue } from "@_89/super-brain-importer";
+import { encryptVaultLine, redactJsonValue, RecordAnonymizer } from "@_89/super-brain-importer";
 
 import type { CaptureState, HookSource, SpoolJob, VaultArtifact } from "./types.js";
 
@@ -128,10 +128,22 @@ export class StateStore {
 }
 
 export class HookVault {
-  constructor(private readonly root: string, private readonly encryptionKey?: Uint8Array) {}
+  constructor(
+    private readonly root: string,
+    private readonly encryptionKey?: Uint8Array,
+    private readonly options: {
+      readonly anonymizer?: RecordAnonymizer;
+      readonly retainEncryptedReasoning?: boolean;
+    } = {},
+  ) {}
 
   async store(source: HookSource, payload: unknown, eventTime: number): Promise<VaultArtifact> {
-    const redacted = redactJsonValue(payload).value;
+    const anonymized = this.options.anonymizer?.value(payload) ?? payload;
+    const redacted = redactJsonValue(anonymized, {
+      ...(this.options.retainEncryptedReasoning === undefined
+        ? {}
+        : { retainEncryptedContent: this.options.retainEncryptedReasoning }),
+    }).value;
     const canonical = JSON.stringify({ source, payload: redacted });
     const id = sha256(canonical);
     const directory = join(this.root, "hooks", safeSource(source), id.slice(0, 2));

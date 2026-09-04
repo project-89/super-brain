@@ -7,6 +7,8 @@ const client = new FoldApiClient({
   baseUrl: "/api",
   workspaceId: "workspace/one",
   token: "secret-token",
+  captureBaseUrl: "/capture",
+  captureOperatorToken: "capture-secret",
 });
 
 function jsonResponse(body: unknown, status = 200): Response {

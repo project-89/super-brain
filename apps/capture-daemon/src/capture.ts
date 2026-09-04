@@ -9,8 +9,10 @@ import {
 } from "@_89/fold-activity";
 import type { JsonValue } from "@_89/fold";
 import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
+import { RecordAnonymizer } from "@_89/super-brain-importer";
 
 import { refreshProject, resolveProject } from "./project.js";
+import { readExposedReasoningDelta } from "./reasoning.js";
 import { DurableSpool, HookVault, StateStore } from "./storage.js";
 import type {
   CaptureConfig,
@@ -21,6 +23,8 @@ import type {
   SpoolJob,
   VaultArtifact,
 } from "./types.js";
+
+const TRANSCRIPT_DELTA_MAX_BYTES = 8 * 1024 * 1024;
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -38,6 +42,10 @@ function bounded(value: string, length = 500): string {
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function privateDigest(privacy: RecordAnonymizer, kind: string, value: string): string {
+  return privacy.policy === "none" ? hash(value) : privacy.digest(kind, value);
 }
 
 function sessionKey(source: HookSource, sessionId: string): string {
@@ -133,16 +141,16 @@ function stepFor(session: CaptureSession, input: Omit<CapturedStep, "id" | "step
   };
 }
 
-function traceStep(step: CapturedStep): TrajectoryInput["steps"][number] {
+function traceStep(step: CapturedStep, privacy: RecordAnonymizer): TrajectoryInput["steps"][number] {
   return {
     id: step.id,
     stepNumber: step.stepNumber,
     role: step.role,
-    content: step.content,
+    content: privacy.text(step.content),
     ...(step.toolName === undefined ? {} : { toolName: step.toolName }),
     ...(step.artifactId === undefined ? {} : { artifactId: step.artifactId }),
     ...(step.eventId === undefined ? {} : { eventId: step.eventId }),
-    ...(step.turnId === undefined ? {} : { turnId: step.turnId }),
+    ...(step.turnId === undefined ? {} : { turnId: privacy.alias("turn", step.turnId) }),
     ...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
     ...(step.durationMs === undefined ? {} : { durationMs: step.durationMs }),
   };
@@ -162,10 +170,12 @@ function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
   return remaining;
 }
 
-function trajectoryTaskId(session: CaptureSession): string {
+function trajectoryTaskId(session: CaptureSession, privacy: RecordAnonymizer): string {
+  const projectId = privacy.alias("project", session.project.id);
+  const sessionId = privacy.alias("session", session.sessionId);
   return session.comparisonKey === undefined
-    ? `capture-session:${session.source}:${session.sessionId}`
-    : `capture-task:${session.project.id}:${session.comparisonKey}`;
+    ? `capture-session:${session.source}:${sessionId}`
+    : `capture-task:${projectId}:${session.comparisonKey}`;
 }
 
 function sharedNodeId(step: {
@@ -188,6 +198,7 @@ export class CaptureEngine {
     readonly stateStore: StateStore,
     readonly vault: HookVault,
     readonly spool: DurableSpool,
+    readonly privacy = new RecordAnonymizer("none"),
   ) {}
 
   async initialize(): Promise<void> {
@@ -255,27 +266,34 @@ export class CaptureEngine {
   }
 
   private context(session: CaptureSession): TerminalSensorContext {
+    const sessionId = this.privacy.alias("session", session.sessionId);
     return {
       sensor: this.config.sensorId,
-      sessionId: session.sessionId,
+      sessionId,
       heartbeatWindowMs: this.config.heartbeatWindowMs,
       capture: {
         scope: { workspace: this.config.workspaceId },
         identity: {
           agent: session.agent,
-          task: `capture-session:${session.source}:${session.sessionId}`,
-          repo: session.project.id,
-          branch: session.project.branch,
-          session: session.sessionId,
+          task: `capture-session:${session.source}:${sessionId}`,
+          repo: this.privacy.alias("project", session.project.id),
+          branch: this.privacy.alias("branch", session.project.branch),
+          session: sessionId,
           runtime: session.source,
-          project: session.project.name,
+          project: this.privacy.alias("project-name", session.project.name),
+          anonymization: this.config.anonymizationPolicy,
+          reasoning: this.config.reasoningPolicy,
           ...(session.comparisonKey === undefined ? {} : { comparison: session.comparisonKey }),
           ...(session.model === undefined ? {} : { model: session.model }),
           ...(session.harnessVersion === undefined ? {} : { harnessVersion: session.harnessVersion }),
           ...(session.permissionMode === undefined ? {} : { permissionMode: session.permissionMode }),
-          ...(session.currentTurnId === undefined ? {} : { turn: session.currentTurnId }),
-          ...(session.project.head === undefined ? {} : { gitHead: session.project.head }),
-          ...(session.project.worktreeDigest === undefined ? {} : { worktree: session.project.worktreeDigest }),
+          ...(session.currentTurnId === undefined ? {} : { turn: this.privacy.alias("turn", session.currentTurnId) }),
+          ...(session.project.head === undefined
+            ? {}
+            : { gitHead: privateDigest(this.privacy, "git-head", session.project.head) }),
+          ...(session.project.worktreeDigest === undefined
+            ? {}
+            : { worktree: privateDigest(this.privacy, "worktree", session.project.worktreeDigest) }),
         },
       },
     };
@@ -299,10 +317,17 @@ export class CaptureEngine {
     observation: TerminalObservation,
     causedBy: readonly string[] | undefined = session.lastEventId === undefined ? undefined : [session.lastEventId],
   ): Promise<CaptureSession> {
+    const privateObservation: TerminalObservation = {
+      ...observation,
+      ...(observation.data === undefined
+        ? {}
+        : { data: this.privacy.value(observation.data) as Readonly<Record<string, JsonValue>> }),
+      ...(observation.output === undefined ? {} : { output: this.privacy.text(observation.output) }),
+    };
     const event = makeTerminalObservationEvent(
       this.context(session),
       stamp(artifact, index, "observation"),
-      observation,
+      privateObservation,
       causedBy,
     );
     await this.enqueueEvent(event);
@@ -392,7 +417,10 @@ export class CaptureEngine {
     };
     await this.stateStore.save(this.state);
     const ensured = await this.ensureSession(source, payload, artifact);
-    let session = ensured.session;
+    let session: CaptureSession = {
+      ...ensured.session,
+      observedEventCount: (ensured.session.observedEventCount ?? 0) + 1,
+    };
     let index = 0;
     if (ensured.created || ensured.resumed || hookName(payload) === "SessionStart") {
       await this.enqueueEvent(makeSensorLifecycleEvent(
@@ -409,10 +437,10 @@ export class CaptureEngine {
       const explicitTaskKey = text(payload.task_key) ?? text(payload.taskId) ?? text(payload.comparison_key);
       const normalizedPrompt = prompt.trim().toLocaleLowerCase().replace(/\s+/g, " ");
       const comparisonKey = explicitTaskKey !== undefined
-        ? `task-${hash(explicitTaskKey).slice(0, 24)}`
+        ? `task-${privateDigest(this.privacy, "task-key", explicitTaskKey).slice(0, 24)}`
         : normalizedPrompt.length === 0
           ? undefined
-          : `prompt-${hash(normalizedPrompt).slice(0, 24)}`;
+          : `prompt-${privateDigest(this.privacy, "prompt", normalizedPrompt).slice(0, 24)}`;
       session = {
         ...session,
         ...(session.comparisonKey !== undefined || comparisonKey === undefined ? {} : { comparisonKey }),
@@ -666,7 +694,9 @@ export class CaptureEngine {
         data: {
           artifactId: artifact.id,
           outputCharacters: assistantMessage.length,
-          ...(assistantMessage.length === 0 ? {} : { outputHash: hash(assistantMessage) }),
+          ...(assistantMessage.length === 0
+            ? {}
+            : { outputHash: privateDigest(this.privacy, "output", assistantMessage) }),
           ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
         },
       });
@@ -679,6 +709,9 @@ export class CaptureEngine {
         ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
     } else if (name === "SessionEnd") {
+      const reasoning = await this.captureExposedReasoning(session, artifact, index);
+      session = reasoning.session;
+      index = reasoning.nextIndex;
       await this.enqueueEvent(makeSensorLifecycleEvent(
         this.context(session),
         stamp(artifact, index++, "lifecycle"),
@@ -686,7 +719,7 @@ export class CaptureEngine {
         text(payload.reason) === undefined ? undefined : bounded(text(payload.reason)!, 500),
       ));
       if (!session.finalized) {
-        await this.enqueueTrajectory(session, artifact, index);
+        await this.enqueueTrajectory(session, artifact, index, "session-end");
         index += 2;
         if (session.transcriptPath !== undefined && (source === "claude-code" || source === "codex")) {
           const transcriptJob: SpoolJob = {
@@ -705,6 +738,20 @@ export class CaptureEngine {
       session = { ...session, active: false, finalized: true, finalizationReason: "session-end" };
     }
 
+    const eventsSinceSnapshot = (session.observedEventCount ?? 0) - (session.lastTreeSnapshotEventCount ?? 0);
+    if (
+      name !== "SessionEnd" &&
+      this.config.treeSnapshotEveryEvents > 0 &&
+      session.comparisonKey !== undefined &&
+      eventsSinceSnapshot >= this.config.treeSnapshotEveryEvents
+    ) {
+      const reasoning = await this.captureExposedReasoning(session, artifact, index);
+      session = reasoning.session;
+      index = reasoning.nextIndex;
+      await this.enqueueTreeSnapshot(session, artifact, index);
+      session = { ...session, lastTreeSnapshotEventCount: session.observedEventCount ?? 0 };
+    }
+
     this.state = {
       ...this.state,
       seenArtifacts: [...this.state.seenArtifacts, artifact.id].slice(-10_000),
@@ -714,8 +761,82 @@ export class CaptureEngine {
     return { artifactId: artifact.id };
   }
 
-  private async enqueueTrajectory(session: CaptureSession, artifact: VaultArtifact, index: number): Promise<void> {
-    const taskId = trajectoryTaskId(session);
+  private async captureExposedReasoning(
+    session: CaptureSession,
+    artifact: VaultArtifact,
+    index: number,
+  ): Promise<{ readonly session: CaptureSession; readonly nextIndex: number }> {
+    if (
+      this.config.reasoningPolicy !== "include" ||
+      session.transcriptPath === undefined ||
+      (session.source !== "claude-code" && session.source !== "codex")
+    ) {
+      return { session, nextIndex: index };
+    }
+    let delta: Awaited<ReturnType<typeof readExposedReasoningDelta>>;
+    try {
+      delta = await readExposedReasoningDelta(
+        session.transcriptPath,
+        session.source,
+        session.reasoningCursor ?? 0,
+        { maxBytes: TRANSCRIPT_DELTA_MAX_BYTES },
+      );
+    } catch {
+      return { session, nextIndex: index };
+    }
+    const seen = new Set(session.seenReasoningIds ?? []);
+    const fresh = delta.items.filter(({ id }) => !seen.has(id));
+    let next: CaptureSession = {
+      ...session,
+      reasoningCursor: delta.cursor,
+      seenReasoningIds: [...(session.seenReasoningIds ?? []), ...fresh.map(({ id }) => id)].slice(-5_000),
+    };
+    if (delta.records.length === 0) return { session: next, nextIndex: index };
+    const summaries = fresh.map((item) => ({
+      id: this.privacy.alias("reasoning-record", item.id),
+      text: bounded(this.privacy.text(item.text), 2_000),
+    }));
+    const reasoningArtifact = await this.vault.store(session.source, {
+      hook_event_name: "TranscriptDelta",
+      session_id: session.sessionId,
+      transcript_path: session.transcriptPath,
+      start_cursor: delta.startCursor,
+      end_cursor: delta.cursor,
+      record_count: delta.records.length,
+      records: delta.records,
+      summaries,
+    }, artifact.eventTime);
+    let nextIndex = index;
+    if (this.config.reasoningTreePolicy !== "summaries" || summaries.length === 0) {
+      return { session: next, nextIndex };
+    }
+    for (const summary of summaries) {
+      next = await this.observe(next, artifact, nextIndex++, {
+        kind: "reasoning_observed",
+        data: {
+          summary: summary.text,
+          artifactId: reasoningArtifact.id,
+          sourceRecordId: summary.id,
+          ...(next.currentTurnId === undefined ? {} : { turnId: next.currentTurnId }),
+        },
+      });
+      next = stepFor(next, {
+        nodeKind: "decision",
+        role: "model_thought",
+        content: summary.text,
+        artifactId: reasoningArtifact.id,
+        eventId: next.lastEventId!,
+        ...(next.currentTurnId === undefined ? {} : { turnId: next.currentTurnId }),
+      });
+    }
+    return { session: next, nextIndex };
+  }
+
+  private treeFor(
+    session: CaptureSession,
+    outcome?: "success" | "failure" | "unknown",
+  ): TrajectoryTreeRecord["tree"] {
+    const taskId = trajectoryTaskId(session, this.privacy);
     const steps = session.steps.length > 0 ? session.steps : [{
       id: "step-1",
       stepNumber: 1,
@@ -723,28 +844,16 @@ export class CaptureEngine {
       role: "decision" as const,
       content: "Coding-agent session observed",
     }];
-    const outcome = session.explicitOutcome ?? session.lastVerification ?? "unknown";
     const finalStepId = `step-${steps.length + 1}`;
-    const allSteps: TrajectoryInput["steps"] = [
-      ...steps.map(traceStep),
-      {
-        id: finalStepId,
-        stepNumber: steps.length + 1,
-        role: "model_output",
-        content: outcome === "unknown" ? "Session ended without a verified outcome" : `Session outcome: ${outcome}`,
-        artifactId: artifact.id,
-        ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
-      },
-    ];
     const projectedSteps = [
-      ...steps,
-      {
+      ...steps.map((step) => ({ ...step, content: this.privacy.text(step.content) })),
+      ...(outcome === undefined ? [] : [{
         id: finalStepId,
         stepNumber: steps.length + 1,
         nodeKind: "outcome" as const,
         role: "model_output" as const,
         content: outcome === "unknown" ? "Outcome not verified" : `Outcome ${outcome}`,
-      },
+      }]),
     ];
     const nodes: TrajectoryTreeRecord["tree"]["nodes"] = [
       ...projectedSteps.map((step) => ({
@@ -753,7 +862,7 @@ export class CaptureEngine {
         label: bounded(step.content),
       })),
     ];
-    const tree: TrajectoryTreeRecord["tree"] = {
+    return {
       taskId,
       rootNodeId: nodes[0]!.id,
       nodes,
@@ -764,15 +873,95 @@ export class CaptureEngine {
         label: "next observed step",
       })),
     };
+  }
+
+  private captureIdentity(
+    session: CaptureSession,
+    finalizationReason?: "session-end" | "orphan-timeout",
+  ): Readonly<Record<string, string>> {
+    return {
+      agent: session.agent,
+      session: this.privacy.alias("session", session.sessionId),
+      repo: this.privacy.alias("project", session.project.id),
+      branch: this.privacy.alias("branch", session.project.branch),
+      runtime: session.source,
+      project: this.privacy.alias("project-name", session.project.name),
+      anonymization: this.config.anonymizationPolicy,
+      reasoning: this.config.reasoningPolicy,
+      ...(session.project.head === undefined
+        ? {}
+        : { gitHead: privateDigest(this.privacy, "git-head", session.project.head) }),
+      ...(session.project.worktreeDigest === undefined
+        ? {}
+        : { worktree: privateDigest(this.privacy, "worktree", session.project.worktreeDigest) }),
+      ...(session.harnessVersion === undefined ? {} : { harnessVersion: session.harnessVersion }),
+      ...((session.truncatedStepCount ?? 0) === 0 ? {} : { truncatedSteps: String(session.truncatedStepCount) }),
+      ...((finalizationReason ?? session.finalizationReason) === undefined
+        ? {}
+        : { finalizationReason: (finalizationReason ?? session.finalizationReason)! }),
+      ...(session.comparisonKey === undefined ? {} : { comparison: session.comparisonKey }),
+    };
+  }
+
+  private async enqueueTreeSnapshot(
+    session: CaptureSession,
+    artifact: VaultArtifact,
+    index: number,
+  ): Promise<void> {
+    const tree = this.treeFor(session);
+    const job: SpoolJob = {
+      version: 1,
+      kind: "trajectory-tree",
+      id: `capture-${artifact.eventTime.toString().padStart(13, "0")}-${index.toString().padStart(3, "0")}-tree-snapshot-${artifact.id.slice(0, 12)}`,
+      createdAt: artifact.receivedAt,
+      treeStamp: eventStamp(artifact, index, "trajectory-tree-snapshot"),
+      tree,
+      captureIdentity: {
+        ...this.captureIdentity(session),
+        snapshot: "true",
+        observedEvents: String(session.observedEventCount ?? 0),
+      },
+    };
+    await this.spool.enqueue(job);
+  }
+
+  private async enqueueTrajectory(
+    session: CaptureSession,
+    artifact: VaultArtifact,
+    index: number,
+    finalizationReason?: "session-end" | "orphan-timeout",
+  ): Promise<void> {
+    const outcome = session.explicitOutcome ?? session.lastVerification ?? "unknown";
+    const tree = this.treeFor(session, outcome);
+    const taskId = tree.taskId;
+    const steps = session.steps.length > 0 ? session.steps : [{
+      id: "step-1",
+      stepNumber: 1,
+      nodeKind: "observation" as const,
+      role: "decision" as const,
+      content: "Coding-agent session observed",
+    }];
+    const finalStepId = `step-${steps.length + 1}`;
+    const allSteps: TrajectoryInput["steps"] = [
+      ...steps.map((step) => traceStep(step, this.privacy)),
+      {
+        id: finalStepId,
+        stepNumber: steps.length + 1,
+        role: "model_output",
+        content: outcome === "unknown" ? "Session ended without a verified outcome" : `Session outcome: ${outcome}`,
+        artifactId: artifact.id,
+        ...(session.currentTurnId === undefined ? {} : { turnId: this.privacy.alias("turn", session.currentTurnId) }),
+      },
+    ];
     const assignments: TrajectoryInput["assignments"] = Object.fromEntries(
       allSteps.map((step, stepIndex) => [step.id, {
         kind: "mapped" as const,
-        nodeId: nodes[stepIndex]!.id,
+        nodeId: tree.nodes[stepIndex]!.id,
         method: { kind: "rule" as const, id: "super-brain-capture/v1", confidence: 1 },
       }]),
     );
     const input: TrajectoryInput = {
-      id: `trajectory:${session.source}:${session.sessionId}`,
+      id: `trajectory:${session.source}:${this.privacy.alias("session", session.sessionId)}`,
       taskId,
       model: {
         id: session.model ?? session.agent,
@@ -782,20 +971,7 @@ export class CaptureEngine {
       assignments,
       ...(session.reviewText === undefined ? {} : { reviewText: session.reviewText }),
     };
-    const captureIdentity = {
-      agent: session.agent,
-      session: session.sessionId,
-      repo: session.project.id,
-      branch: session.project.branch,
-      runtime: session.source,
-      project: session.project.name,
-      ...(session.project.head === undefined ? {} : { gitHead: session.project.head }),
-      ...(session.project.worktreeDigest === undefined ? {} : { worktree: session.project.worktreeDigest }),
-      ...(session.harnessVersion === undefined ? {} : { harnessVersion: session.harnessVersion }),
-      ...((session.truncatedStepCount ?? 0) === 0 ? {} : { truncatedSteps: String(session.truncatedStepCount) }),
-      ...(session.finalizationReason === undefined ? {} : { finalizationReason: session.finalizationReason }),
-      ...(session.comparisonKey === undefined ? {} : { comparison: session.comparisonKey }),
-    };
+    const captureIdentity = this.captureIdentity(session, finalizationReason);
     const job: SpoolJob = {
       version: 1,
       kind: "trajectory",
@@ -846,20 +1022,23 @@ export class CaptureEngine {
       eventTime,
       path: "",
     };
-    const session = {
+    let session = {
       ...withoutVerifiedOutcome(sessionInput),
       active: false,
       finalized: true,
       finalizationReason: "orphan-timeout" as const,
     };
     this.state = { ...this.state, lastEventTime: eventTime };
+    const reasoning = await this.captureExposedReasoning(session, artifact, 0);
+    session = { ...reasoning.session, active: false, finalized: true, finalizationReason: "orphan-timeout" };
+    let index = reasoning.nextIndex;
     await this.enqueueEvent(makeSensorLifecycleEvent(
       this.context(session),
-      stamp(artifact, 0, "orphan"),
+      stamp(artifact, index++, "orphan"),
       "offline",
       `Capture finalized after ${this.config.orphanAfterMs}ms without a hook`,
     ));
-    await this.enqueueTrajectory(session, artifact, 1);
+    await this.enqueueTrajectory(session, artifact, index, "orphan-timeout");
     if (session.transcriptPath !== undefined && (session.source === "claude-code" || session.source === "codex")) {
       await this.spool.enqueue({
         version: 1,

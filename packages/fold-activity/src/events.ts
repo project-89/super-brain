@@ -32,6 +32,7 @@ const OBSERVATION_KINDS: ReadonlySet<string> = new Set([
   "repository_changed",
   "verification_result",
   "reasoning_checkpoint",
+  "reasoning_observed",
   "human_decision",
   "task_complete",
   "output",

@@ -2501,6 +2501,17 @@ textarea::placeholder {
 .modal__header h2 { margin: 0; font-size: 15px; }
 .form-stack { display: flex; flex-direction: column; gap: 15px; padding: 18px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.settings-section-title { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 11px; font-weight: 700; }
+.settings-section-title:not(:first-child) { margin-top: 5px; padding-top: 16px; border-top: 1px solid var(--line); }
+.settings-section-title svg { width: 15px; height: 15px; color: var(--accent); }
+.settings-load { align-self: flex-start; }
+.capture-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding-top: 2px; }
+.settings-toggle { display: flex; min-height: 38px; align-items: center; gap: 9px; align-self: end; color: var(--text); font-size: 10px; font-weight: 650; cursor: pointer; }
+.settings-toggle input { width: 32px; height: 18px; margin: 0; appearance: none; background: var(--surface-muted); border: 1px solid var(--line-strong); border-radius: 9px; cursor: pointer; transition: background 120ms ease, border-color 120ms ease; }
+.settings-toggle input::after { display: block; width: 12px; height: 12px; margin: 2px; content: ""; background: var(--text-muted); border-radius: 50%; transition: transform 120ms ease, background 120ms ease; }
+.settings-toggle input:checked { background: var(--accent-soft); border-color: var(--accent); }
+.settings-toggle input:checked::after { background: var(--accent); transform: translateX(14px); }
+.settings-toggle input:disabled { cursor: not-allowed; opacity: 0.5; }
 .field { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: var(--text-muted); font-size: 10px; font-weight: 650; }
 .field input, .field select, .field textarea { width: 100%; min-width: 0; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 5px; font-size: 12px; font-weight: 400; }
 .field input { height: 38px; padding: 0 10px; }
@@ -2666,6 +2677,7 @@ textarea::placeholder {
 }
 
 @media (max-width: 560px) {
+  .form-grid, .capture-policy-grid { grid-template-columns: minmax(0, 1fr); }
   .topbar__actions { gap: 1px; }
   .memory-filter-bar { display: grid; grid-template-columns: minmax(0, 1fr); }
   .memory-filter-bar > * { width: 100%; min-width: 0; }

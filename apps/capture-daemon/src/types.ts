@@ -1,9 +1,11 @@
 import type { FoldEvent } from "@_89/fold";
 import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
 import type { EventStamp } from "@_89/super-brain-client";
+import type { AnonymizationPolicy } from "@_89/super-brain-importer";
 
 export type HookSource = "claude-code" | "codex" | "hermes" | "unknown";
 export type ReasoningPolicy = "exclude" | "include";
+export type ReasoningTreePolicy = "exclude" | "summaries";
 
 export interface CaptureConfig {
   readonly apiUrl: string;
@@ -11,6 +13,7 @@ export interface CaptureConfig {
   readonly apiToken: string;
   readonly sensorId: string;
   readonly hookToken: string;
+  readonly operatorToken: string;
   readonly bindHost: "127.0.0.1" | "::1";
   readonly port: number;
   readonly heartbeatWindowMs: number;
@@ -20,7 +23,22 @@ export interface CaptureConfig {
   readonly vaultRoot: string;
   readonly vaultKeyPath?: string;
   readonly reasoningPolicy: ReasoningPolicy;
+  readonly retainEncryptedReasoning: boolean;
+  readonly reasoningTreePolicy: ReasoningTreePolicy;
+  readonly treeSnapshotEveryEvents: number;
+  readonly anonymizationPolicy: AnonymizationPolicy;
+  readonly anonymizationKeyPath?: string;
 }
+
+export interface CapturePolicySettings {
+  readonly reasoningPolicy: ReasoningPolicy;
+  readonly retainEncryptedReasoning: boolean;
+  readonly reasoningTreePolicy: ReasoningTreePolicy;
+  readonly treeSnapshotEveryEvents: number;
+  readonly anonymizationPolicy: AnonymizationPolicy;
+}
+
+export type CapturePolicyPatch = Partial<CapturePolicySettings>;
 
 export interface ProjectIdentity {
   readonly id: string;
@@ -68,6 +86,10 @@ export interface CaptureSession {
   readonly active: boolean;
   readonly lastSeenAt: string;
   readonly finalizationReason?: "session-end" | "orphan-timeout";
+  readonly observedEventCount?: number;
+  readonly lastTreeSnapshotEventCount?: number;
+  readonly reasoningCursor?: number;
+  readonly seenReasoningIds?: readonly string[];
 }
 
 export interface CaptureState {
@@ -80,6 +102,15 @@ export interface CaptureState {
 }
 
 export type SpoolJob =
+  | {
+      readonly version: 1;
+      readonly kind: "trajectory-tree";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly treeStamp: EventStamp;
+      readonly tree: TrajectoryTreeRecord["tree"];
+      readonly captureIdentity: Readonly<Record<string, string>>;
+    }
   | {
       readonly version: 1;
       readonly kind: "event";

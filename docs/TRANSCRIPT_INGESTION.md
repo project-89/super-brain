@@ -49,16 +49,24 @@ Canonical Fold records include counts, timestamps, roles, tool/action names,
 status, source, model/client metadata, and project/run context. They do not
 include prompts, assistant text, tool arguments/results, or transcript bodies.
 
-Claude `thinking` blocks and Codex exposed reasoning are excluded by default;
-encrypted content is always excluded. The capture daemon can opt into retaining
-exposed reasoning in the private redacted vault, and records that choice as
-`artifact.reasoningPolicy`. This never promotes reasoning text into canonical
-Fold state. When import is explicitly confirmed, the importer writes a new JSONL
+Claude `thinking` blocks and Codex exposed reasoning are excluded by default.
+The capture daemon and importer can separately opt into exposed reasoning and
+opaque encrypted provider content. The artifact records both choices as
+`reasoningPolicy` and `encryptedReasoningPolicy`. Opaque content is useful as
+preserved evidence but Super Brain cannot decrypt or derive a tree from it.
+When import is explicitly confirmed, the importer writes a new JSONL
 artifact to a `0700` content-addressed vault tree with `0600` files. An optional
 AES-256-GCM key encrypts each redacted line independently with a random nonce;
 authentication failure is fatal. Common token, key, password, bearer, AWS key,
 and private-key patterns are replaced with `[REDACTED]`. The original file
 remains untouched.
+
+Live capture reads a bounded window of complete new native JSONL records at each
+configured tree checkpoint and at finalization. Those records are stored as encrypted,
+redacted `TranscriptDelta` artifacts before exposed summaries are emitted into
+canonical reasoning trees. `none`, `pseudonymous`, and `strict` anonymization
+are available; keyed pseudonyms preserve stable joins among projects, runs,
+turns, sessions, and artifacts.
 
 The adapter verifies file size and modification time across parsing and hashing,
 and the vault writer verifies the source hash again before storage. A transcript
@@ -88,6 +96,10 @@ FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- import \
   --api-url http://127.0.0.1:3000 \
   --workspace local \
   --vault ~/.super-brain/transcript-vault \
+  --reasoning include \
+  --encrypted-reasoning retain \
+  --anonymize pseudonymous \
+  --anonymization-key ~/.config/super-brain/anonymization.key \
   --confirm \
   --resume
 ```

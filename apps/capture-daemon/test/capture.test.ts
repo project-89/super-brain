@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -80,6 +80,34 @@ describe("capture daemon", () => {
     const root = "/tmp/capture";
     expect(() => parseCaptureConfig({ ...config(root), bindHost: "0.0.0.0" }))
       .toThrow("only bind to a loopback address");
+  });
+
+  it("validates periodic tree and privacy policy combinations", () => {
+    const root = "/tmp/capture-policy";
+    expect(config(root)).toMatchObject({
+      reasoningTreePolicy: "exclude",
+      treeSnapshotEveryEvents: 25,
+      anonymizationPolicy: "none",
+      retainEncryptedReasoning: false,
+    });
+    expect(() => parseCaptureConfig({
+      ...config(root),
+      reasoningPolicy: "exclude",
+      reasoningTreePolicy: "summaries",
+    })).toThrow("requires reasoningPolicy include");
+    expect(() => parseCaptureConfig({
+      ...config(root),
+      reasoningPolicy: "exclude",
+      retainEncryptedReasoning: true,
+    })).toThrow("requires reasoningPolicy include");
+    expect(() => parseCaptureConfig({
+      ...config(root),
+      anonymizationPolicy: "pseudonymous",
+    })).toThrow("require anonymizationKeyPath");
+    expect(() => parseCaptureConfig({
+      ...config(root),
+      treeSnapshotEveryEvents: -1,
+    })).toThrow("must be a non-negative integer");
   });
 
   it("durably captures a real hook trajectory without canonical prompt content", async () => {
@@ -245,6 +273,65 @@ describe("capture daemon", () => {
     expect(trajectories[0]?.tree.taskId).toBe(trajectories[1]?.tree.taskId);
     expect(trajectories[0]?.tree.rootNodeId).toBe(trajectories[1]?.tree.rootNodeId);
     expect(trajectories[0]?.tree.nodes[2]?.id).not.toBe(trajectories[1]?.tree.nodes[2]?.id);
+  });
+
+  it("records periodic reasoning-tree snapshots without creating duplicate runs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-snapshots-"));
+    const transcript = join(root, "session.jsonl");
+    await writeFile(transcript, `${JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        id: "reason-a",
+        summary: [{ type: "summary_text", text: "Inspect cache invalidation" }],
+        encrypted_content: "opaque-provider-state",
+      },
+    })}\n`, "utf8");
+    const current = parseCaptureConfig({
+      ...config(root),
+      reasoningPolicy: "include",
+      retainEncryptedReasoning: true,
+      reasoningTreePolicy: "summaries",
+      treeSnapshotEveryEvents: 2,
+    });
+    const spool = new DurableSpool(current.stateRoot);
+    const vault = new HookVault(current.vaultRoot, undefined, { retainEncryptedReasoning: true });
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), vault, spool);
+    await engine.initialize();
+    const common = { session_id: "snapshot-a", transcript_path: transcript, cwd: process.cwd() };
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Fix cache invalidation" });
+
+    let jobs = (await spool.list()).map(({ job }) => job);
+    const snapshot = jobs.find((job) => job.kind === "trajectory-tree");
+    expect(snapshot).toMatchObject({ kind: "trajectory-tree", captureIdentity: { snapshot: "true", observedEvents: "2" } });
+    if (snapshot?.kind !== "trajectory-tree") throw new Error("missing periodic tree snapshot");
+    expect(snapshot.tree.nodes.some(({ label }) => label === "Inspect cache invalidation")).toBe(true);
+    expect(jobs.filter((job) => job.kind === "trajectory")).toHaveLength(0);
+    expect(jobs.filter((job) => job.kind === "event").some((job) =>
+      job.kind === "event" && job.event.changes.some((change) =>
+        change.verb === "create" && change.after.observation === "reasoning_observed"
+      )
+    )).toBe(true);
+    const state = await new StateStore(current.stateRoot).load();
+    const captured = state.sessions["codex:snapshot-a"];
+    expect(captured?.reasoningCursor).toBeGreaterThan(0);
+    const vaultFiles: string[] = [];
+    const sourceRoot = join(current.vaultRoot, "hooks", "codex");
+    for (const prefix of await readdir(sourceRoot)) {
+      for (const name of await readdir(join(sourceRoot, prefix))) {
+        vaultFiles.push(join(sourceRoot, prefix, name));
+      }
+    }
+    const delta = (await Promise.all(vaultFiles.map((path) => readFile(path, "utf8"))))
+      .map((value) => JSON.parse(value) as { payload?: Record<string, unknown> })
+      .find(({ payload }) => payload?.hook_event_name === "TranscriptDelta");
+    expect(delta?.payload).toMatchObject({ record_count: 1 });
+    expect(JSON.stringify(delta)).toContain("opaque-provider-state");
+
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionEnd" });
+    jobs = (await spool.list()).map(({ job }) => job);
+    expect(jobs.filter((job) => job.kind === "trajectory")).toHaveLength(1);
   });
 
   it("captures the observable Hermes gateway step vocabulary", async () => {

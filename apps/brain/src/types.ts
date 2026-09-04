@@ -5,6 +5,16 @@ export interface ConnectionSettings {
   readonly baseUrl: string;
   readonly workspaceId: string;
   readonly token: string;
+  readonly captureBaseUrl: string;
+  readonly captureOperatorToken: string;
+}
+
+export interface CapturePolicySettings {
+  readonly reasoningPolicy: "exclude" | "include";
+  readonly retainEncryptedReasoning: boolean;
+  readonly reasoningTreePolicy: "exclude" | "summaries";
+  readonly treeSnapshotEveryEvents: number;
+  readonly anonymizationPolicy: "none" | "pseudonymous" | "strict";
 }
 
 export interface EventAuthor {
@@ -243,6 +253,8 @@ export interface TranscriptArtifact {
   readonly modifiedAt?: string;
   readonly contentPolicy: "metadata-only" | "redacted";
   readonly reasoningPolicy?: "excluded" | "included";
+  readonly encryptedReasoningPolicy?: "excluded" | "retained";
+  readonly anonymizationPolicy?: "none" | "pseudonymous" | "strict";
   readonly stored: boolean;
   readonly redactionCount: number;
 }

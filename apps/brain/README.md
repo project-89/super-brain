@@ -40,12 +40,15 @@ Run the API on port `3000`, then start the client:
 
 ```bash
 VITE_FOLD_WORKSPACE=local VITE_FOLD_TOKEN=local-dev-token \
+VITE_CAPTURE_OPERATOR_TOKEN=local-capture-operator-token \
   pnpm --filter @_89/super-brain dev
 ```
 
 Vite serves `http://127.0.0.1:4173` and proxies `/api` to
-`http://127.0.0.1:3000`. Override the proxy with `FOLD_API_PROXY_TARGET` or use
+`http://127.0.0.1:3000`; `/capture` proxies to `http://127.0.0.1:8377`. Override
+the proxies with `FOLD_API_PROXY_TARGET` and `SUPER_BRAIN_CAPTURE_PROXY_TARGET`, or use
 `VITE_FOLD_API_BASE_URL` for a browser-accessible API origin.
 
 Workspace and base URL preferences use local storage. The bearer token uses
-session storage and is cleared when the browser tab session ends.
+session storage and is cleared when the browser tab session ends. The capture
+operator token follows the same session-only rule.
