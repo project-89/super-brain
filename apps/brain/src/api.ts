@@ -59,7 +59,7 @@ export class FoldApiClient {
   ) {}
 
   private workspacePath(resource: string): string {
-    return `/v1/workspaces/${encodeURIComponent(this.settings.workspaceId)}/${resource}`;
+    return `/v1/organizations/${encodeURIComponent(this.settings.organizationId)}/workspaces/${encodeURIComponent(this.settings.workspaceId)}/${resource}`;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

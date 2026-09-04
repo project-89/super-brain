@@ -7,6 +7,7 @@ import {
 
 export interface TranscriptDeliveryOptions {
   readonly apiUrl: string;
+  readonly organizationId?: string;
   readonly workspaceId: string;
   readonly bearerToken: string;
   readonly maxAttempts?: number;
@@ -47,7 +48,11 @@ function endpoint(options: TranscriptDeliveryOptions, resource: string): string 
   if (options.bearerToken.trim().length === 0) {
     throw new TypeError("transcript bearer token must not be empty");
   }
-  return `${options.apiUrl.replace(/\/+$/, "")}/v1/workspaces/${encodeURIComponent(options.workspaceId)}/${resource}`;
+  const workspace = encodeURIComponent(options.workspaceId);
+  const scope = options.organizationId === undefined
+    ? `/v1/workspaces/${workspace}`
+    : `/v1/organizations/${encodeURIComponent(options.organizationId)}/workspaces/${workspace}`;
+  return `${options.apiUrl.replace(/\/+$/, "")}${scope}/${resource}`;
 }
 
 function responseError(status: number, body: unknown): TranscriptDeliveryError {

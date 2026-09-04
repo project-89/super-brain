@@ -16,6 +16,21 @@ function client(fetchMock: typeof fetch) {
 }
 
 describe("SuperBrainClient", () => {
+  it("uses an organization-qualified route when organization scope is configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entries: [] })) as unknown as typeof fetch;
+    const scoped = new SuperBrainClient({
+      baseUrl: "https://brain.example",
+      organizationId: "organization/one",
+      workspaceId: "workspace/one",
+      token: "secret",
+      fetch: fetchMock,
+    });
+    await scoped.listEvents();
+    expect((fetchMock as any).mock.calls[0][0]).toBe(
+      "https://brain.example/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/events",
+    );
+  });
+
   it("sends project-aware recall with bearer authentication", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ memories: [] })) as unknown as typeof fetch;
     await client(fetchMock).recallMemories({ projectIds: ["project-a"], limit: 5 });

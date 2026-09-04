@@ -7,6 +7,7 @@ import { SuperBrainClient } from "@_89/super-brain-client";
 
 const brain = new SuperBrainClient({
   baseUrl: process.env.SUPER_BRAIN_URL!,
+  organizationId: process.env.SUPER_BRAIN_ORGANIZATION!,
   workspaceId: process.env.SUPER_BRAIN_WORKSPACE!,
   token: process.env.SUPER_BRAIN_TOKEN!,
 });

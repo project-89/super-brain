@@ -1,9 +1,9 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PostgresVectorMemoryRanker } from "@_89/fold-postgres";
+import { PostgresTenantAdministration, PostgresVectorMemoryRanker } from "@_89/fold-postgres";
 
-import { StaticIdentityDirectory } from "./auth.js";
+import { PostgresMembershipResolver, StaticIdentityDirectory } from "./auth.js";
 import { JournalSdkRegistry, PostgresSdkRegistry } from "./registry.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
@@ -41,6 +41,12 @@ function corsOriginsFromEnvironment(value: string | undefined): readonly string[
   return origins;
 }
 
+function booleanFromEnvironment(name: string, value: string | undefined): boolean {
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new TypeError(`${name} must be true or false`);
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2).filter((argument) => argument !== "--");
   const command = args[0] ?? "serve";
@@ -56,9 +62,16 @@ async function main(): Promise<void> {
   const directory = StaticIdentityDirectory.fromJson(credentials);
   const dataDirectory = process.env.FOLD_DATA_DIR ?? join(process.cwd(), ".data", "fold");
   const databaseUrl = process.env.FOLD_DATABASE_URL;
+  const requireRlsEnforcement = booleanFromEnvironment(
+    "FOLD_REQUIRE_TENANT_RLS",
+    process.env.FOLD_REQUIRE_TENANT_RLS,
+  );
   const registry = databaseUrl === undefined || databaseUrl.trim().length === 0
     ? new JournalSdkRegistry(dataDirectory)
-    : new PostgresSdkRegistry({ connectionString: databaseUrl });
+    : new PostgresSdkRegistry({ connectionString: databaseUrl, requireRlsEnforcement });
+  const tenantAdministration = databaseUrl === undefined || databaseUrl.trim().length === 0
+    ? undefined
+    : new PostgresTenantAdministration({ connectionString: databaseUrl, requireRlsEnforcement });
   const embeddingUrl = process.env.FOLD_EMBEDDING_URL;
   let vectorRanker: PostgresVectorMemoryRanker | undefined;
   if (embeddingUrl !== undefined) {
@@ -76,6 +89,7 @@ async function main(): Promise<void> {
         dimensions,
         ...(process.env.FOLD_EMBEDDING_TOKEN === undefined ? {} : { token: process.env.FOLD_EMBEDDING_TOKEN }),
       }),
+      requireRlsEnforcement,
     });
   }
   const host = process.env.FOLD_API_HOST ?? "127.0.0.1";
@@ -92,15 +106,21 @@ async function main(): Promise<void> {
   );
   if (fleetOrphanAfterMs === 0) throw new TypeError("FOLD_FLEET_ORPHAN_AFTER_MS must be greater than zero");
   const corsOrigins = corsOriginsFromEnvironment(process.env.FOLD_API_CORS_ORIGINS);
-  await registry.open();
   let server: ReturnType<typeof createApiServer>;
   try {
+    await registry.open();
+    if (tenantAdministration !== undefined) {
+      await tenantAdministration.replaceStaticMemberships(directory.configuredMemberships());
+    }
     server = createApiServer({
       authenticator: directory,
-      memberships: directory,
+      memberships: tenantAdministration === undefined
+        ? directory
+        : new PostgresMembershipResolver(tenantAdministration),
       sdks: registry,
       memoryRanker: vectorRanker ?? new LocalLexicalMemoryRanker(),
       reasoner: new LocalEvidenceReasoner(),
+      ...(tenantAdministration === undefined ? {} : { tenantAdministration }),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),
       ...(corsOrigins === undefined ? {} : { corsOrigins }),
       fleetOrphanAfterMs,
@@ -111,7 +131,7 @@ async function main(): Promise<void> {
       server.listen(port, host, resolve);
     });
   } catch (error) {
-    await Promise.all([registry.close(), vectorRanker?.close()]);
+    await Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close()]);
     throw error;
   }
   console.log(`Fold API listening at http://${host}:${port}`);
@@ -124,7 +144,7 @@ async function main(): Promise<void> {
     forceClose.unref();
     server.close((error) => {
       clearTimeout(forceClose);
-      void Promise.all([registry.close(), vectorRanker?.close()]).then(() => {
+      void Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close()]).then(() => {
         if (error !== undefined) {
           console.error(error);
           process.exitCode = 1;

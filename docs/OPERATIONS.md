@@ -18,7 +18,7 @@ the narrowest set they need.
       "trajectories:write",
       "transcripts:write"
     ],
-    "workspaces": { "local-history": { "role": "admin" } }
+    "organizations": { "local": { "role": "admin", "workspaces": { "local-history": { "role": "admin" } } } }
   },
   "memory-worker-secret": {
     "principalId": "memory-worker",
@@ -31,13 +31,13 @@ the narrowest set they need.
       "memories:read",
       "memories:write"
     ],
-    "workspaces": { "local-history": { "role": "admin" } }
+    "organizations": { "local": { "role": "admin", "workspaces": { "local-history": { "role": "admin" } } } }
   },
   "harness-secret": {
     "principalId": "agent-user",
     "author": { "kind": "agent", "id": "hermes" },
     "capabilities": ["memories:read", "memories:write", "reasoning:read"],
-    "workspaces": { "local-history": { "role": "member" } }
+    "organizations": { "local": { "role": "member", "workspaces": { "local-history": { "role": "member" } } } }
   }
 }
 ```
@@ -45,6 +45,34 @@ the narrowest set they need.
 Credential rotation is a configuration replacement plus a process restart:
 add the replacement token, move clients, remove the old token, then restart the
 API. Tokens are hashed in process but the configuration remains secret material.
+
+## Tenant Administration
+
+Organization owners and admins can enroll a credential-free repository remote
+in a workspace when their credential includes `organization:admin` or omits a
+capability list. Enrollment is idempotent for the same target and cannot be silently reassigned:
+
+```sh
+curl -fsS -X POST \
+  -H "Authorization: Bearer $FOLD_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"remote":"git@github.com:example/project.git","projectId":"project-id"}' \
+  "$FOLD_API_URL/v1/organizations/$FOLD_API_ORGANIZATION/workspaces/$FOLD_API_WORKSPACE/repository-enrollments"
+```
+
+Platform support credentials receive no implicit content access. An exceptional
+read requires `platform:data-read`, a ticket-quality reason, and an expiry no
+more than 15 minutes away. The audit record is committed before the read and is
+visible to the affected organization's owners and admins at `audit-log`.
+
+For a shared deployment, set `FOLD_REQUIRE_TENANT_RLS=true` and use a dedicated
+PostgreSQL application role without `SUPERUSER` or `BYPASSRLS`. Do not enable
+that guard with a local development superuser.
+
+The organization-key migration changes primary keys and forces RLS. Stop old
+API and worker processes before first rollout, migrate by starting the new API,
+then start the new workers. Old binaries are intentionally incompatible with
+the enforced tenant schema.
 
 After building, install the API and memory worker as persistent macOS services.
 The generated plists are `0600` and retain the current required environment, so
@@ -54,6 +82,7 @@ run these commands from a shell containing the intended secrets:
 pnpm --filter @_89/super-brain-api start -- install-service
 
 export SUPER_BRAIN_URL=http://127.0.0.1:3003
+export SUPER_BRAIN_ORGANIZATION=local
 export SUPER_BRAIN_WORKSPACE=local-history
 export SUPER_BRAIN_TOKEN=replace-memory-worker-token
 export FOLD_TRANSCRIPT_VAULT="$HOME/.local/share/super-brain/vault"
@@ -161,6 +190,7 @@ mcp_servers:
     args: ["/absolute/path/to/super-brain/apps/mcp-server/dist/main.js"]
     env:
       SUPER_BRAIN_URL: "http://127.0.0.1:3003"
+      SUPER_BRAIN_ORGANIZATION: "local"
       SUPER_BRAIN_WORKSPACE: "local-history"
       SUPER_BRAIN_TOKEN: "replace-harness-token"
       SUPER_BRAIN_CAPTURE_URL: "http://127.0.0.1:8377"

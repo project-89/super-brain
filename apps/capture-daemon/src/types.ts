@@ -9,6 +9,7 @@ export type ReasoningTreePolicy = "exclude" | "summaries";
 
 export interface CaptureConfig {
   readonly apiUrl: string;
+  readonly organizationId: string;
   readonly workspaceId: string;
   readonly apiToken: string;
   readonly sensorId: string;

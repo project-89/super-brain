@@ -40,6 +40,7 @@ async function main(): Promise<void> {
     throw new TypeError("backfill requires --confirm; run scan first to review counts");
   }
   const baseUrl = required(option("--api-url") ?? process.env.SUPER_BRAIN_URL ?? process.env.FOLD_API_URL, "SUPER_BRAIN_URL");
+  const organizationId = option("--organization") ?? process.env.SUPER_BRAIN_ORGANIZATION ?? process.env.FOLD_API_ORGANIZATION ?? "local";
   const workspaceId = required(option("--workspace") ?? process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE");
   const token = required(process.env.SUPER_BRAIN_TOKEN ?? process.env.FOLD_API_TOKEN, "SUPER_BRAIN_TOKEN");
   const vaultRoot = required(option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT, "FOLD_TRANSCRIPT_VAULT");
@@ -56,7 +57,7 @@ async function main(): Promise<void> {
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new TypeError("--limit must be a positive integer");
   if (!Number.isInteger(sample) || sample < 0 || sample > 100) throw new TypeError("--sample must be an integer within [0, 100]");
 
-  const client = new SuperBrainClient({ baseUrl, workspaceId, token });
+  const client = new SuperBrainClient({ baseUrl, organizationId, workspaceId, token });
   const autoPromote = args.includes("--auto-promote");
   const worker = new TranscriptMemoryWorker({
     client,

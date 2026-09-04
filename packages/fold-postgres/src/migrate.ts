@@ -19,13 +19,15 @@ async function main(): Promise<void> {
     throw new TypeError("FOLD_DATABASE_URL is required");
   }
   const workspaceId = argument("--workspace");
+  const organizationId = argument("--organization") ?? "local";
   const journalPath = resolve(argument("--journal"));
   const journal = await new FoldJournal(journalPath).read();
   const database = new PostgresFoldDatabase({ connectionString });
   try {
-    const imported = await database.importEntries(workspaceId, journal.entries);
-    const stored = await database.readEntries(workspaceId);
-    console.log(JSON.stringify({ workspaceId, journalPath, imported, stored: stored.length }));
+    const tenant = { organizationId, workspaceId };
+    const imported = await database.importEntries(tenant, journal.entries);
+    const stored = await database.readEntries(tenant);
+    console.log(JSON.stringify({ organizationId, workspaceId, journalPath, imported, stored: stored.length }));
   } finally {
     await database.close();
   }

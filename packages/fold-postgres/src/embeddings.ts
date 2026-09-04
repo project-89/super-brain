@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Pool, type PoolConfig, type QueryResultRow } from "pg";
+import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
 
 import type {
   MemoryEmbeddingProvider,
@@ -9,6 +9,7 @@ import type {
   MemoryRankingRequest,
 } from "@_89/fold-sdk";
 import type { SemanticMemoryCandidate } from "@_89/fold-epistemic";
+import { POSTGRES_DEFAULT_ORGANIZATION_ID, type PostgresTenantScope } from "./store.js";
 
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/i;
 
@@ -17,6 +18,7 @@ export interface PostgresVectorMemoryRankerOptions {
   readonly provider: MemoryEmbeddingProvider;
   readonly schema?: string;
   readonly pool?: Omit<PoolConfig, "connectionString">;
+  readonly requireRlsEnforcement?: boolean;
 }
 
 interface ExistingEmbeddingRow extends QueryResultRow {
@@ -63,6 +65,7 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
   private readonly schema: string;
   private readonly provider: MemoryEmbeddingProvider;
   private readonly ready: Promise<void>;
+  private readonly requireRlsEnforcement: boolean;
   private closed = false;
 
   constructor(options: PostgresVectorMemoryRankerOptions) {
@@ -76,6 +79,7 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
     this.pool = new Pool({ connectionString: options.connectionString, ...options.pool });
     this.schema = checkedIdentifier(options.schema ?? "public");
     this.provider = options.provider;
+    this.requireRlsEnforcement = options.requireRlsEnforcement === true;
     this.descriptor = { id: `pgvector:${options.provider.descriptor.id}`, kind: "semantic" };
     this.ready = this.initialize();
   }
@@ -91,6 +95,18 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-memory-embeddings-v1'))");
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
+      if (this.requireRlsEnforcement) {
+        const role = await client.query<{ readonly rolsuper: boolean; readonly rolbypassrls: boolean }>(`
+          SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user
+        `);
+        if (role.rows[0]?.rolsuper === true || role.rows[0]?.rolbypassrls === true) {
+          throw new Error("FOLD_REQUIRE_TENANT_RLS rejects PostgreSQL roles with superuser or BYPASSRLS");
+        }
+        const rowSecurity = await client.query<{ readonly row_security: string }>("SHOW row_security");
+        if (rowSecurity.rows[0]?.row_security !== "on") {
+          throw new Error("FOLD_REQUIRE_TENANT_RLS requires PostgreSQL row_security=on");
+        }
+      }
       await client.query("CREATE EXTENSION IF NOT EXISTS vector");
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${this.table("fold_memory_embedding_config")} (
@@ -111,6 +127,7 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
       }
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${this.table("fold_memory_embeddings")} (
+          organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}',
           workspace_id text NOT NULL,
           memory_id text NOT NULL,
           revision integer NOT NULL,
@@ -118,13 +135,41 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
           content_digest text NOT NULL,
           embedding vector(${dimensions}) NOT NULL,
           indexed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-          PRIMARY KEY (workspace_id, memory_id, model_id)
+          PRIMARY KEY (organization_id, workspace_id, memory_id, model_id)
         )
       `);
+      await client.query(`ALTER TABLE ${this.table("fold_memory_embeddings")}
+        ADD COLUMN IF NOT EXISTS organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}'`);
+      await client.query(`
+        DO $migration$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = '${this.table("fold_memory_embeddings")}'::regclass
+              AND contype = 'p'
+              AND pg_get_constraintdef(oid) LIKE 'PRIMARY KEY (organization_id,%'
+          ) THEN
+            ALTER TABLE ${this.table("fold_memory_embeddings")}
+              DROP CONSTRAINT IF EXISTS fold_memory_embeddings_pkey;
+            ALTER TABLE ${this.table("fold_memory_embeddings")}
+              ADD CONSTRAINT fold_memory_embeddings_pkey
+              PRIMARY KEY (organization_id, workspace_id, memory_id, model_id);
+          END IF;
+        END
+        $migration$
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS fold_memory_embeddings_tenant_model
+        ON ${this.table("fold_memory_embeddings")} (organization_id, workspace_id, model_id, memory_id)`);
       await client.query(`
         CREATE INDEX IF NOT EXISTS fold_memory_embeddings_hnsw
         ON ${this.table("fold_memory_embeddings")} USING hnsw (embedding vector_cosine_ops)
       `);
+      await client.query(`ALTER TABLE ${this.table("fold_memory_embeddings")} ENABLE ROW LEVEL SECURITY`);
+      await client.query(`ALTER TABLE ${this.table("fold_memory_embeddings")} FORCE ROW LEVEL SECURITY`);
+      await client.query(`DROP POLICY IF EXISTS fold_organization_isolation ON ${this.table("fold_memory_embeddings")}`);
+      await client.query(`CREATE POLICY fold_organization_isolation ON ${this.table("fold_memory_embeddings")}
+        USING (organization_id = current_setting('app.organization_id', true))
+        WITH CHECK (organization_id = current_setting('app.organization_id', true))`);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -134,16 +179,40 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
     }
   }
 
-  private async ensureDocuments(workspaceId: string, documents: readonly MemoryRankingDocument[]): Promise<void> {
+  private async setTenant(client: PoolClient, tenant: PostgresTenantScope): Promise<void> {
+    await client.query("SELECT set_config('app.organization_id', $1, true)", [tenant.organizationId]);
+  }
+
+  private async tenantQuery<R extends QueryResultRow>(
+    tenant: PostgresTenantScope,
+    text: string,
+    values: readonly unknown[],
+  ): Promise<QueryResult<R>> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.setTenant(client, tenant);
+      const result = await client.query<R>(text, [...values]);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async ensureDocuments(tenant: PostgresTenantScope, documents: readonly MemoryRankingDocument[]): Promise<void> {
     if (documents.length === 0) return;
     await this.ready;
     const modelId = this.provider.descriptor.id;
     const ids = documents.map(({ memoryId }) => memoryId);
-    const existing = await this.pool.query<ExistingEmbeddingRow>(`
+    const existing = await this.tenantQuery<ExistingEmbeddingRow>(tenant, `
       SELECT memory_id, revision, content_digest
       FROM ${this.table("fold_memory_embeddings")}
-      WHERE workspace_id = $1 AND model_id = $2 AND memory_id = ANY($3::text[])
-    `, [workspaceId, modelId, ids]);
+      WHERE organization_id = $1 AND workspace_id = $2 AND model_id = $3 AND memory_id = ANY($4::text[])
+    `, [tenant.organizationId, tenant.workspaceId, modelId, ids]);
     const byId = new Map(existing.rows.map((row) => [row.memory_id, row]));
     const prepared = documents.map((document) => {
       const text = documentText(document);
@@ -164,18 +233,19 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      await this.setTenant(client, tenant);
       for (const [index, item] of missing.entries()) {
         const vector = vectorLiteral(vectors[index]!, this.provider.descriptor.dimensions);
         await client.query(`
           INSERT INTO ${this.table("fold_memory_embeddings")}
-            (workspace_id, memory_id, revision, model_id, content_digest, embedding)
-          VALUES ($1, $2, $3, $4, $5, $6::vector)
-          ON CONFLICT (workspace_id, memory_id, model_id) DO UPDATE SET
+            (organization_id, workspace_id, memory_id, revision, model_id, content_digest, embedding)
+          VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
+          ON CONFLICT (organization_id, workspace_id, memory_id, model_id) DO UPDATE SET
             revision = EXCLUDED.revision,
             content_digest = EXCLUDED.content_digest,
             embedding = EXCLUDED.embedding,
             indexed_at = clock_timestamp()
-        `, [workspaceId, item.document.memoryId, item.document.revision, modelId, item.digest, vector]);
+        `, [tenant.organizationId, tenant.workspaceId, item.document.memoryId, item.document.revision, modelId, item.digest, vector]);
       }
       await client.query("COMMIT");
     } catch (error) {
@@ -188,18 +258,23 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
 
   async rank(request: MemoryRankingRequest): Promise<readonly SemanticMemoryCandidate[]> {
     if (request.documents.length === 0) return [];
-    await this.ensureDocuments(request.workspaceId, request.documents);
+    const tenant = {
+      organizationId: request.organizationId ?? POSTGRES_DEFAULT_ORGANIZATION_ID,
+      workspaceId: request.workspaceId,
+    };
+    await this.ensureDocuments(tenant, request.documents);
     const queryVectors = await this.provider.embed([request.query]);
     const query = vectorLiteral(queryVectors[0]!, this.provider.descriptor.dimensions);
-    const result = await this.pool.query<ScoredEmbeddingRow>(`
+    const result = await this.tenantQuery<ScoredEmbeddingRow>(tenant, `
       SELECT memory_id, GREATEST(0, LEAST(1, 1 - (embedding <=> $1::vector))) AS score
       FROM ${this.table("fold_memory_embeddings")}
-      WHERE workspace_id = $2 AND model_id = $3 AND memory_id = ANY($4::text[])
+      WHERE organization_id = $2 AND workspace_id = $3 AND model_id = $4 AND memory_id = ANY($5::text[])
       ORDER BY embedding <=> $1::vector, memory_id
-      LIMIT $5
+      LIMIT $6
     `, [
       query,
-      request.workspaceId,
+      tenant.organizationId,
+      tenant.workspaceId,
       this.provider.descriptor.id,
       request.documents.map(({ memoryId }) => memoryId),
       request.limit,

@@ -160,6 +160,7 @@ async function main(): Promise<void> {
       path: configPath(args),
       apiToken,
       ...(option(args, "--api-url") === undefined ? {} : { apiUrl: option(args, "--api-url")! }),
+      ...(option(args, "--organization") === undefined ? {} : { organizationId: option(args, "--organization")! }),
       ...(option(args, "--workspace") === undefined ? {} : { workspaceId: option(args, "--workspace")! }),
       ...(option(args, "--state-root") === undefined ? {} : { stateRoot: option(args, "--state-root")! }),
       ...(option(args, "--vault") === undefined ? {} : { vaultRoot: option(args, "--vault")! }),

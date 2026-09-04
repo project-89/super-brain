@@ -67,6 +67,7 @@ import type {
   ApiDependencies,
   ApiCapability,
   AuthenticatedSubject,
+  TenantKey,
 } from "./types.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
 import {
@@ -97,6 +98,11 @@ const consumerCursorSchema = z
     }).strict(),
   })
   .strict();
+
+const repositoryEnrollmentSchema = z.object({
+  remote: z.string().trim().min(1).max(2_000),
+  projectId: z.string().trim().min(1).max(500).optional(),
+}).strict();
 
 const entitySchema = z
   .object({
@@ -499,6 +505,12 @@ function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof Error && error.name === "PostgresFoldConflictError") {
     return new ApiHttpError(409, "fold_conflict", error.message);
   }
+  if (error instanceof Error && error.name === "RepositoryEnrollmentConflictError") {
+    return new ApiHttpError(409, "repository_enrollment_conflict", error.message);
+  }
+  if (error instanceof Error && error.name === "TenantTargetUnavailableError") {
+    return new ApiHttpError(404, "tenant_unavailable", "Organization workspace is unavailable");
+  }
   if (error instanceof EventOrderError || error instanceof FoldValidationError) {
     return new ApiHttpError(409, "fold_conflict", error.message);
   }
@@ -698,7 +710,7 @@ function isAfterCursor(entry: FoldLogEntry, cursor: FoldSdkCursor): boolean {
 async function streamBatch(
   dependencies: ApiDependencies,
   sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
-  workspaceId: string,
+  tenant: TenantKey,
   access: FoldSdkAccessContext,
   options: {
     readonly after?: FoldSdkCursor;
@@ -708,7 +720,7 @@ async function streamBatch(
   },
 ): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly scannedThrough?: FoldSdkCursor }> {
   if (dependencies.sdks.streamEntries !== undefined) {
-    return dependencies.sdks.streamEntries(workspaceId, access, options);
+    return dependencies.sdks.streamEntries(tenant, access, options);
   }
   const entries = await sdk.listEntries(access, {
     ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
@@ -730,7 +742,7 @@ function startEventStream(
   response: ServerResponse,
   dependencies: ApiDependencies,
   sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
-  workspaceId: string,
+  tenant: TenantKey,
   access: FoldSdkAccessContext,
   initialCursor: FoldSdkCursor | undefined,
   includeDrafts: boolean,
@@ -766,7 +778,7 @@ function startEventStream(
     if (closed || polling) return;
     polling = true;
     try {
-      const batch = await streamBatch(dependencies, sdk, workspaceId, access, {
+      const batch = await streamBatch(dependencies, sdk, tenant, access, {
         ...(cursor === undefined ? {} : { after: cursor }),
         ...(includeDrafts ? { includeDrafts: true } : {}),
         ...(kinds === undefined ? {} : { kinds }),
@@ -982,6 +994,7 @@ async function authenticate(
 }
 
 function routeCapability(resource: string | undefined, resourceId: string | undefined, method: string): ApiCapability | undefined {
+  if (resource === "repository-enrollments" || resource === "audit-log") return "organization:admin";
   if (resource === "event-stream" || resource === "projection") return "events:read";
   if (resource === "events") return method === "GET" ? "events:read" : "events:write";
   if (resource === "consumers") return method === "GET" ? "consumers:read" : "consumers:write";
@@ -1004,6 +1017,53 @@ function assertCredentialCapability(subject: AuthenticatedSubject, capability: A
   throw new ApiHttpError(403, "credential_scope_denied", `Credential lacks ${capability}`);
 }
 
+function normalizedRepositoryRemote(input: string): string {
+  const candidate = input.trim();
+  if (candidate.startsWith("urn:repo:")) return candidate;
+  const urlInput = /^git@[^:]+:.+/.test(candidate)
+    ? `ssh://${candidate.replace(":", "/")}`
+    : candidate;
+  let url: URL;
+  try {
+    url = new URL(urlInput);
+  } catch {
+    throw new ApiHttpError(400, "invalid_repository_remote", "Repository remote must be an absolute URL or SCP-style Git remote");
+  }
+  if (!["http:", "https:", "ssh:", "git:"].includes(url.protocol) || url.hostname.length === 0) {
+    throw new ApiHttpError(400, "invalid_repository_remote", "Repository remote protocol is unsupported");
+  }
+  const pathname = url.pathname.replace(/\/+$/, "").replace(/\.git$/i, "");
+  if (pathname.length < 2) throw new ApiHttpError(400, "invalid_repository_remote", "Repository remote has no repository path");
+  return `${url.hostname.toLowerCase()}${pathname}`;
+}
+
+function platformAccessGrant(request: IncomingMessage): { readonly reason: string; readonly expiresAt: string } {
+  const reasonHeader = request.headers["x-super-brain-access-reason"];
+  const expiryHeader = request.headers["x-super-brain-access-expires-at"];
+  const reason = (Array.isArray(reasonHeader) ? reasonHeader[0] : reasonHeader)?.trim() ?? "";
+  const expiresAt = (Array.isArray(expiryHeader) ? expiryHeader[0] : expiryHeader)?.trim() ?? "";
+  if (reason.length < 10 || reason.length > 500) {
+    throw new ApiHttpError(403, "platform_access_reason_required", "Platform data access requires a 10 to 500 character reason");
+  }
+  const expiry = Date.parse(expiresAt);
+  const now = Date.now();
+  if (!Number.isFinite(expiry) || expiry <= now || expiry > now + 15 * 60_000) {
+    throw new ApiHttpError(403, "platform_access_expiry_invalid", "Platform data access expiry must be within the next 15 minutes");
+  }
+  return { reason, expiresAt: new Date(expiry).toISOString() };
+}
+
+const PLATFORM_READABLE_RESOURCES = new Set([
+  "events",
+  "projection",
+  "memories",
+  "trajectory-tasks",
+  "fleet",
+  "transcript-projects",
+  "transcript-runs",
+  "steering",
+]);
+
 async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
@@ -1021,20 +1081,112 @@ async function handleRequest(
   applyRateLimit(request, response, dependencies);
 
   const segments = url.pathname.split("/").filter((segment) => segment.length > 0);
-  if (segments.length < 3 || segments[0] !== "v1" || segments[1] !== "workspaces") {
+  if (segments[0] !== "v1") {
     throw new ApiHttpError(404, "not_found", "Route not found");
   }
-  const workspaceId = decodeSegment(segments[2]!, "workspaceId");
   const subject = await authenticate(request, dependencies);
-  const access = await dependencies.memberships.resolveAccess(subject, workspaceId);
+  let workspaceId: string;
+  let organizationId: string | undefined;
+  let access: Awaited<ReturnType<ApiDependencies["memberships"]["resolveAccess"]>>;
+  let resourceSegments: readonly string[];
+  if (segments.length >= 5 && segments[1] === "organizations" && segments[3] === "workspaces") {
+    organizationId = decodeSegment(segments[2]!, "organizationId");
+    workspaceId = decodeSegment(segments[4]!, "workspaceId");
+    access = await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
+    resourceSegments = segments.slice(5);
+  } else if (segments.length >= 3 && segments[1] === "workspaces") {
+    workspaceId = decodeSegment(segments[2]!, "workspaceId");
+    access = await dependencies.memberships.resolveLegacyAccess(subject, workspaceId);
+    resourceSegments = segments.slice(3);
+  } else {
+    throw new ApiHttpError(404, "not_found", "Route not found");
+  }
+  const resource = resourceSegments[0];
+  const resourceId = resourceSegments[1] === undefined
+    ? undefined
+    : decodeSegment(resourceSegments[1], "resourceId");
+  if (
+    access === undefined &&
+    organizationId !== undefined &&
+    method === "GET" &&
+    resource !== undefined &&
+    PLATFORM_READABLE_RESOURCES.has(resource) &&
+    subject.capabilities?.includes("platform:data-read") === true
+  ) {
+    if (dependencies.tenantAdministration === undefined) {
+      throw new ApiHttpError(503, "platform_audit_unavailable", "Audited platform access is unavailable");
+    }
+    const grant = platformAccessGrant(request);
+    await dependencies.tenantAdministration.recordPlatformAccess({
+      organizationId,
+      workspaceId,
+      principalId: subject.principalId,
+      credentialId: subject.credentialId,
+      reason: grant.reason,
+      expiresAt: grant.expiresAt,
+    });
+    access = {
+      principalId: subject.principalId,
+      organizationId,
+      organizationRole: "member",
+      workspaceId,
+      workspaceRole: "owner",
+      spaceRoles: {},
+      platformDataAccess: true,
+    };
+  }
   if (access === undefined) {
     throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
   }
-  const sdk = await dependencies.sdks.sdkFor(workspaceId);
-  const resource = segments[3];
-  const resourceId = segments[4] === undefined ? undefined : decodeSegment(segments[4], "resourceId");
-  assertCredentialCapability(subject, routeCapability(resource, resourceId, method));
+  const tenant = { organizationId: access.organizationId, workspaceId };
+  const sdk = await dependencies.sdks.sdkFor(tenant);
+  if (access.platformDataAccess !== true) {
+    assertCredentialCapability(subject, routeCapability(resource, resourceId, method));
+  }
   const maxBodyBytes = dependencies.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+
+  if (resource === "repository-enrollments" && resourceId === undefined) {
+    if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
+      throw new ApiHttpError(403, "organization_admin_required", "Organization administration access is required");
+    }
+    const administration = dependencies.tenantAdministration;
+    if (administration === undefined) {
+      throw new ApiHttpError(501, "tenant_administration_unavailable", "Tenant administration requires PostgreSQL");
+    }
+    if (method === "GET") {
+      sendJson(response, 200, {
+        enrollments: await administration.listRepositoryEnrollments(access.organizationId, workspaceId),
+      });
+      return;
+    }
+    if (method === "POST") {
+      const body = repositoryEnrollmentSchema.parse(await readJsonBody(request, maxBodyBytes));
+      const enrollment = await administration.enrollRepository({
+        organizationId: access.organizationId,
+        workspaceId,
+        normalizedRemote: normalizedRepositoryRemote(body.remote),
+        ...(body.projectId === undefined ? {} : { projectId: body.projectId }),
+        enrolledBy: subject.principalId,
+      });
+      sendJson(response, 201, { enrollment });
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+
+  if (resource === "audit-log" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
+      throw new ApiHttpError(403, "organization_admin_required", "Organization administration access is required");
+    }
+    if (dependencies.tenantAdministration === undefined) {
+      throw new ApiHttpError(501, "tenant_administration_unavailable", "Tenant administration requires PostgreSQL");
+    }
+    sendJson(response, 200, {
+      records: await dependencies.tenantAdministration.listPlatformAccessAudit(access.organizationId, workspaceId),
+    });
+    return;
+  }
 
   if (resource === "event-stream" && resourceId === undefined) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
@@ -1044,7 +1196,7 @@ async function handleRequest(
     let after = afterCursorFromUrl(url);
     if (after === undefined && replayFromUrl(url) === "tail") {
       if (dependencies.sdks.latestEventCursor !== undefined) {
-        after = await dependencies.sdks.latestEventCursor(workspaceId, access, {
+        after = await dependencies.sdks.latestEventCursor(tenant, access, {
           ...(includeDrafts ? { includeDrafts: true } : {}),
           ...(kinds === undefined ? {} : { kinds }),
         });
@@ -1062,7 +1214,7 @@ async function handleRequest(
       response,
       dependencies,
       sdk,
-      workspaceId,
+      tenant,
       access,
       after,
       includeDrafts,
@@ -1087,13 +1239,13 @@ async function handleRequest(
     }
     const scopedConsumerId = JSON.stringify([subject.principalId, resourceId]);
     if (method === "GET") {
-      const cursor = await dependencies.sdks.consumerCursor(workspaceId, scopedConsumerId);
+      const cursor = await dependencies.sdks.consumerCursor(tenant, scopedConsumerId);
       sendJson(response, 200, { consumerId: resourceId, cursor: cursor ?? null });
       return;
     }
     if (method === "POST") {
       const body = consumerCursorSchema.parse(await readJsonBody(request, maxBodyBytes));
-      await dependencies.sdks.commitConsumerCursor(workspaceId, scopedConsumerId, body.cursor);
+      await dependencies.sdks.commitConsumerCursor(tenant, scopedConsumerId, body.cursor);
       sendJson(response, 200, { consumerId: resourceId, cursor: body.cursor });
       return;
     }
@@ -1177,7 +1329,7 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "transcript-projects" && resourceId !== undefined && segments.length === 5) {
+  if (resource === "transcript-projects" && resourceId !== undefined && resourceSegments.length === 2) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const project = (await sdk.transcriptProjects(access))
       .find((candidate) => candidate.project.id === resourceId);
@@ -1203,7 +1355,7 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "transcript-runs" && resourceId !== undefined && segments.length === 5) {
+  if (resource === "transcript-runs" && resourceId !== undefined && resourceSegments.length === 2) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const run = await sdk.transcriptRun(access, resourceId);
     if (run === undefined) {
@@ -1241,7 +1393,7 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "steering" && resourceId !== undefined && segments.length === 5) {
+  if (resource === "steering" && resourceId !== undefined && resourceSegments.length === 2) {
     if (method === "GET") {
       sendJson(response, 200, { steering: await sdk.steeringSnapshot(access, resourceId) });
       return;
@@ -1279,7 +1431,7 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "reasoning" && resourceId === "ask" && segments.length === 5) {
+  if (resource === "reasoning" && resourceId === "ask" && resourceSegments.length === 2) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const body = reasoningRequestSchema.parse(await readJsonBody(request, maxBodyBytes));
     const ranked = await sdk.rankMemories(access, {
@@ -1327,7 +1479,7 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "trajectory-tasks" && resourceId !== undefined && segments.length === 5) {
+  if (resource === "trajectory-tasks" && resourceId !== undefined && resourceSegments.length === 2) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const report = await sdk.trajectoryReport(access, resourceId);
     if (report === undefined) throw new TrajectoryTaskUnavailableError(resourceId);
@@ -1431,9 +1583,9 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "memory-candidates" && resourceId !== undefined && segments.length === 6) {
+  if (resource === "memory-candidates" && resourceId !== undefined && resourceSegments.length === 3) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
-    const action = decodeSegment(segments[5]!, "candidate action");
+    const action = decodeSegment(resourceSegments[2]!, "candidate action");
     if (action !== "accept" && action !== "reject") {
       throw new ApiHttpError(404, "not_found", "Route not found");
     }
@@ -1507,8 +1659,8 @@ async function handleRequest(
     throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
   }
 
-  if (resource === "memories" && resourceId !== undefined && segments.length === 6) {
-    const action = decodeSegment(segments[5]!, "memory action");
+  if (resource === "memories" && resourceId !== undefined && resourceSegments.length === 3) {
+    const action = decodeSegment(resourceSegments[2]!, "memory action");
     if (action !== "feedback") throw new ApiHttpError(404, "not_found", "Route not found");
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const current = await sdk.memoryById(access, resourceId);
@@ -1524,7 +1676,7 @@ async function handleRequest(
     return;
   }
 
-  if (resource === "memories" && resourceId !== undefined && segments.length === 5) {
+  if (resource === "memories" && resourceId !== undefined && resourceSegments.length === 2) {
     if (method !== "GET" && method !== "PATCH" && method !== "DELETE") {
       throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     }

@@ -249,6 +249,7 @@ function transcriptCatalogCacheKey(access: FoldSdkAccessContext): string {
     access.principalId,
     access.workspaceId,
     access.workspaceRole,
+    access.platformDataAccess === true,
     Object.entries(access.spaceRoles).sort(([left], [right]) => left.localeCompare(right)),
   ]);
 }
@@ -1190,6 +1191,7 @@ export class FoldSdk {
       const { projection } = await this.memoryProjection(access);
       const corpus = recallMemoryCorpus(projection, access, filters).slice(0, MAX_MEMORY_RANKING_CORPUS);
       const candidates = await ranker.rank({
+        ...(access.organizationId === undefined ? {} : { organizationId: access.organizationId }),
         workspaceId: access.workspaceId,
         query,
         limit: requestedLimit,

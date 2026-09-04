@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
+import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
 
 import type { FoldLogEntry } from "@_89/fold";
 import type { FoldSdkCursor, FoldSdkStore } from "@_89/fold-sdk";
@@ -36,7 +36,17 @@ export interface PostgresFoldDatabaseOptions {
   readonly connectionString: string;
   readonly schema?: string;
   readonly pool?: Omit<PoolConfig, "connectionString">;
+  readonly requireRlsEnforcement?: boolean;
 }
+
+export interface PostgresTenantScope {
+  readonly organizationId: string;
+  readonly workspaceId: string;
+}
+
+export type PostgresTenantInput = PostgresTenantScope | string;
+
+export const POSTGRES_DEFAULT_ORGANIZATION_ID = "local";
 
 export interface FoldProjectionCheckpoint {
   readonly projection: string;
@@ -73,10 +83,24 @@ function databaseErrorCode(error: unknown): string | undefined {
     : undefined;
 }
 
+function tenantScope(input: PostgresTenantInput): PostgresTenantScope {
+  const tenant = typeof input === "string"
+    ? { organizationId: POSTGRES_DEFAULT_ORGANIZATION_ID, workspaceId: input }
+    : input;
+  if (tenant.organizationId.trim().length === 0) throw new TypeError("organizationId must not be empty");
+  if (tenant.workspaceId.trim().length === 0) throw new TypeError("workspaceId must not be empty");
+  return tenant;
+}
+
+function tenantCacheKey(tenant: PostgresTenantScope): string {
+  return JSON.stringify([tenant.organizationId, tenant.workspaceId]);
+}
+
 export class PostgresFoldDatabase {
   private readonly pool: Pool;
   private readonly schema: string;
   private readonly ready: Promise<void>;
+  private readonly requireRlsEnforcement: boolean;
   private closed = false;
   private readonly eventCaches = new Map<string, WorkspaceEventCache>();
 
@@ -86,6 +110,7 @@ export class PostgresFoldDatabase {
     }
     this.schema = checkedIdentifier(options.schema ?? "public");
     this.pool = new Pool({ connectionString: options.connectionString, ...options.pool });
+    this.requireRlsEnforcement = options.requireRlsEnforcement === true;
     this.ready = this.initialize();
   }
 
@@ -99,9 +124,22 @@ export class PostgresFoldDatabase {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-schema-v1'))");
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
+      if (this.requireRlsEnforcement) {
+        const role = await client.query<{ readonly rolsuper: boolean; readonly rolbypassrls: boolean }>(`
+          SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user
+        `);
+        if (role.rows[0]?.rolsuper === true || role.rows[0]?.rolbypassrls === true) {
+          throw new Error("FOLD_REQUIRE_TENANT_RLS rejects PostgreSQL roles with superuser or BYPASSRLS");
+        }
+        const rowSecurity = await client.query<{ readonly row_security: string }>("SHOW row_security");
+        if (rowSecurity.rows[0]?.row_security !== "on") {
+          throw new Error("FOLD_REQUIRE_TENANT_RLS requires PostgreSQL row_security=on");
+        }
+      }
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${this.table("fold_events")} (
           sequence bigint GENERATED ALWAYS AS IDENTITY,
+          organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}',
           workspace_id text NOT NULL,
           t double precision NOT NULL,
           event_id text NOT NULL,
@@ -109,30 +147,65 @@ export class PostgresFoldDatabase {
           status text NOT NULL CHECK (status IN ('canon', 'draft')),
           event jsonb NOT NULL,
           inserted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-          PRIMARY KEY (workspace_id, event_id),
-          UNIQUE (workspace_id, sequence)
+          PRIMARY KEY (organization_id, workspace_id, event_id),
+          UNIQUE (organization_id, workspace_id, sequence)
         )
       `);
       await client.query(`
-        CREATE INDEX IF NOT EXISTS fold_events_canonical_order
-        ON ${this.table("fold_events")} (workspace_id, t, event_id)
+        ALTER TABLE ${this.table("fold_events")}
+        ADD COLUMN IF NOT EXISTS organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}'
       `);
       await client.query(`
-        CREATE INDEX IF NOT EXISTS fold_events_kind_order
-        ON ${this.table("fold_events")} (workspace_id, kind, t, event_id)
+        DO $migration$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = '${this.table("fold_events")}'::regclass
+              AND contype = 'p'
+              AND pg_get_constraintdef(oid) LIKE 'PRIMARY KEY (organization_id,%'
+          ) THEN
+            ALTER TABLE ${this.table("fold_events")} DROP CONSTRAINT IF EXISTS fold_events_pkey;
+            ALTER TABLE ${this.table("fold_events")}
+              ADD CONSTRAINT fold_events_pkey PRIMARY KEY (organization_id, workspace_id, event_id);
+          END IF;
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = '${this.table("fold_events")}'::regclass
+              AND contype = 'u'
+              AND pg_get_constraintdef(oid) LIKE 'UNIQUE (organization_id,%sequence%'
+          ) THEN
+            ALTER TABLE ${this.table("fold_events")}
+              DROP CONSTRAINT IF EXISTS fold_events_workspace_id_sequence_key;
+            ALTER TABLE ${this.table("fold_events")}
+              ADD CONSTRAINT fold_events_tenant_sequence_key UNIQUE (organization_id, workspace_id, sequence);
+          END IF;
+        END
+        $migration$
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS fold_events_tenant_canonical_order
+        ON ${this.table("fold_events")} (organization_id, workspace_id, t, event_id)
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS fold_events_tenant_kind_order
+        ON ${this.table("fold_events")} (organization_id, workspace_id, kind, t, event_id)
       `);
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${this.table("fold_consumer_offsets")} (
+          organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}',
           workspace_id text NOT NULL,
           consumer_id text NOT NULL,
           cursor_t double precision NOT NULL,
           cursor_event_id text NOT NULL,
           updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-          PRIMARY KEY (workspace_id, consumer_id)
+          PRIMARY KEY (organization_id, workspace_id, consumer_id)
         )
       `);
+      await client.query(`ALTER TABLE ${this.table("fold_consumer_offsets")}
+        ADD COLUMN IF NOT EXISTS organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}'`);
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${this.table("fold_projection_checkpoints")} (
+          organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}',
           workspace_id text NOT NULL,
           projection text NOT NULL,
           cursor_t double precision NOT NULL,
@@ -140,9 +213,39 @@ export class PostgresFoldDatabase {
           state jsonb NOT NULL,
           configuration_digest text NOT NULL,
           updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-          PRIMARY KEY (workspace_id, projection)
+          PRIMARY KEY (organization_id, workspace_id, projection)
         )
       `);
+      await client.query(`ALTER TABLE ${this.table("fold_projection_checkpoints")}
+        ADD COLUMN IF NOT EXISTS organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}'`);
+      for (const [tableName, oldConstraint, columns] of [
+        ["fold_consumer_offsets", "fold_consumer_offsets_pkey", "organization_id, workspace_id, consumer_id"],
+        ["fold_projection_checkpoints", "fold_projection_checkpoints_pkey", "organization_id, workspace_id, projection"],
+      ] as const) {
+        await client.query(`
+          DO $migration$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conrelid = '${this.table(tableName)}'::regclass
+                AND contype = 'p'
+                AND pg_get_constraintdef(oid) LIKE 'PRIMARY KEY (organization_id,%'
+            ) THEN
+              ALTER TABLE ${this.table(tableName)} DROP CONSTRAINT IF EXISTS ${oldConstraint};
+              ALTER TABLE ${this.table(tableName)} ADD CONSTRAINT ${oldConstraint} PRIMARY KEY (${columns});
+            END IF;
+          END
+          $migration$
+        `);
+      }
+      for (const tableName of ["fold_events", "fold_consumer_offsets", "fold_projection_checkpoints"] as const) {
+        await client.query(`ALTER TABLE ${this.table(tableName)} ENABLE ROW LEVEL SECURITY`);
+        await client.query(`ALTER TABLE ${this.table(tableName)} FORCE ROW LEVEL SECURITY`);
+        await client.query(`DROP POLICY IF EXISTS fold_organization_isolation ON ${this.table(tableName)}`);
+        await client.query(`CREATE POLICY fold_organization_isolation ON ${this.table(tableName)}
+          USING (organization_id = current_setting('app.organization_id', true))
+          WITH CHECK (organization_id = current_setting('app.organization_id', true))`);
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -157,24 +260,49 @@ export class PostgresFoldDatabase {
     await this.ready;
   }
 
-  store(workspaceId: string): PostgresFoldStore {
-    if (workspaceId.trim().length === 0) throw new TypeError("workspaceId must not be empty");
-    return new PostgresFoldStore(this, workspaceId);
+  private async setTenant(client: PoolClient, tenant: PostgresTenantScope): Promise<void> {
+    await client.query("SELECT set_config('app.organization_id', $1, true)", [tenant.organizationId]);
   }
 
-  async readSnapshot(workspaceId: string): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly revision: string }> {
+  private async tenantQuery<R extends QueryResultRow>(
+    tenant: PostgresTenantScope,
+    text: string,
+    values: readonly unknown[] = [],
+  ): Promise<QueryResult<R>> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await this.setTenant(client, tenant);
+      const result = await client.query<R>(text, [...values]);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  store(input: PostgresTenantInput): PostgresFoldStore {
+    return new PostgresFoldStore(this, tenantScope(input));
+  }
+
+  async readSnapshot(input: PostgresTenantInput): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly revision: string }> {
     await this.open();
-    let cache = this.eventCaches.get(workspaceId);
+    const tenant = tenantScope(input);
+    const key = tenantCacheKey(tenant);
+    let cache = this.eventCaches.get(key);
     if (cache === undefined) {
       cache = { sequence: 0, entries: [], eventIds: new Set() };
-      this.eventCaches.set(workspaceId, cache);
+      this.eventCaches.set(key, cache);
     }
-    const result = await this.pool.query<SequencedEventRow>(`
+    const result = await this.tenantQuery<SequencedEventRow>(tenant, `
       SELECT sequence, event, status
       FROM ${this.table("fold_events")}
-      WHERE workspace_id = $1 AND sequence > $2
+      WHERE organization_id = $1 AND workspace_id = $2 AND sequence > $3
       ORDER BY sequence
-    `, [workspaceId, cache.sequence]);
+    `, [tenant.organizationId, tenant.workspaceId, cache.sequence]);
     for (const row of result.rows) {
       cache.sequence = Math.max(cache.sequence, Number(row.sequence));
       const event = row.event as FoldLogEntry["event"];
@@ -187,31 +315,33 @@ export class PostgresFoldDatabase {
     return { entries: [...cache.entries], revision: cache.sequence.toString() };
   }
 
-  async readEntries(workspaceId: string): Promise<readonly FoldLogEntry[]> {
-    return (await this.readSnapshot(workspaceId)).entries;
+  async readEntries(input: PostgresTenantInput): Promise<readonly FoldLogEntry[]> {
+    return (await this.readSnapshot(input)).entries;
   }
 
-  async workspaceRevision(workspaceId: string): Promise<string> {
+  async workspaceRevision(input: PostgresTenantInput): Promise<string> {
     await this.open();
-    const result = await this.pool.query<{ readonly sequence: number | string }>(`
+    const tenant = tenantScope(input);
+    const result = await this.tenantQuery<{ readonly sequence: number | string }>(tenant, `
       SELECT COALESCE(MAX(sequence), 0) AS sequence
       FROM ${this.table("fold_events")}
-      WHERE workspace_id = $1
-    `, [workspaceId]);
+      WHERE organization_id = $1 AND workspace_id = $2
+    `, [tenant.organizationId, tenant.workspaceId]);
     return Number(result.rows[0]?.sequence ?? 0).toString();
   }
 
   async readEventPage(
-    workspaceId: string,
+    input: PostgresTenantInput,
     options: PostgresEventPageOptions = {},
   ): Promise<PostgresEventPage> {
     await this.open();
+    const tenant = tenantScope(input);
     const limit = options.limit ?? 500;
     if (!Number.isInteger(limit) || limit < 1 || limit > 10_000) {
       throw new TypeError("event page limit must be an integer within [1, 10000]");
     }
-    const parameters: unknown[] = [workspaceId];
-    const conditions = ["workspace_id = $1"];
+    const parameters: unknown[] = [tenant.organizationId, tenant.workspaceId];
+    const conditions = ["organization_id = $1", "workspace_id = $2"];
     if (options.after !== undefined) {
       parameters.push(options.after.t, options.after.eventId);
       conditions.push(`(t, event_id) > ($${parameters.length - 1}, $${parameters.length})`);
@@ -222,7 +352,7 @@ export class PostgresFoldDatabase {
       conditions.push(`kind = ANY($${parameters.length}::text[])`);
     }
     parameters.push(limit);
-    const result = await this.pool.query<EventPageRow>(`
+    const result = await this.tenantQuery<EventPageRow>(tenant, `
       SELECT event, status, t, event_id
       FROM ${this.table("fold_events")}
       WHERE ${conditions.join(" AND ")}
@@ -241,27 +371,28 @@ export class PostgresFoldDatabase {
     };
   }
 
-  async latestEventCursor(workspaceId: string): Promise<FoldSdkCursor | undefined> {
+  async latestEventCursor(input: PostgresTenantInput): Promise<FoldSdkCursor | undefined> {
     await this.open();
-    const result = await this.pool.query<{ readonly t: number | string; readonly event_id: string }>(`
+    const tenant = tenantScope(input);
+    const result = await this.tenantQuery<{ readonly t: number | string; readonly event_id: string }>(tenant, `
       SELECT t, event_id
       FROM ${this.table("fold_events")}
-      WHERE workspace_id = $1
+      WHERE organization_id = $1 AND workspace_id = $2
       ORDER BY t DESC, event_id DESC
       LIMIT 1
-    `, [workspaceId]);
+    `, [tenant.organizationId, tenant.workspaceId]);
     const row = result.rows[0];
     return row === undefined ? undefined : { t: Number(row.t), eventId: row.event_id };
   }
 
-  private async insertEntry(client: PoolClient, workspaceId: string, entry: FoldLogEntry): Promise<void> {
+  private async insertEntry(client: PoolClient, tenant: PostgresTenantScope, entry: FoldLogEntry): Promise<void> {
     const previous = await client.query<{ readonly event_id: string }>(`
       SELECT event_id
       FROM ${this.table("fold_events")}
-      WHERE workspace_id = $1 AND t = $2
+      WHERE organization_id = $1 AND workspace_id = $2 AND t = $3
       ORDER BY sequence DESC
       LIMIT 1
-    `, [workspaceId, entry.event.at.t]);
+    `, [tenant.organizationId, tenant.workspaceId, entry.event.at.t]);
     const previousId = previous.rows[0]?.event_id;
     if (previousId !== undefined && previousId >= entry.event.id) {
       throw new PostgresFoldConflictError(
@@ -271,10 +402,11 @@ export class PostgresFoldDatabase {
     try {
       await client.query(`
         INSERT INTO ${this.table("fold_events")}
-          (workspace_id, t, event_id, kind, status, event)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+          (organization_id, workspace_id, t, event_id, kind, status, event)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
       `, [
-        workspaceId,
+        tenant.organizationId,
+        tenant.workspaceId,
         entry.event.at.t,
         entry.event.id,
         entry.event.kind,
@@ -289,14 +421,16 @@ export class PostgresFoldDatabase {
     }
   }
 
-  async appendEntries(workspaceId: string, entries: readonly FoldLogEntry[]): Promise<void> {
+  async appendEntries(input: PostgresTenantInput, entries: readonly FoldLogEntry[]): Promise<void> {
     if (entries.length === 0) return;
     await this.open();
+    const tenant = tenantScope(input);
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${workspaceId}`]);
-      for (const entry of entries) await this.insertEntry(client, workspaceId, entry);
+      await this.setTenant(client, tenant);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${tenantCacheKey(tenant)}`]);
+      for (const entry of entries) await this.insertEntry(client, tenant, entry);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -306,20 +440,22 @@ export class PostgresFoldDatabase {
     }
   }
 
-  async importEntries(workspaceId: string, entries: readonly FoldLogEntry[]): Promise<number> {
+  async importEntries(input: PostgresTenantInput, entries: readonly FoldLogEntry[]): Promise<number> {
     if (entries.length === 0) return 0;
     await this.open();
+    const tenant = tenantScope(input);
     const client = await this.pool.connect();
     let imported = 0;
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${workspaceId}`]);
+      await this.setTenant(client, tenant);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${tenantCacheKey(tenant)}`]);
       for (const entry of entries) {
         const existing = await client.query<EventRow>(`
           SELECT event, status
           FROM ${this.table("fold_events")}
-          WHERE workspace_id = $1 AND event_id = $2
-        `, [workspaceId, entry.event.id]);
+          WHERE organization_id = $1 AND workspace_id = $2 AND event_id = $3
+        `, [tenant.organizationId, tenant.workspaceId, entry.event.id]);
         const current = existing.rows[0];
         if (current !== undefined) {
           if (current.status !== entry.status || !isDeepStrictEqual(current.event, entry.event)) {
@@ -327,7 +463,7 @@ export class PostgresFoldDatabase {
           }
           continue;
         }
-        await this.insertEntry(client, workspaceId, entry);
+        await this.insertEntry(client, tenant, entry);
         imported += 1;
       }
       await client.query("COMMIT");
@@ -340,55 +476,58 @@ export class PostgresFoldDatabase {
     }
   }
 
-  async consumerCursor(workspaceId: string, consumerId: string): Promise<FoldSdkCursor | undefined> {
+  async consumerCursor(input: PostgresTenantInput, consumerId: string): Promise<FoldSdkCursor | undefined> {
     await this.open();
-    const result = await this.pool.query<CursorRow>(`
+    const tenant = tenantScope(input);
+    const result = await this.tenantQuery<CursorRow>(tenant, `
       SELECT cursor_t, cursor_event_id
       FROM ${this.table("fold_consumer_offsets")}
-      WHERE workspace_id = $1 AND consumer_id = $2
-    `, [workspaceId, consumerId]);
+      WHERE organization_id = $1 AND workspace_id = $2 AND consumer_id = $3
+    `, [tenant.organizationId, tenant.workspaceId, consumerId]);
     const row = result.rows[0];
     return row === undefined ? undefined : { t: Number(row.cursor_t), eventId: row.cursor_event_id };
   }
 
   async commitConsumerCursor(
-    workspaceId: string,
+    input: PostgresTenantInput,
     consumerId: string,
     cursor: FoldSdkCursor,
   ): Promise<void> {
     if (consumerId.trim().length === 0) throw new TypeError("consumerId must not be empty");
     await this.open();
-    const result = await this.pool.query(`
+    const tenant = tenantScope(input);
+    const result = await this.tenantQuery(tenant, `
       INSERT INTO ${this.table("fold_consumer_offsets")}
-        (workspace_id, consumer_id, cursor_t, cursor_event_id)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (workspace_id, consumer_id) DO UPDATE SET
+        (organization_id, workspace_id, consumer_id, cursor_t, cursor_event_id)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (organization_id, workspace_id, consumer_id) DO UPDATE SET
         cursor_t = EXCLUDED.cursor_t,
         cursor_event_id = EXCLUDED.cursor_event_id,
         updated_at = clock_timestamp()
       WHERE (${this.table("fold_consumer_offsets")}.cursor_t, ${this.table("fold_consumer_offsets")}.cursor_event_id)
         <= (EXCLUDED.cursor_t, EXCLUDED.cursor_event_id)
       RETURNING cursor_t
-    `, [workspaceId, consumerId, cursor.t, cursor.eventId]);
+    `, [tenant.organizationId, tenant.workspaceId, consumerId, cursor.t, cursor.eventId]);
     if (result.rowCount === 0) {
       throw new PostgresFoldConflictError(`consumer cursor cannot move backward: ${consumerId}`);
     }
   }
 
   async projectionCheckpoint(
-    workspaceId: string,
+    input: PostgresTenantInput,
     projection: string,
   ): Promise<FoldProjectionCheckpoint | undefined> {
     await this.open();
-    const result = await this.pool.query<CursorRow & QueryResultRow & {
+    const tenant = tenantScope(input);
+    const result = await this.tenantQuery<CursorRow & QueryResultRow & {
       readonly state: unknown;
       readonly configuration_digest: string;
       readonly updated_at: Date | string;
-    }>(`
+    }>(tenant, `
       SELECT cursor_t, cursor_event_id, state, configuration_digest, updated_at
       FROM ${this.table("fold_projection_checkpoints")}
-      WHERE workspace_id = $1 AND projection = $2
-    `, [workspaceId, projection]);
+      WHERE organization_id = $1 AND workspace_id = $2 AND projection = $3
+    `, [tenant.organizationId, tenant.workspaceId, projection]);
     const row = result.rows[0];
     return row === undefined ? undefined : {
       projection,
@@ -400,15 +539,16 @@ export class PostgresFoldDatabase {
   }
 
   async saveProjectionCheckpoint(
-    workspaceId: string,
+    input: PostgresTenantInput,
     checkpoint: Omit<FoldProjectionCheckpoint, "updatedAt">,
   ): Promise<void> {
     await this.open();
-    const result = await this.pool.query(`
+    const tenant = tenantScope(input);
+    const result = await this.tenantQuery(tenant, `
       INSERT INTO ${this.table("fold_projection_checkpoints")}
-        (workspace_id, projection, cursor_t, cursor_event_id, state, configuration_digest)
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-      ON CONFLICT (workspace_id, projection) DO UPDATE SET
+        (organization_id, workspace_id, projection, cursor_t, cursor_event_id, state, configuration_digest)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+      ON CONFLICT (organization_id, workspace_id, projection) DO UPDATE SET
         cursor_t = EXCLUDED.cursor_t,
         cursor_event_id = EXCLUDED.cursor_event_id,
         state = EXCLUDED.state,
@@ -418,7 +558,8 @@ export class PostgresFoldDatabase {
         <= (EXCLUDED.cursor_t, EXCLUDED.cursor_event_id)
       RETURNING cursor_t
     `, [
-      workspaceId,
+      tenant.organizationId,
+      tenant.workspaceId,
       checkpoint.projection,
       checkpoint.through.t,
       checkpoint.through.eventId,
@@ -443,22 +584,22 @@ export class PostgresFoldDatabase {
 export class PostgresFoldStore implements FoldSdkStore {
   constructor(
     private readonly database: PostgresFoldDatabase,
-    readonly workspaceId: string,
+    readonly tenant: PostgresTenantScope,
   ) {}
 
   async read(): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly revision: string }> {
-    return this.database.readSnapshot(this.workspaceId);
+    return this.database.readSnapshot(this.tenant);
   }
 
   append(entry: FoldLogEntry): Promise<void> {
-    return this.database.appendEntries(this.workspaceId, [entry]);
+    return this.database.appendEntries(this.tenant, [entry]);
   }
 
   appendMany(entries: readonly FoldLogEntry[]): Promise<void> {
-    return this.database.appendEntries(this.workspaceId, entries);
+    return this.database.appendEntries(this.tenant, entries);
   }
 
   revision(): Promise<string> {
-    return this.database.workspaceRevision(this.workspaceId);
+    return this.database.workspaceRevision(this.tenant);
   }
 }

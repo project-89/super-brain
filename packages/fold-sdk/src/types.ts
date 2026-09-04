@@ -160,6 +160,7 @@ export interface MemoryEmbeddingProvider {
 }
 
 export interface MemoryRankingRequest {
+  readonly organizationId?: string;
   readonly workspaceId: string;
   readonly query: string;
   readonly documents: readonly MemoryRankingDocument[];

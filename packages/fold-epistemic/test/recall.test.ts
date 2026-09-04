@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertCanWritePersonalMemory,
   authorizeRecall,
   recallMemories,
   recallMemoryById,
@@ -42,6 +43,24 @@ describe("recall-time access enforcement", () => {
       reason: "creator-mismatch",
     });
     expect(recallMemories(projection([other]), access({ workspaceRole: "admin" }))).toEqual([]);
+  });
+
+  it("allows platform reads within the requested tenant but never platform writes", () => {
+    const platformAccess = {
+      ...access({ principalId: "support-user", spaceRoles: {} }),
+      platformDataAccess: true,
+    } as const;
+    const privateMemory = memory({ creatorId: "user-b", spaceId: "private-space" });
+
+    expect(authorizeRecall(privateMemory, platformAccess)).toEqual({ allowed: true });
+    expect(recallMemories(projection([privateMemory]), platformAccess)).toEqual([
+      { memory: privateMemory },
+    ]);
+    expect(authorizeRecall(
+      memory({ id: MEMORY_B, workspaceId: "workspace-2" }),
+      platformAccess,
+    )).toEqual({ allowed: false, reason: "workspace-mismatch" });
+    expect(() => assertCanWritePersonalMemory(privateMemory, platformAccess)).toThrow(/read-only/);
   });
 
   it("distinguishes workspace-only and exact-space scopes", () => {

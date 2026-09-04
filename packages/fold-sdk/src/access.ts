@@ -18,6 +18,7 @@ export function authorizeEventAccess(
   if (event.capture.scope.workspace !== access.workspaceId) {
     return { allowed: false, reason: "workspace-mismatch" };
   }
+  if (access.platformDataAccess === true) return { allowed: true };
   if (
     event.capture.scope.creator !== undefined &&
     event.capture.scope.creator !== access.principalId
@@ -37,6 +38,9 @@ export function assertCanAppendEvent(
   event: Pick<FoldEvent, "capture">,
   access: FoldSdkAccessContext,
 ): void {
+  if (access.platformDataAccess === true) {
+    throw new FoldSdkAccessError("event append denied: platform data access is read-only");
+  }
   const decision = authorizeEventAccess(event, access);
   if (!decision.allowed) {
     throw new FoldSdkAccessError(`event append denied: ${decision.reason}`);

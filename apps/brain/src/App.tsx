@@ -230,7 +230,7 @@ export default function App() {
     return <OverviewPage snapshot={snapshot} navigate={navigate} />;
   };
 
-  const disconnected = !connection.workspaceId || !connection.token;
+  const disconnected = !connection.organizationId || !connection.workspaceId || !connection.token;
   const connectionLabel = disconnected ? "Not connected" : error ? "Connection error" : "Connected";
 
   return (
@@ -243,7 +243,7 @@ export default function App() {
         <div className="topbar__context">
           <div className="workspace-identity">
             <span className={`connection-dot${error || disconnected ? " connection-dot--error" : ""}`} />
-            <span><strong>{connection.workspaceId || "No workspace"}</strong><small>{connectionLabel}</small></span>
+            <span><strong>{connection.workspaceId || "No workspace"}</strong><small>{connection.organizationId || connectionLabel}</small></span>
           </div>
           <div className="topbar__actions">
             <button className={`icon-button${refreshing ? " is-spinning" : ""}`} type="button" onClick={() => void refresh(true)} disabled={refreshing || disconnected} aria-label="Refresh workspace" title="Refresh">

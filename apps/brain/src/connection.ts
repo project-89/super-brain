@@ -6,6 +6,7 @@ const CAPTURE_TOKEN_KEY = "super-brain.capture-token";
 
 interface StoredConnection {
   readonly baseUrl?: string;
+  readonly organizationId?: string;
   readonly workspaceId?: string;
   readonly captureBaseUrl?: string;
 }
@@ -25,6 +26,7 @@ export function initialConnection(): ConnectionSettings {
   }
   return {
     baseUrl: normalizedBaseUrl(stored.baseUrl ?? import.meta.env.VITE_FOLD_API_BASE_URL ?? "/api"),
+    organizationId: (stored.organizationId ?? import.meta.env.VITE_FOLD_ORGANIZATION ?? "local").trim(),
     workspaceId: (stored.workspaceId ?? import.meta.env.VITE_FOLD_WORKSPACE ?? "").trim(),
     token: sessionStorage.getItem(TOKEN_KEY) ?? import.meta.env.VITE_FOLD_TOKEN ?? "",
     captureBaseUrl: normalizedBaseUrl(stored.captureBaseUrl ?? import.meta.env.VITE_CAPTURE_BASE_URL ?? "/capture"),
@@ -35,6 +37,7 @@ export function initialConnection(): ConnectionSettings {
 export function saveConnection(settings: ConnectionSettings): ConnectionSettings {
   const normalized = {
     baseUrl: normalizedBaseUrl(settings.baseUrl),
+    organizationId: settings.organizationId.trim(),
     workspaceId: settings.workspaceId.trim(),
     token: settings.token.trim(),
     captureBaseUrl: normalizedBaseUrl(settings.captureBaseUrl),
@@ -44,6 +47,7 @@ export function saveConnection(settings: ConnectionSettings): ConnectionSettings
     SETTINGS_KEY,
     JSON.stringify({
       baseUrl: normalized.baseUrl,
+      organizationId: normalized.organizationId,
       workspaceId: normalized.workspaceId,
       captureBaseUrl: normalized.captureBaseUrl,
     }),

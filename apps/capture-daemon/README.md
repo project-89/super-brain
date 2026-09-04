@@ -22,7 +22,7 @@ key. Existing configurations can enable future encrypted writes with
 `enable-vault-encryption`, followed by a daemon restart.
 
 ```sh
-SUPER_BRAIN_CAPTURE_TOKEN=... super-brain-capture init
+SUPER_BRAIN_CAPTURE_TOKEN=... super-brain-capture init --organization local
 super-brain-capture install-hooks
 super-brain-capture install-service
 super-brain-capture status

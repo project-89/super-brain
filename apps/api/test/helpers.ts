@@ -14,6 +14,7 @@ import {
   createApiServer,
   type ApiDependencies,
   type FoldSdkRegistry,
+  type TenantKey,
 } from "../src/index.js";
 
 export const MEMORY_A = "01890f47-7c00-7000-8000-000000000001";
@@ -34,21 +35,22 @@ export class MemorySdkRegistry implements FoldSdkRegistry {
   private readonly sdks = new Map<string, FoldSdk>();
   private readonly cursors = new Map<string, FoldSdkCursor>();
 
-  async sdkFor(workspaceId: string): Promise<FoldSdk> {
-    let sdk = this.sdks.get(workspaceId);
+  async sdkFor(tenant: TenantKey): Promise<FoldSdk> {
+    const key = JSON.stringify([tenant.organizationId, tenant.workspaceId]);
+    let sdk = this.sdks.get(key);
     if (sdk === undefined) {
       sdk = new FoldSdk(new MemoryStore());
-      this.sdks.set(workspaceId, sdk);
+      this.sdks.set(key, sdk);
     }
     return sdk;
   }
 
-  async consumerCursor(workspaceId: string, consumerId: string) {
-    return this.cursors.get(JSON.stringify([workspaceId, consumerId]));
+  async consumerCursor(tenant: TenantKey, consumerId: string) {
+    return this.cursors.get(JSON.stringify([tenant.organizationId, tenant.workspaceId, consumerId]));
   }
 
-  async commitConsumerCursor(workspaceId: string, consumerId: string, cursor: FoldSdkCursor) {
-    const key = JSON.stringify([workspaceId, consumerId]);
+  async commitConsumerCursor(tenant: TenantKey, consumerId: string, cursor: FoldSdkCursor) {
+    const key = JSON.stringify([tenant.organizationId, tenant.workspaceId, consumerId]);
     const current = this.cursors.get(key);
     if (
       current !== undefined &&
@@ -108,9 +110,11 @@ export async function apiRequest(
     readonly body?: unknown;
     readonly rawBody?: string;
     readonly contentType?: string;
+    readonly headers?: Readonly<Record<string, string>>;
   } = {},
 ): Promise<{ readonly status: number; readonly headers: Headers; readonly body: any }> {
   const headers = new Headers();
+  for (const [name, value] of Object.entries(options.headers ?? {})) headers.set(name, value);
   if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
   if (options.body !== undefined || options.rawBody !== undefined) {
     headers.set("content-type", options.contentType ?? "application/json");

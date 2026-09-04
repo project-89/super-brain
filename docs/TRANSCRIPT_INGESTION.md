@@ -118,9 +118,10 @@ work after interruption. The bearer token is never written to CLI output.
 - `GET /transcript-runs`: all runs, with optional `projectId` and `source`.
 - `GET /transcript-runs/:id`: run, artifact, projects, chunks, turns, and actions.
 
-The routes are under `/v1/workspaces/:workspace`. Reads use current workspace
-authorization. Transcript event kinds and node kinds are rejected by generic
-event append.
+The routes are under
+`/v1/organizations/:organization/workspaces/:workspace`. Reads use current
+organization and workspace authorization. Transcript event kinds and node kinds
+are rejected by generic event append.
 
 ## Memory Formation
 

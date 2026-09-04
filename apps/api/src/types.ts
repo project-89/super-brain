@@ -8,6 +8,10 @@ import type {
 import type { FoldLogEntry } from "@_89/fold";
 import type { ReasoningProvider } from "./reasoning.js";
 import type { RequestRateLimiter } from "./rate-limit.js";
+import type {
+  PlatformAccessAuditRecord,
+  RepositoryEnrollment,
+} from "@_89/fold-postgres";
 
 export interface AuthenticatedSubject {
   readonly credentialId: string;
@@ -30,7 +34,23 @@ export type ApiCapability =
   | "steering:write"
   | "reasoning:read"
   | "consumers:read"
-  | "consumers:write";
+  | "consumers:write"
+  | "organization:admin"
+  | "platform:data-read";
+
+export const DEFAULT_ORGANIZATION_ID = "local";
+
+export type OrganizationRole = "owner" | "admin" | "member";
+
+export interface TenantKey {
+  readonly organizationId: string;
+  readonly workspaceId: string;
+}
+
+export interface OrganizationAccessContext extends FoldSdkAccessContext {
+  readonly organizationId: string;
+  readonly organizationRole: OrganizationRole;
+}
 
 export interface Authenticator {
   authenticate(bearerToken: string): Promise<AuthenticatedSubject | undefined>;
@@ -39,14 +59,19 @@ export interface Authenticator {
 export interface MembershipResolver {
   resolveAccess(
     subject: AuthenticatedSubject,
+    organizationId: string,
     workspaceId: string,
-  ): Promise<FoldSdkAccessContext | undefined>;
+  ): Promise<OrganizationAccessContext | undefined>;
+  resolveLegacyAccess(
+    subject: AuthenticatedSubject,
+    workspaceId: string,
+  ): Promise<OrganizationAccessContext | undefined>;
 }
 
 export interface FoldSdkRegistry {
-  sdkFor(workspaceId: string): Promise<FoldSdk>;
+  sdkFor(tenant: TenantKey): Promise<FoldSdk>;
   streamEntries?(
-    workspaceId: string,
+    tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: {
       readonly after?: FoldSdkCursor;
@@ -59,19 +84,40 @@ export interface FoldSdkRegistry {
     readonly scannedThrough?: FoldSdkCursor;
   }>;
   latestEventCursor?(
-    workspaceId: string,
+    tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: {
       readonly includeDrafts?: boolean;
       readonly kinds?: readonly string[];
     },
   ): Promise<FoldSdkCursor | undefined>;
-  consumerCursor?(workspaceId: string, consumerId: string): Promise<FoldSdkCursor | undefined>;
+  consumerCursor?(tenant: TenantKey, consumerId: string): Promise<FoldSdkCursor | undefined>;
   commitConsumerCursor?(
-    workspaceId: string,
+    tenant: TenantKey,
     consumerId: string,
     cursor: FoldSdkCursor,
   ): Promise<void>;
+}
+
+export interface TenantAdministration {
+  listRepositoryEnrollments(
+    organizationId: string,
+    workspaceId: string,
+  ): Promise<readonly RepositoryEnrollment[]>;
+  enrollRepository(input: {
+    readonly organizationId: string;
+    readonly workspaceId: string;
+    readonly normalizedRemote: string;
+    readonly projectId?: string;
+    readonly enrolledBy: string;
+  }): Promise<RepositoryEnrollment>;
+  recordPlatformAccess(
+    input: Omit<PlatformAccessAuditRecord, "id" | "accessedAt">,
+  ): Promise<PlatformAccessAuditRecord>;
+  listPlatformAccessAudit(
+    organizationId: string,
+    workspaceId: string,
+  ): Promise<readonly PlatformAccessAuditRecord[]>;
 }
 
 export interface ApiDependencies {
@@ -86,6 +132,7 @@ export interface ApiDependencies {
   readonly reportError?: (error: unknown) => void;
   readonly eventStreamPollMs?: number;
   readonly fleetOrphanAfterMs?: number;
+  readonly tenantAdministration?: TenantAdministration;
 }
 
 export interface StaticWorkspaceMembership {
@@ -93,11 +140,17 @@ export interface StaticWorkspaceMembership {
   readonly spaces?: Readonly<Record<string, FoldSdkAccessContext["spaceRoles"][string]>>;
 }
 
+export interface StaticOrganizationMembership {
+  readonly role: OrganizationRole;
+  readonly workspaces: Readonly<Record<string, StaticWorkspaceMembership>>;
+}
+
 export interface StaticCredentialConfiguration {
   readonly principalId: string;
   readonly author?: Author;
   readonly capabilities?: readonly ApiCapability[];
-  readonly workspaces: Readonly<Record<string, StaticWorkspaceMembership>>;
+  readonly workspaces?: Readonly<Record<string, StaticWorkspaceMembership>>;
+  readonly organizations?: Readonly<Record<string, StaticOrganizationMembership>>;
 }
 
 export type StaticCredentialMap = Readonly<Record<string, StaticCredentialConfiguration>>;

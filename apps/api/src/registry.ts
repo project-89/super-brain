@@ -23,7 +23,7 @@ import {
   type ReadJournalOptions,
 } from "@_89/fold-storage";
 
-import type { FoldSdkRegistry } from "./types.js";
+import { DEFAULT_ORGANIZATION_ID, type FoldSdkRegistry, type TenantKey } from "./types.js";
 
 const WRITER_LOCK_FILENAME = ".fold-writer.lock";
 
@@ -140,9 +140,22 @@ class DurableJournalStore implements FoldSdkStore {
   }
 }
 
-export function workspaceJournalFilename(workspaceId: string): string {
+function tenantStorageKey(tenant: TenantKey): string {
+  if (tenant.organizationId.trim().length === 0) throw new TypeError("organizationId must not be empty");
+  if (tenant.workspaceId.trim().length === 0) throw new TypeError("workspaceId must not be empty");
+  return JSON.stringify([tenant.organizationId, tenant.workspaceId]);
+}
+
+export function workspaceJournalFilename(
+  workspaceId: string,
+  organizationId = DEFAULT_ORGANIZATION_ID,
+): string {
   if (workspaceId.trim().length === 0) throw new TypeError("workspaceId must not be empty");
-  return `${createHash("sha256").update(workspaceId).digest("hex")}.jsonl`;
+  if (organizationId.trim().length === 0) throw new TypeError("organizationId must not be empty");
+  const key = organizationId === DEFAULT_ORGANIZATION_ID
+    ? workspaceId
+    : JSON.stringify([organizationId, workspaceId]);
+  return `${createHash("sha256").update(key).digest("hex")}.jsonl`;
 }
 
 export class JournalSdkRegistry implements FoldSdkRegistry {
@@ -171,22 +184,26 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
     if (this.closed) throw new Error("journal SDK registry is closed");
   }
 
-  async sdkFor(workspaceId: string): Promise<FoldSdk> {
+  async sdkFor(tenant: TenantKey): Promise<FoldSdk> {
     await this.open();
-    let sdk = this.sdks.get(workspaceId);
+    const key = tenantStorageKey(tenant);
+    let sdk = this.sdks.get(key);
     if (sdk === undefined) {
-      const path = join(this.dataDirectory, workspaceJournalFilename(workspaceId));
+      const path = join(
+        this.dataDirectory,
+        workspaceJournalFilename(tenant.workspaceId, tenant.organizationId),
+      );
       await chmod(path, 0o600).catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       });
       sdk = new FoldSdk(new DurableJournalStore(new FoldJournal(path)));
-      this.sdks.set(workspaceId, sdk);
+      this.sdks.set(key, sdk);
     }
     return sdk;
   }
 
   async streamEntries(
-    workspaceId: string,
+    tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: {
       readonly after?: FoldSdkCursor;
@@ -195,7 +212,7 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
       readonly limit: number;
     },
   ) {
-    const entries = await (await this.sdkFor(workspaceId)).listEntries(access, {
+    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
       ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
       ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
     });
@@ -213,11 +230,11 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
   }
 
   async latestEventCursor(
-    workspaceId: string,
+    tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] },
   ) {
-    const entries = await (await this.sdkFor(workspaceId)).listEntries(access, {
+    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
       ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
       ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
     });
@@ -249,18 +266,19 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
     return this.database.open();
   }
 
-  async sdkFor(workspaceId: string): Promise<FoldSdk> {
+  async sdkFor(tenant: TenantKey): Promise<FoldSdk> {
     await this.open();
-    let sdk = this.sdks.get(workspaceId);
+    const key = tenantStorageKey(tenant);
+    let sdk = this.sdks.get(key);
     if (sdk === undefined) {
-      sdk = new FoldSdk(this.database.store(workspaceId));
-      this.sdks.set(workspaceId, sdk);
+      sdk = new FoldSdk(this.database.store(tenant));
+      this.sdks.set(key, sdk);
     }
     return sdk;
   }
 
   async streamEntries(
-    workspaceId: string,
+    tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: {
       readonly after?: FoldSdkCursor;
@@ -269,7 +287,7 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
       readonly limit: number;
     },
   ) {
-    const page = await this.database.readEventPage(workspaceId, options);
+    const page = await this.database.readEventPage(tenant, options);
     return {
       entries: page.entries.filter(({ event }) => authorizeEventAccess(event, access).allowed),
       ...(page.scannedThrough === undefined ? {} : { scannedThrough: page.scannedThrough }),
@@ -277,11 +295,11 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
   }
 
   async latestEventCursor(
-    workspaceId: string,
+    tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] },
   ) {
-    const entries = await (await this.sdkFor(workspaceId)).listEntries(access, {
+    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
       ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
       ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
     });
@@ -293,15 +311,15 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
     return this.database.close();
   }
 
-  consumerCursor(workspaceId: string, consumerId: string) {
-    return this.database.consumerCursor(workspaceId, consumerId);
+  consumerCursor(tenant: TenantKey, consumerId: string) {
+    return this.database.consumerCursor(tenant, consumerId);
   }
 
   commitConsumerCursor(
-    workspaceId: string,
+    tenant: TenantKey,
     consumerId: string,
     cursor: { readonly t: number; readonly eventId: string },
   ) {
-    return this.database.commitConsumerCursor(workspaceId, consumerId, cursor);
+    return this.database.commitConsumerCursor(tenant, consumerId, cursor);
   }
 }

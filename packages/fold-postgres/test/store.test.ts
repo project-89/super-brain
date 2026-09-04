@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import { parseEvent, type FoldLogEntry } from "@_89/fold";
+import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   PostgresFoldConflictError,
   PostgresFoldDatabase,
+  PostgresTenantAdministration,
   PostgresVectorMemoryRanker,
 } from "../src/index.js";
 
@@ -35,16 +37,25 @@ function entry(id: string, t: number, status: FoldLogEntry["status"] = "canon"):
 }
 
 integrationDescribe("Postgres Fold store", () => {
+  const schema = `fold_test_${randomUUID().replaceAll("-", "")}`;
   const workspaceId = `test-${randomUUID()}`;
   let database: PostgresFoldDatabase;
+  let administration: PostgresTenantAdministration;
 
   beforeAll(async () => {
-    database = new PostgresFoldDatabase({ connectionString: connectionString! });
-    await database.open();
+    const pool = new Pool({ connectionString: connectionString! });
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    await pool.end();
+    database = new PostgresFoldDatabase({ connectionString: connectionString!, schema });
+    administration = new PostgresTenantAdministration({ connectionString: connectionString!, schema });
+    await Promise.all([database.open(), administration.replaceStaticMemberships([])]);
   });
 
   afterAll(async () => {
-    await database.close();
+    await Promise.all([database.close(), administration.close()]);
+    const pool = new Pool({ connectionString: connectionString! });
+    await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
   });
 
   it("atomically appends and reads canonical-order entries", async () => {
@@ -59,6 +70,42 @@ integrationDescribe("Postgres Fold store", () => {
       revision: expect.stringMatching(/^\d+$/),
     });
     await expect(store.append(first)).rejects.toBeInstanceOf(PostgresFoldConflictError);
+  });
+
+  it("isolates the same workspace and event identifiers across organizations", async () => {
+    const left = database.store({ organizationId: `org-left-${workspaceId}`, workspaceId: "shared" });
+    const right = database.store({ organizationId: `org-right-${workspaceId}`, workspaceId: "shared" });
+    await left.append(entry("same-event", 1));
+    await expect(right.read()).resolves.toMatchObject({ entries: [] });
+    await right.append(entry("same-event", 1));
+    await expect(left.read()).resolves.toMatchObject({ entries: [{ event: { id: "same-event" } }] });
+    await expect(right.read()).resolves.toMatchObject({ entries: [{ event: { id: "same-event" } }] });
+  });
+
+  it("enforces the production RLS role guard", async () => {
+    const pool = new Pool({ connectionString: connectionString! });
+    const role = await pool.query<{ readonly rolsuper: boolean; readonly rolbypassrls: boolean }>(
+      "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+    );
+    const rowSecurity = await pool.query<{ readonly row_security: string }>("SHOW row_security");
+    await pool.end();
+
+    const strictDatabase = new PostgresFoldDatabase({
+      connectionString: connectionString!,
+      schema,
+      requireRlsEnforcement: true,
+    });
+    try {
+      if (role.rows[0]?.rolsuper === true || role.rows[0]?.rolbypassrls === true) {
+        await expect(strictDatabase.open()).rejects.toThrow(/superuser or BYPASSRLS/);
+      } else if (rowSecurity.rows[0]?.row_security !== "on") {
+        await expect(strictDatabase.open()).rejects.toThrow(/row_security=on/);
+      } else {
+        await expect(strictDatabase.open()).resolves.toBeUndefined();
+      }
+    } finally {
+      await strictDatabase.close();
+    }
   });
 
   it("rolls back an entire invalid append batch", async () => {
@@ -119,9 +166,52 @@ integrationDescribe("Postgres Fold store", () => {
     })).rejects.toBeInstanceOf(PostgresFoldConflictError);
   });
 
+  it("persists memberships, immutable repository enrollment, and platform audits per tenant", async () => {
+    const organizationId = `org-admin-${workspaceId}`;
+    const tenantWorkspace = "shared";
+    await administration.replaceStaticMemberships([{
+      organizationId,
+      organizationRole: "owner",
+      workspaceId: tenantWorkspace,
+      workspaceRole: "admin",
+      principalId: "principal-a",
+      spaceRoles: { "space-a": "reader" },
+    }]);
+    await expect(administration.resolveMembership(organizationId, tenantWorkspace, "principal-a"))
+      .resolves.toMatchObject({ organizationRole: "owner", workspaceRole: "admin" });
+    await administration.replaceStaticMemberships([]);
+    await expect(administration.resolveMembership(organizationId, tenantWorkspace, "principal-a"))
+      .resolves.toBeUndefined();
+    const enrolled = await administration.enrollRepository({
+      organizationId,
+      workspaceId: tenantWorkspace,
+      normalizedRemote: "github.com/example/repository",
+      projectId: "project-a",
+      enrolledBy: "principal-a",
+    });
+    await expect(administration.enrollRepository({
+      organizationId,
+      workspaceId: tenantWorkspace,
+      normalizedRemote: enrolled.normalizedRemote,
+      projectId: "project-b",
+      enrolledBy: "principal-a",
+    })).rejects.toThrow(/already enrolled/);
+    await administration.recordPlatformAccess({
+      organizationId,
+      workspaceId: tenantWorkspace,
+      principalId: "support-a",
+      credentialId: "credential-a",
+      reason: "Investigating incident SB-42",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expect(administration.listPlatformAccessAudit(organizationId, tenantWorkspace))
+      .resolves.toMatchObject([{ principalId: "support-a", reason: "Investigating incident SB-42" }]);
+  });
+
   it("indexes authorized memory documents and ranks them through pgvector", async () => {
     const ranker = new PostgresVectorMemoryRanker({
       connectionString: connectionString!,
+      schema,
       provider: {
         descriptor: { id: `test-embedding-${workspaceId}`, dimensions: 3 },
         async embed(inputs) {
@@ -168,6 +258,32 @@ integrationDescribe("Postgres Fold store", () => {
       });
       expect(result[0]).toMatchObject({ memoryId: "memory-postgres", score: 1 });
       expect(result[1]).toMatchObject({ memoryId: "memory-sqlite", score: 0 });
+
+      const sharedDocument = (summary: string) => ({
+        memoryId: "memory-shared",
+        source: "test",
+        summary,
+        content: null,
+        tags: ["database"],
+        entities: [],
+        createdAt: 3,
+        updatedAt: 3,
+        revision: 0,
+      });
+      const leftRequest = {
+        organizationId: `vector-left-${workspaceId}`,
+        workspaceId: "shared",
+        query: "postgres database",
+        limit: 1,
+        documents: [sharedDocument("Postgres tenant memory")],
+      };
+      await expect(ranker.rank(leftRequest)).resolves.toMatchObject([{ score: 1 }]);
+      await expect(ranker.rank({
+        ...leftRequest,
+        organizationId: `vector-right-${workspaceId}`,
+        documents: [sharedDocument("SQLite tenant memory")],
+      })).resolves.toMatchObject([{ score: 0 }]);
+      await expect(ranker.rank(leftRequest)).resolves.toMatchObject([{ score: 1 }]);
     } finally {
       await ranker.close();
     }

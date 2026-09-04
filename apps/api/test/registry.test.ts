@@ -12,6 +12,7 @@ import {
 import { access, apiEvent } from "./helpers.js";
 
 describe("workspace SDK registry", () => {
+  const local = (workspaceId: string) => ({ organizationId: "local", workspaceId });
   it("maps arbitrary workspace IDs to opaque journal filenames", () => {
     const filename = workspaceJournalFilename("../../sensitive/workspace");
     expect(filename).toMatch(/^[a-f0-9]{64}\.jsonl$/);
@@ -22,15 +23,17 @@ describe("workspace SDK registry", () => {
   it("returns one serialized SDK per workspace", async () => {
     const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-"));
     const registry = new JournalSdkRegistry(directory);
-    expect(await registry.sdkFor("workspace-1")).toBe(await registry.sdkFor("workspace-1"));
-    expect(await registry.sdkFor("workspace-2")).not.toBe(await registry.sdkFor("workspace-1"));
+    expect(await registry.sdkFor(local("workspace-1"))).toBe(await registry.sdkFor(local("workspace-1")));
+    expect(await registry.sdkFor(local("workspace-2"))).not.toBe(await registry.sdkFor(local("workspace-1")));
+    expect(await registry.sdkFor({ organizationId: "other", workspaceId: "workspace-1" }))
+      .not.toBe(await registry.sdkFor(local("workspace-1")));
     await registry.close();
   });
 
   it("reopens fsynced journal state through a new registry", async () => {
     const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-"));
     const firstRegistry = new JournalSdkRegistry(directory);
-    const first = await firstRegistry.sdkFor("workspace-1");
+    const first = await firstRegistry.sdkFor(local("workspace-1"));
     await first.append(access(), apiEvent({ id: "event-a", t: 1 }));
     expect((await stat(directory)).mode & 0o777).toBe(0o700);
     expect((await stat(join(directory, workspaceJournalFilename("workspace-1")))).mode & 0o777)
@@ -38,7 +41,7 @@ describe("workspace SDK registry", () => {
     await firstRegistry.close();
 
     const reopenedRegistry = new JournalSdkRegistry(directory);
-    const reopened = await reopenedRegistry.sdkFor("workspace-1");
+    const reopened = await reopenedRegistry.sdkFor(local("workspace-1"));
     expect((await reopened.listEntries(access())).map((entry) => entry.event.id)).toEqual([
       "event-a",
     ]);
@@ -48,14 +51,14 @@ describe("workspace SDK registry", () => {
   it("allows only one process-level writer lease per data directory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-"));
     const first = new JournalSdkRegistry(directory);
-    await first.sdkFor("workspace-1");
+    await first.sdkFor(local("workspace-1"));
     const second = new JournalSdkRegistry(directory);
-    await expect(second.sdkFor("workspace-1")).rejects.toBeInstanceOf(DataDirectoryLockedError);
+    await expect(second.sdkFor(local("workspace-1"))).rejects.toBeInstanceOf(DataDirectoryLockedError);
     await second.close();
     await first.close();
 
     const successor = new JournalSdkRegistry(directory);
-    await expect(successor.sdkFor("workspace-1")).resolves.toBeDefined();
+    await expect(successor.sdkFor(local("workspace-1"))).resolves.toBeDefined();
     await successor.close();
   });
 
@@ -69,8 +72,8 @@ describe("workspace SDK registry", () => {
     const first = new JournalSdkRegistry(directory);
     const second = new JournalSdkRegistry(directory);
     const attempts = await Promise.allSettled([
-      first.sdkFor("workspace-1"),
-      second.sdkFor("workspace-1"),
+      first.sdkFor(local("workspace-1")),
+      second.sdkFor(local("workspace-1")),
     ]);
     expect(attempts.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
     expect(attempts.filter(({ status }) => status === "rejected")).toHaveLength(1);

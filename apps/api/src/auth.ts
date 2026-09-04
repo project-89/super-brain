@@ -3,13 +3,16 @@ import { createHash } from "node:crypto";
 import { authorSchema } from "@_89/fold";
 import { validateAccessContext } from "@_89/fold-epistemic";
 import { z } from "zod";
+import type { PostgresTenantAdministration, TenantMembershipRecord } from "@_89/fold-postgres";
 
 import type {
   AuthenticatedSubject,
   ApiCapability,
   Authenticator,
   MembershipResolver,
+  OrganizationRole,
 } from "./types.js";
+import { DEFAULT_ORGANIZATION_ID } from "./types.js";
 
 const staticWorkspaceMembershipSchema = z
   .object({
@@ -18,38 +21,59 @@ const staticWorkspaceMembershipSchema = z
   })
   .strict();
 
-const staticCredentialMapSchema = z.record(
-  z
-    .object({
-      principalId: z.string().min(1),
-      author: authorSchema.optional(),
-      capabilities: z.array(z.enum([
-        "events:read",
-        "events:write",
-        "memories:read",
-        "memories:write",
-        "trajectories:read",
-        "trajectories:write",
-        "transcripts:read",
-        "transcripts:write",
-        "fleet:read",
-        "steering:read",
-        "steering:write",
-        "reasoning:read",
-        "consumers:read",
-        "consumers:write",
-      ])).max(14).optional(),
-      workspaces: z.record(staticWorkspaceMembershipSchema),
-    })
-    .strict(),
-);
+const staticOrganizationMembershipSchema = z.object({
+  role: z.enum(["owner", "admin", "member"]),
+  workspaces: z.record(staticWorkspaceMembershipSchema),
+}).strict();
+
+const staticCredentialSchema = z
+  .object({
+    principalId: z.string().min(1),
+    author: authorSchema.optional(),
+    capabilities: z.array(z.enum([
+      "events:read",
+      "events:write",
+      "memories:read",
+      "memories:write",
+      "trajectories:read",
+      "trajectories:write",
+      "transcripts:read",
+      "transcripts:write",
+      "fleet:read",
+      "steering:read",
+      "steering:write",
+      "reasoning:read",
+      "consumers:read",
+      "consumers:write",
+      "organization:admin",
+      "platform:data-read",
+    ])).max(16).optional(),
+    workspaces: z.record(staticWorkspaceMembershipSchema).optional(),
+    organizations: z.record(staticOrganizationMembershipSchema).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.workspaces === undefined) === (value.organizations === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "exactly one of workspaces or organizations is required",
+      });
+    }
+  });
+
+const staticCredentialMapSchema = z.record(staticCredentialSchema);
 
 type ParsedCredentialMap = z.infer<typeof staticCredentialMapSchema>;
 type ParsedWorkspaceMembership = z.infer<typeof staticWorkspaceMembershipSchema>;
 
+interface StoredOrganizationMembership {
+  readonly role: OrganizationRole;
+  readonly workspaces: Readonly<Record<string, ParsedWorkspaceMembership>>;
+}
+
 interface StoredCredential {
   readonly subject: AuthenticatedSubject;
-  readonly workspaces: ParsedCredentialMap[string]["workspaces"];
+  readonly organizations: Readonly<Record<string, StoredOrganizationMembership>>;
 }
 
 export class StaticCredentialConfigurationError extends Error {
@@ -68,12 +92,15 @@ function credentialId(token: string): string {
 
 function validateMembership(
   principalId: string,
+  organizationId: string,
   workspaceId: string,
   membership: ParsedWorkspaceMembership,
 ): void {
+  nonEmpty(organizationId, "organization id");
   nonEmpty(workspaceId, "workspace id");
   validateAccessContext({
     principalId,
+    organizationId,
     workspaceId,
     workspaceRole: membership.role,
     spaceRoles: membership.spaces ?? {},
@@ -101,8 +128,18 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
       const author = authorSchema.parse(
         configured.author ?? { kind: "human", id: configured.principalId },
       );
-      for (const [workspaceId, membership] of Object.entries(configured.workspaces)) {
-        validateMembership(configured.principalId, workspaceId, membership);
+      const organizations: Readonly<Record<string, StoredOrganizationMembership>> =
+        configured.organizations ?? {
+          [DEFAULT_ORGANIZATION_ID]: {
+            role: "owner",
+            workspaces: configured.workspaces ?? {},
+          },
+        };
+      for (const [organizationId, organization] of Object.entries(organizations)) {
+        nonEmpty(organizationId, "organization id");
+        for (const [workspaceId, membership] of Object.entries(organization.workspaces)) {
+          validateMembership(configured.principalId, organizationId, workspaceId, membership);
+        }
       }
       const id = credentialId(token);
       this.credentials.set(id, {
@@ -114,7 +151,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
             ? {}
             : { capabilities: [...new Set(configured.capabilities)] as ApiCapability[] }),
         },
-        workspaces: configured.workspaces,
+        organizations,
       });
     }
     if (this.credentials.size === 0) {
@@ -146,6 +183,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
 
   async resolveAccess(
     subject: AuthenticatedSubject,
+    organizationId: string,
     workspaceId: string,
   ) {
     const stored = this.credentials.get(subject.credentialId);
@@ -159,13 +197,79 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
     ) {
       return undefined;
     }
-    const membership = stored.workspaces[workspaceId];
+    const organization = stored.organizations[organizationId];
+    if (organization === undefined) return undefined;
+    const membership = organization.workspaces[workspaceId];
     if (membership === undefined) return undefined;
     return {
       principalId: subject.principalId,
+      organizationId,
+      organizationRole: organization.role,
       workspaceId,
       workspaceRole: membership.role,
       spaceRoles: { ...(membership.spaces ?? {}) },
     };
+  }
+
+  async resolveLegacyAccess(subject: AuthenticatedSubject, workspaceId: string) {
+    const stored = this.credentials.get(subject.credentialId);
+    if (stored === undefined) return undefined;
+    const organizations = Object.keys(stored.organizations).filter(
+      (organizationId) => stored.organizations[organizationId]?.workspaces[workspaceId] !== undefined,
+    );
+    if (organizations.length !== 1) return undefined;
+    return this.resolveAccess(subject, organizations[0]!, workspaceId);
+  }
+
+  configuredMemberships(): readonly TenantMembershipRecord[] {
+    const memberships = new Map<string, TenantMembershipRecord>();
+    for (const stored of this.credentials.values()) {
+      for (const [organizationId, organization] of Object.entries(stored.organizations)) {
+        for (const [workspaceId, workspace] of Object.entries(organization.workspaces)) {
+          const record: TenantMembershipRecord = {
+            organizationId,
+            organizationRole: organization.role,
+            workspaceId,
+            workspaceRole: workspace.role,
+            principalId: stored.subject.principalId,
+            spaceRoles: { ...(workspace.spaces ?? {}) },
+          };
+          const key = JSON.stringify([organizationId, workspaceId, record.principalId]);
+          const previous = memberships.get(key);
+          if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(record)) {
+            throw new StaticCredentialConfigurationError(
+              `principal ${record.principalId} has conflicting memberships for ${organizationId}/${workspaceId}`,
+            );
+          }
+          memberships.set(key, record);
+        }
+      }
+    }
+    return [...memberships.values()];
+  }
+}
+
+export class PostgresMembershipResolver implements MembershipResolver {
+  constructor(private readonly administration: PostgresTenantAdministration) {}
+
+  async resolveAccess(subject: AuthenticatedSubject, organizationId: string, workspaceId: string) {
+    const membership = await this.administration.resolveMembership(
+      organizationId,
+      workspaceId,
+      subject.principalId,
+    );
+    if (membership === undefined) return undefined;
+    return {
+      principalId: subject.principalId,
+      organizationId,
+      organizationRole: membership.organizationRole,
+      workspaceId,
+      workspaceRole: membership.workspaceRole,
+      spaceRoles: { ...membership.spaceRoles },
+    };
+  }
+
+  resolveLegacyAccess(subject: AuthenticatedSubject, workspaceId: string) {
+    return this.resolveAccess(subject, DEFAULT_ORGANIZATION_ID, workspaceId);
   }
 }

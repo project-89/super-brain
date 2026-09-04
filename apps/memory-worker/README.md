@@ -4,6 +4,7 @@ Reads only redacted transcript vault artifacts and emits reviewable, project-awa
 
 ```sh
 export SUPER_BRAIN_URL=http://127.0.0.1:3002
+export SUPER_BRAIN_ORGANIZATION=local
 export SUPER_BRAIN_WORKSPACE=local-history
 export SUPER_BRAIN_TOKEN=...
 export FOLD_TRANSCRIPT_VAULT=.data/transcript-vault

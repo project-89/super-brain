@@ -59,7 +59,7 @@ export function ConnectionDialog({ connection, open, required, onClose, onSave }
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.workspaceId.trim() || !draft.token.trim()) return;
+    if (!draft.organizationId.trim() || !draft.workspaceId.trim() || !draft.token.trim()) return;
     setCapturePending(true);
     setCaptureError(undefined);
     try {
@@ -86,12 +86,22 @@ export function ConnectionDialog({ connection, open, required, onClose, onSave }
           />
         </label>
         <label className="field">
+          <span>Organization</span>
+          <input
+            value={draft.organizationId}
+            onChange={(event) => setDraft({ ...draft, organizationId: event.target.value })}
+            placeholder="local"
+            autoComplete="organization"
+            required
+          />
+        </label>
+        <label className="field">
           <span>Workspace</span>
           <input
             value={draft.workspaceId}
             onChange={(event) => setDraft({ ...draft, workspaceId: event.target.value })}
             placeholder="local"
-            autoComplete="organization"
+            autoComplete="off"
             required
           />
         </label>

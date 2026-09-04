@@ -22,6 +22,7 @@ import type {
 
 export interface SuperBrainClientOptions {
   readonly baseUrl: string;
+  readonly organizationId?: string;
   readonly workspaceId: string;
   readonly token: string;
   readonly fetch?: typeof fetch;
@@ -66,6 +67,27 @@ export interface ReasoningResponse {
     readonly score?: number;
   }[];
   readonly steering?: unknown;
+}
+
+export interface RepositoryEnrollment {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly workspaceId: string;
+  readonly normalizedRemote: string;
+  readonly projectId?: string;
+  readonly enrolledBy: string;
+  readonly enrolledAt: string;
+}
+
+export interface PlatformAccessAuditRecord {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly workspaceId: string;
+  readonly principalId: string;
+  readonly credentialId: string;
+  readonly reason: string;
+  readonly expiresAt: string;
+  readonly accessedAt: string;
 }
 
 export class SuperBrainApiError extends Error {
@@ -150,22 +172,30 @@ function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
 
 export class SuperBrainClient {
   private readonly baseUrl: string;
+  private readonly organizationId: string | undefined;
   private readonly workspaceId: string;
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: SuperBrainClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.organizationId = options.organizationId?.trim();
     this.workspaceId = options.workspaceId.trim();
     this.token = options.token.trim();
     this.fetchImpl = options.fetch ?? fetch;
     if (this.baseUrl.length === 0 || this.workspaceId.length === 0 || this.token.length === 0) {
       throw new TypeError("baseUrl, workspaceId, and token are required");
     }
+    if (options.organizationId !== undefined && this.organizationId?.length === 0) {
+      throw new TypeError("organizationId must not be empty when provided");
+    }
   }
 
   private workspacePath(resource: string): string {
-    return `/v1/workspaces/${encodeURIComponent(this.workspaceId)}/${resource}`;
+    const workspace = encodeURIComponent(this.workspaceId);
+    return this.organizationId === undefined
+      ? `/v1/workspaces/${workspace}/${resource}`
+      : `/v1/organizations/${encodeURIComponent(this.organizationId)}/workspaces/${workspace}/${resource}`;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -208,6 +238,27 @@ export class SuperBrainClient {
   async transcriptRuns(): Promise<readonly TranscriptRun[]> {
     const response = await this.request<{ readonly runs: readonly TranscriptRun[] }>(this.workspacePath("transcript-runs"));
     return response.runs;
+  }
+
+  async repositoryEnrollments(): Promise<readonly RepositoryEnrollment[]> {
+    const response = await this.request<{ readonly enrollments: readonly RepositoryEnrollment[] }>(
+      this.workspacePath("repository-enrollments"),
+    );
+    return response.enrollments;
+  }
+
+  enrollRepository(remote: string, projectId?: string): Promise<{ readonly enrollment: RepositoryEnrollment }> {
+    return this.request(this.workspacePath("repository-enrollments"), {
+      method: "POST",
+      body: JSON.stringify({ remote, ...(projectId === undefined ? {} : { projectId }) }),
+    });
+  }
+
+  async platformAccessAudit(): Promise<readonly PlatformAccessAuditRecord[]> {
+    const response = await this.request<{ readonly records: readonly PlatformAccessAuditRecord[] }>(
+      this.workspacePath("audit-log"),
+    );
+    return response.records;
   }
 
   recordTrajectoryTree(

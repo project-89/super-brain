@@ -16,6 +16,7 @@ interface ExportFile {
 export interface CaptureExportManifest {
   readonly version: 1;
   readonly createdAt: string;
+  readonly organizationId: string;
   readonly workspaceId: string;
   readonly apiUrl: string;
   readonly includesVaultKey: boolean;
@@ -96,6 +97,7 @@ export async function exportCaptureData(
   }
   const client = new SuperBrainClient({
     baseUrl: config.apiUrl,
+    organizationId: config.organizationId,
     workspaceId: config.workspaceId,
     token: options.apiToken ?? config.apiToken,
   });
@@ -111,6 +113,7 @@ export async function exportCaptureData(
   const manifest: CaptureExportManifest = {
     version: 1,
     createdAt: new Date().toISOString(),
+    organizationId: config.organizationId,
     workspaceId: config.workspaceId,
     apiUrl: config.apiUrl,
     includesVaultKey: options.includeVaultKey === true && config.vaultKeyPath !== undefined,

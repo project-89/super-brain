@@ -5,6 +5,8 @@ export type SpaceRole = "admin" | "writer" | "reader";
 
 export interface EpistemicAccessContext {
   readonly principalId: string;
+  readonly organizationId?: string;
+  readonly platformDataAccess?: boolean;
   readonly workspaceId: string;
   readonly workspaceRole: WorkspaceRole;
   readonly spaceRoles: Readonly<Record<string, SpaceRole>>;

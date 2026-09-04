@@ -5,6 +5,7 @@ import type { TrajectoryImportBundle, TrajectoryTaskSummary } from "./types";
 
 const client = new FoldApiClient({
   baseUrl: "/api",
+  organizationId: "organization/one",
   workspaceId: "workspace/one",
   token: "secret-token",
   captureBaseUrl: "/capture",
@@ -61,7 +62,7 @@ describe("Fold API client", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      "/api/v1/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200",
     );
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret-token");
   });
@@ -118,7 +119,7 @@ describe("Fold API client", () => {
     })).resolves.toEqual(result);
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/v1/workspaces/workspace%2Fone/memories/search");
+    expect(url).toBe("/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/memories/search");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
       query: "refresh token",
@@ -140,13 +141,13 @@ describe("Fold API client", () => {
     await expect(client.importTrajectoryBundle(trajectoryBundle, [])).resolves.toBe(1);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "/api/v1/workspaces/workspace%2Fone/trajectory-tasks/task%2Fone",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/trajectory-tasks/task%2Fone",
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "/api/v1/workspaces/workspace%2Fone/trajectory-tasks",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/trajectory-tasks",
     );
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "/api/v1/workspaces/workspace%2Fone/trajectories",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/trajectories",
     );
     const treeBody = JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body));
     const runBody = JSON.parse(String((fetchMock.mock.calls[2]?.[1] as RequestInit).body));
@@ -196,13 +197,13 @@ describe("Fold API client", () => {
     await expect(client.transcriptRun("codex:run/a")).resolves.toEqual(detail);
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/workspaces/workspace%2Fone/fleet");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/workspaces/workspace%2Fone/transcript-projects");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/fleet");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/transcript-projects");
     expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "/api/v1/workspaces/workspace%2Fone/transcript-runs?projectId=project%2Fa&source=codex",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/transcript-runs?projectId=project%2Fa&source=codex",
     );
     expect(fetchMock.mock.calls[3]?.[0]).toBe(
-      "/api/v1/workspaces/workspace%2Fone/transcript-runs/codex%3Arun%2Fa",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/transcript-runs/codex%3Arun%2Fa",
     );
   });
 
@@ -226,9 +227,9 @@ describe("Fold API client", () => {
     await client.recordSteeringAction("agent/one", "intention-a");
     await client.endSteeringIntention("agent/one", "intention-a", { kind: "satisfied" });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/workspaces/workspace%2Fone/steering");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/steering");
     const mutations = fetchMock.mock.calls.slice(1) as [string, RequestInit][];
-    expect(mutations.every(([url]) => url === "/api/v1/workspaces/workspace%2Fone/steering/agent%2Fone")).toBe(true);
+    expect(mutations.every(([url]) => url === "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/steering/agent%2Fone")).toBe(true);
     const bodies = mutations.map(([, init]) => JSON.parse(String(init.body)));
     expect(bodies.map(({ action }) => action)).toEqual(["surface", "commit", "acted", "end"]);
     expect(bodies[0]).toMatchObject({
@@ -258,7 +259,7 @@ describe("Fold API client", () => {
 
     await expect(client.askReasoning("How did refresh recover?", "agent-a")).resolves.toEqual(result);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/api/v1/workspaces/workspace%2Fone/reasoning/ask");
+    expect(url).toBe("/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/reasoning/ask");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
       question: "How did refresh recover?",

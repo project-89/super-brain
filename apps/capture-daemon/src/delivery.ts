@@ -40,6 +40,7 @@ export class SpoolProcessor {
   ) {
     this.client = new SuperBrainClient({
       baseUrl: config.apiUrl,
+      organizationId: config.organizationId,
       workspaceId: config.workspaceId,
       token: config.apiToken,
     });
@@ -98,6 +99,7 @@ export class SpoolProcessor {
     });
     await deliverTranscriptBundle(stored.bundle, {
       apiUrl: this.config.apiUrl,
+      organizationId: this.config.organizationId,
       workspaceId: this.config.workspaceId,
       bearerToken: this.config.apiToken,
       maxAttempts: 1,

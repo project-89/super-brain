@@ -3,6 +3,7 @@ import {
   StaticIdentityDirectory,
   createApiServer,
   type MembershipResolver,
+  type TenantAdministration,
 } from "../src/index.js";
 import type { MemoryRanker } from "@_89/fold-sdk";
 import type { TranscriptImportBundle } from "@_89/fold-transcript";
@@ -777,14 +778,19 @@ describe("Fold HTTP API", () => {
     const directory = identityDirectory();
     let spaces: Record<string, "reader"> = { "space-a": "reader" };
     const memberships: MembershipResolver = {
-      async resolveAccess(subject, workspaceId) {
-        if (subject.principalId !== "user-a" || workspaceId !== "workspace-1") return undefined;
+      async resolveAccess(subject, organizationId, workspaceId) {
+        if (subject.principalId !== "user-a" || organizationId !== "local" || workspaceId !== "workspace-1") return undefined;
         return {
           principalId: subject.principalId,
+          organizationId,
+          organizationRole: "owner",
           workspaceId,
           workspaceRole: "member",
           spaceRoles: { ...spaces },
         };
+      },
+      async resolveLegacyAccess(subject, workspaceId) {
+        return this.resolveAccess(subject, "local", workspaceId);
       },
     };
     const api = await startApi({ authenticator: directory, memberships });
@@ -1181,6 +1187,127 @@ describe("Fold HTTP API", () => {
       );
       expect(wrongMethod.status).toBe(405);
       expect(JSON.stringify(wrongMethod.body)).not.toContain("/Users/");
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("isolates identical workspace ids, SDK caches, and consumer cursors by organization", async () => {
+    const directory = new StaticIdentityDirectory({
+      secret: {
+        principalId: "user-a",
+        organizations: {
+          "org-a": { role: "owner", workspaces: { shared: { role: "owner" } } },
+          "org-b": { role: "owner", workspaces: { shared: { role: "owner" } } },
+        },
+      },
+    });
+    const api = await startApi({ authenticator: directory, memberships: directory });
+    const path = (organizationId: string, resource: string) =>
+      `/v1/organizations/${organizationId}/workspaces/shared/${resource}`;
+    try {
+      expect((await apiRequest(api.baseUrl, path("org-a", "events"), {
+        method: "POST",
+        token: "secret",
+        body: { event: apiEvent({ id: "org-a-event", t: 1, workspaceId: "shared" }), status: "canon" },
+      })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, path("org-a", "events"), { token: "secret" }))
+        .body.entries.map((entry: { event: { id: string } }) => entry.event.id)).toEqual(["org-a-event"]);
+      expect((await apiRequest(api.baseUrl, path("org-b", "events"), { token: "secret" })).body.entries)
+        .toEqual([]);
+
+      const cursorBody = { cursor: { t: 1, eventId: "org-a-event" } };
+      expect((await apiRequest(api.baseUrl, path("org-a", "consumers/worker"), {
+        method: "POST", token: "secret", body: cursorBody,
+      })).status).toBe(200);
+      expect((await apiRequest(api.baseUrl, path("org-b", "consumers/worker"), { token: "secret" }))
+        .body.cursor).toBeNull();
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/shared/events", { token: "secret" })).status)
+        .toBe(403);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("enforces repository enrollment authority and audits expiring platform reads", async () => {
+    const directory = new StaticIdentityDirectory({
+      owner: {
+        principalId: "owner-a",
+        organizations: { "org-a": { role: "owner", workspaces: { shared: { role: "owner" } } } },
+      },
+      member: {
+        principalId: "member-a",
+        organizations: { "org-a": { role: "member", workspaces: { shared: { role: "member" } } } },
+      },
+      capture: {
+        principalId: "capture-a",
+        capabilities: ["events:write"],
+        organizations: { "org-a": { role: "admin", workspaces: { shared: { role: "admin" } } } },
+      },
+      support: {
+        principalId: "support-a",
+        capabilities: ["platform:data-read"],
+        organizations: { operations: { role: "member", workspaces: {} } },
+      },
+    });
+    const enrollments: any[] = [];
+    const audits: any[] = [];
+    const administration: TenantAdministration = {
+      async listRepositoryEnrollments(organizationId, workspaceId) {
+        return enrollments.filter((entry) => entry.organizationId === organizationId && entry.workspaceId === workspaceId);
+      },
+      async enrollRepository(input) {
+        const entry = { id: "enrollment-a", ...input, enrolledAt: "2026-09-03T00:00:00.000Z" };
+        enrollments.push(entry);
+        return entry;
+      },
+      async recordPlatformAccess(input) {
+        const entry = { id: "audit-a", ...input, accessedAt: new Date().toISOString() };
+        audits.push(entry);
+        return entry;
+      },
+      async listPlatformAccessAudit(organizationId, workspaceId) {
+        return audits.filter((entry) => entry.organizationId === organizationId && entry.workspaceId === workspaceId);
+      },
+    };
+    const api = await startApi({ authenticator: directory, memberships: directory, tenantAdministration: administration });
+    const base = "/v1/organizations/org-a/workspaces/shared";
+    try {
+      expect((await apiRequest(api.baseUrl, `${base}/events`, {
+        method: "POST",
+        token: "owner",
+        body: { event: apiEvent({ id: "private-event", t: 1, principalId: "owner-a", workspaceId: "shared", creatorId: "owner-a" }) },
+      })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, `${base}/repository-enrollments`, {
+        method: "POST",
+        token: "member",
+        body: { remote: "https://github.com/acme/repo.git" },
+      })).status).toBe(403);
+      expect((await apiRequest(api.baseUrl, `${base}/repository-enrollments`, { token: "capture" })).body)
+        .toMatchObject({ error: { code: "credential_scope_denied" } });
+      const enrolled = await apiRequest(api.baseUrl, `${base}/repository-enrollments`, {
+        method: "POST",
+        token: "owner",
+        body: { remote: "https://secret@GitHub.com/acme/repo.git?token=hidden", projectId: "project-a" },
+      });
+      expect(enrolled.body.enrollment.normalizedRemote).toBe("github.com/acme/repo");
+      expect(JSON.stringify(enrolled.body)).not.toContain("secret");
+      expect((await apiRequest(api.baseUrl, `${base}/events`, { token: "support" })).status).toBe(403);
+
+      const platformRead = await apiRequest(api.baseUrl, `${base}/events`, {
+        token: "support",
+        headers: {
+          "x-super-brain-access-reason": "Investigating customer incident SB-42",
+          "x-super-brain-access-expires-at": new Date(Date.now() + 5 * 60_000).toISOString(),
+        },
+      });
+      expect(platformRead.status).toBe(200);
+      expect(platformRead.body.entries).toHaveLength(1);
+      const audit = await apiRequest(api.baseUrl, `${base}/audit-log`, { token: "owner" });
+      expect(audit.body.records).toMatchObject([{
+        principalId: "support-a",
+        reason: "Investigating customer incident SB-42",
+      }]);
     } finally {
       await api.close();
     }

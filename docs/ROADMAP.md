@@ -15,11 +15,11 @@ listed as complete are backed by code and tests; they are not simulated UI.
 | Memory formation | Complete | Transcript and live candidates, conservative evidence-gated promotion, repeated-evidence consolidation, revision, forgetting, and project scope |
 | Agent access | Complete | Authenticated HTTP/SSE client plus MCP search, cited context, checkpoint, proposal, and feedback tools for any compatible harness |
 | Feedback | Complete | Immutable recalled/helpful/unhelpful/superseded signals tied to memory, task, query, session, and actor context |
-| Authorization | Complete | Workspace/space/creator checks plus independently least-privilege credential capabilities on every route family |
+| Authorization | Complete | Organization/workspace/space/creator checks plus independently least-privilege credential capabilities on every route family |
 | Operations | Complete | Persistent macOS services, AES-256-GCM vault keys, verified exports, raw-hook retention, PostgreSQL backup and restore-check scripts |
 | Operator UI | Complete | Live fleet, history, memory review/feedback, trajectory evidence, reasoning, steering, raw event, and projected-state views |
 | Capture privacy | Complete | Mandatory secret redaction, optional stable pseudonymous/strict anonymization, separate exposed/opaque reasoning controls, and a dedicated local operator settings credential |
-| Hosted multi-tenancy | Designed, not implemented | Organization/workspace hierarchy, repository enrollment, PostgreSQL RLS, tenant-scoped workers/storage/keys, and audited platform access are specified in `MULTI_TENANCY.md` |
+| Multi-tenant application boundary | Complete | Organization routes and memberships, tenant-keyed storage/workers/vectors/caches, forced PostgreSQL RLS, repository enrollment, and audited platform reads |
 
 ## Deployment Choices
 
@@ -36,6 +36,6 @@ features:
    identity; do not share the local operator token.
 5. Add a manual project merge/split workflow only when real ambiguous identities
    appear. The stored resolution state already preserves that uncertainty.
-6. Implement and adversarially test the organization isolation sequence in
-   `MULTI_TENANCY.md` before operating one shared deployment for unrelated
-   customers.
+6. Before public hosting, complete the production gate in `MULTI_TENANCY.md`:
+   external identity integration, non-bypass database role, remote artifact/KMS
+   namespacing, quarantine provisioning, and topology-level restore/isolation drills.

@@ -6,6 +6,7 @@ feedback tools.
 
 ```sh
 export SUPER_BRAIN_URL=http://127.0.0.1:3003
+export SUPER_BRAIN_ORGANIZATION=local
 export SUPER_BRAIN_WORKSPACE=local-history
 export SUPER_BRAIN_TOKEN=replace-harness-token
 export SUPER_BRAIN_CAPTURE_URL=http://127.0.0.1:3210

@@ -113,7 +113,7 @@ export function useSnapshot(connection: ConnectionSettings, page: BrainPage) {
 
   const refresh = useCallback(
     async (background = false) => {
-      if (!connection.workspaceId || !connection.token) {
+      if (!connection.organizationId || !connection.workspaceId || !connection.token) {
         setState({ page, loading: false, refreshing: false });
         return;
       }

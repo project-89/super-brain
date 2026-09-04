@@ -14,6 +14,7 @@ function nonEmpty(value: string, label: string): void {
 
 export function validateAccessContext(access: EpistemicAccessContext): void {
   nonEmpty(access.principalId, "principalId");
+  if (access.organizationId !== undefined) nonEmpty(access.organizationId, "organizationId");
   nonEmpty(access.workspaceId, "workspaceId");
   if (!(["owner", "admin", "member"] as const).includes(access.workspaceRole)) {
     throw new EpistemicAccessError(`unsupported workspace role: ${access.workspaceRole}`);
@@ -42,6 +43,7 @@ export function authorizeRecall(
   if (memory.workspaceId !== access.workspaceId) {
     return { allowed: false, reason: "workspace-mismatch" };
   }
+  if (access.platformDataAccess === true) return { allowed: true };
   if ((memory.audience ?? "personal") === "personal" && memory.creatorId !== access.principalId) {
     return { allowed: false, reason: "creator-mismatch" };
   }
@@ -60,6 +62,9 @@ export function assertCanWritePersonalMemory(
   },
   access: EpistemicAccessContext,
 ): void {
+  if (access.platformDataAccess === true) {
+    throw new EpistemicAccessError("platform data access is read-only");
+  }
   if (scope.creatorId !== access.principalId) {
     throw new EpistemicAccessError("creator-mismatch: memory writes require the originating creator");
   }

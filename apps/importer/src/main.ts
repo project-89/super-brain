@@ -40,6 +40,7 @@ async function main(): Promise<void> {
   }
   let delivery: {
     readonly apiUrl: string;
+    readonly organizationId: string;
     readonly workspaceId: string;
     readonly bearerToken: string;
     readonly vaultRoot: string;
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
       throw new TypeError("use FOLD_API_TOKEN instead of a command-line token");
     }
     const apiUrl = option("--api-url") ?? process.env.FOLD_API_URL;
+    const organizationId = option("--organization") ?? process.env.FOLD_API_ORGANIZATION ?? "local";
     const workspaceId = option("--workspace") ?? process.env.FOLD_API_WORKSPACE;
     const bearerToken = process.env.FOLD_API_TOKEN;
     const vaultRoot = option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT;
@@ -85,6 +87,7 @@ async function main(): Promise<void> {
       : await ensureVaultKey(anonymizationKeyPath).then(() => readVaultKey(anonymizationKeyPath));
     delivery = {
       apiUrl,
+      organizationId,
       workspaceId,
       bearerToken,
       vaultRoot,
@@ -121,6 +124,7 @@ async function main(): Promise<void> {
   const deliveredRunIds = hasFlag("--resume")
     ? await listDeliveredTranscriptRunIds({
         apiUrl: delivery.apiUrl,
+        organizationId: delivery.organizationId,
         workspaceId: delivery.workspaceId,
         bearerToken: delivery.bearerToken,
       })
@@ -152,6 +156,7 @@ async function main(): Promise<void> {
       });
       const delivered = await deliverTranscriptBundle(stored.bundle, {
         apiUrl: delivery.apiUrl,
+        organizationId: delivery.organizationId,
         workspaceId: delivery.workspaceId,
         bearerToken: delivery.bearerToken,
       });

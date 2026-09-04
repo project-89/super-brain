@@ -129,6 +129,7 @@ Initial JSONL migration is exact and resumable:
 
 ```bash
 FOLD_DATABASE_URL="$FOLD_DATABASE_URL" pnpm --filter @_89/fold-postgres migrate -- \
+  --organization local \
   --workspace local-history \
   --journal .data/fold-history/<workspace-hash>.jsonl
 ```
@@ -137,6 +138,7 @@ Transcript memory scan, confirmed backfill, and durable subscriber:
 
 ```bash
 export SUPER_BRAIN_URL=http://127.0.0.1:3003
+export SUPER_BRAIN_ORGANIZATION=local
 export SUPER_BRAIN_WORKSPACE=local-history
 export SUPER_BRAIN_TOKEN=replace-token
 export FOLD_TRANSCRIPT_VAULT=.data/transcript-vault
@@ -198,7 +200,7 @@ embedding sidecar when semantic ranking is desired. External sensors must send
 authenticated real events; the API intentionally exposes no simulated fleet
 mutation route.
 
-The current deployment is workspace-isolated at the API and storage-query
-layers, but is not yet a shared hosted multi-tenant service. The organization,
-row-level-security, repository-enrollment, and audited platform-administration
-contract is defined in [MULTI_TENANCY.md](./MULTI_TENANCY.md).
+The application now enforces organization/workspace isolation across API,
+workers, caches, vectors, durable cursors, and forced PostgreSQL RLS. Repository
+enrollment and audited platform reads are implemented. The remaining hosted
+infrastructure gate is defined in [MULTI_TENANCY.md](./MULTI_TENANCY.md).

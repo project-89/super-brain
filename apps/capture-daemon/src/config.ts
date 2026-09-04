@@ -85,6 +85,7 @@ export function parseCaptureConfig(value: unknown): CaptureConfig {
   }
   return {
     apiUrl,
+    organizationId: requiredString(input.organizationId ?? "local", "organizationId"),
     workspaceId: requiredString(input.workspaceId, "workspaceId"),
     apiToken: requiredString(input.apiToken, "apiToken"),
     sensorId,
@@ -149,6 +150,7 @@ export async function initializeCaptureConfig(options: {
   readonly path?: string;
   readonly apiToken: string;
   readonly apiUrl?: string;
+  readonly organizationId?: string;
   readonly workspaceId?: string;
   readonly stateRoot?: string;
   readonly vaultRoot?: string;
@@ -175,6 +177,7 @@ export async function initializeCaptureConfig(options: {
   if (anonymizationPolicy !== "none") await ensureVaultKey(anonymizationKeyPath);
   const config = parseCaptureConfig({
     apiUrl: options.apiUrl ?? "http://127.0.0.1:3003",
+    organizationId: options.organizationId ?? "local",
     workspaceId: options.workspaceId ?? "local-history",
     apiToken: options.apiToken,
     sensorId: `urn:sensor:super-brain-capture:${machine}`,

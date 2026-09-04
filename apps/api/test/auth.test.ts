@@ -22,8 +22,10 @@ describe("static identity directory", () => {
     });
     expect(subject?.credentialId).toMatch(/^[a-f0-9]{64}$/);
     expect(subject?.credentialId).not.toContain("secret");
-    expect(await directory.resolveAccess(subject!, "workspace-1")).toEqual({
+    expect(await directory.resolveAccess(subject!, "local", "workspace-1")).toEqual({
       principalId: "user-a",
+      organizationId: "local",
+      organizationRole: "owner",
       workspaceId: "workspace-1",
       workspaceRole: "member",
       spaceRoles: { "space-a": "reader" },
@@ -43,6 +45,25 @@ describe("static identity directory", () => {
     });
   });
 
+  it("requires an organization-qualified lookup when workspace names are ambiguous", async () => {
+    const directory = new StaticIdentityDirectory({
+      secret: {
+        principalId: "user-a",
+        organizations: {
+          "org-a": { role: "owner", workspaces: { shared: { role: "admin" } } },
+          "org-b": { role: "member", workspaces: { shared: { role: "member" } } },
+        },
+      },
+    });
+    const subject = (await directory.authenticate("secret"))!;
+    await expect(directory.resolveLegacyAccess(subject, "shared")).resolves.toBeUndefined();
+    await expect(directory.resolveAccess(subject, "org-b", "shared")).resolves.toMatchObject({
+      organizationId: "org-b",
+      organizationRole: "member",
+      workspaceRole: "member",
+    });
+  });
+
   it("binds optional least-privilege capabilities to the authenticated subject", async () => {
     const directory = new StaticIdentityDirectory({
       sensor: {
@@ -53,7 +74,7 @@ describe("static identity directory", () => {
     });
     const subject = await directory.authenticate("sensor");
     expect(subject?.capabilities).toEqual(["events:write", "trajectories:write"]);
-    expect(await directory.resolveAccess({ ...subject!, capabilities: ["memories:read"] }, "workspace-1"))
+    expect(await directory.resolveAccess({ ...subject!, capabilities: ["memories:read"] }, "local", "workspace-1"))
       .toBeUndefined();
   });
 
@@ -70,10 +91,11 @@ describe("static identity directory", () => {
     expect(
       await directory.resolveAccess(
         { ...subject, author: { ...subject.author, productionId: "prod-2" } },
+        "local",
         "workspace-1",
       ),
     ).toBeUndefined();
-    expect(await directory.resolveAccess(subject, "workspace-2")).toBeUndefined();
+    expect(await directory.resolveAccess(subject, "local", "workspace-2")).toBeUndefined();
   });
 
   it("fails closed on empty, malformed, and unknown configuration", () => {

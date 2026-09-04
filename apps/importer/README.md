@@ -25,7 +25,8 @@ bundle to an owner-authorized Super Brain API:
 
 ```bash
 FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- import \
-  --source all --api-url http://127.0.0.1:3000 --workspace local \
+  --source all --api-url http://127.0.0.1:3000 \
+  --organization local --workspace local-history \
   --vault ~/.super-brain/transcript-vault \
   --reasoning include --encrypted-reasoning retain \
   --anonymize pseudonymous \
@@ -33,7 +34,7 @@ FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- import \
   --confirm
 ```
 
-`FOLD_API_URL`, `FOLD_API_WORKSPACE`, `FOLD_TRANSCRIPT_VAULT`, and
+`FOLD_API_URL`, `FOLD_API_ORGANIZATION`, `FOLD_API_WORKSPACE`, `FOLD_TRANSCRIPT_VAULT`, and
 `FOLD_ANONYMIZATION_KEY_FILE` may replace
 their command-line options. Credentials are accepted only through
 `FOLD_API_TOKEN`, keeping them out of command arguments and CLI output. Network,

@@ -3,6 +3,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 
 export interface ConnectionSettings {
   readonly baseUrl: string;
+  readonly organizationId: string;
   readonly workspaceId: string;
   readonly token: string;
   readonly captureBaseUrl: string;
