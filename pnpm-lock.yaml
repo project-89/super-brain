@@ -51,8 +51,8 @@ importers:
         specifier: ^3.17.1
         version: 3.17.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.5.4
+        version: 4.5.4
 
   apps/brain:
     dependencies:
@@ -66,8 +66,8 @@ importers:
         specifier: ^12.11.6
         version: 12.11.6(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       lucide-react:
-        specifier: ^1.33.0
-        version: 1.33.0(react@19.2.8)
+        specifier: ^1.39.0
+        version: 1.39.0(react@19.2.8)
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -131,10 +131,10 @@ importers:
         version: link:../../packages/super-brain-client
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
-        version: 1.30.0(zod@3.25.76)
+        version: 1.30.0(zod@4.5.4)
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.5.4
+        version: 4.5.4
 
   apps/memory-worker:
     dependencies:
@@ -162,8 +162,8 @@ importers:
   packages/fold:
     dependencies:
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.5.4
+        version: 4.5.4
 
   packages/fold-activity:
     dependencies:
@@ -267,8 +267,8 @@ importers:
         specifier: workspace:*
         version: link:../fold
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.5.4
+        version: 4.5.4
 
   packages/fold-trace:
     dependencies:
@@ -291,8 +291,8 @@ importers:
         specifier: workspace:*
         version: link:../fold-trace
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.5.4
+        version: 4.5.4
 
   packages/fold-transcript:
     dependencies:
@@ -300,8 +300,8 @@ importers:
         specifier: workspace:*
         version: link:../fold
       zod:
-        specifier: ^3.25.0
-        version: 3.25.76
+        specifier: ^4.5.4
+        version: 4.5.4
 
   packages/super-brain-client:
     dependencies:
@@ -1453,8 +1453,8 @@ packages:
   loupe@3.2.1:
     resolution: {integrity: sha512-CdzqowRJCeLU72bHvWqwRBBlLcMEtIvGrlvef74kMnV2AolS9Y8xUv1I0U/MNAWMhBlKIoyuEgoJ0t/bbwHbLQ==}
 
-  lucide-react@1.33.0:
-    resolution: {integrity: sha512-MTRwMy0ZlL8Ur/vOAiJ9XGHE+kFPC7brq6MxAm0GiGXEBj0qy0jA/pG4N675oSzciO/UCdX8T+5yUQdmDeTLxg==}
+  lucide-react@1.39.0:
+    resolution: {integrity: sha512-y8nXoEwvqqIsF927NBWXODa4bfMrcUeEb/9sgpwFqg0gUjgn3j5Hznk+v7STmPgZ2iQ11JKlbQGdFRuTOwvYkA==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
@@ -1983,8 +1983,8 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.5.4:
+    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
 
   zustand@4.5.7:
     resolution: {integrity: sha512-CHOUy7mu3lbD6o6LJLfllpjkzhHXSBlX8B9+qPddUsIfeF5S/UZ5q0kmCsnRqT1UHFQZchNFDDzMbQsuesHWlw==}
@@ -2209,7 +2209,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@modelcontextprotocol/sdk@1.30.0(zod@3.25.76)':
+  '@modelcontextprotocol/sdk@1.30.0(zod@4.5.4)':
     dependencies:
       '@hono/node-server': 2.1.1(hono@4.13.5)
       ajv: 8.20.0
@@ -2226,8 +2226,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.2(zod@3.25.76)
+      zod: 4.5.4
+      zod-to-json-schema: 3.25.2(zod@4.5.4)
     transitivePeerDependencies:
       - supports-color
 
@@ -2919,7 +2919,7 @@ snapshots:
 
   loupe@3.2.1: {}
 
-  lucide-react@1.33.0(react@19.2.8):
+  lucide-react@1.39.0(react@19.2.8):
     dependencies:
       react: 19.2.8
 
@@ -3430,11 +3430,11 @@ snapshots:
 
   yaml@2.9.0: {}
 
-  zod-to-json-schema@3.25.2(zod@3.25.76):
+  zod-to-json-schema@3.25.2(zod@4.5.4):
     dependencies:
-      zod: 3.25.76
+      zod: 4.5.4
 
-  zod@3.25.76: {}
+  zod@4.5.4: {}
 
   zustand@4.5.7(@types/react@19.2.18)(react@19.2.8):
     dependencies:
