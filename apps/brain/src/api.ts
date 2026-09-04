@@ -105,7 +105,9 @@ export class FoldApiClient {
   }
 
   async projection(includeDrafts = false): Promise<ProjectionResponse> {
-    const query = includeDrafts ? "?include=canon%2Bdraft" : "";
+    const query = includeDrafts
+      ? "?include=canon%2Bdraft&compact=true&limit=500"
+      : "?compact=true&limit=500";
     return this.request<ProjectionResponse>(`${this.workspacePath("projection")}${query}`);
   }
 

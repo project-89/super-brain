@@ -167,11 +167,15 @@ export interface SerializedFoldState {
   readonly diagnostics: readonly Readonly<Record<string, JsonValue>>[];
   readonly appliedEvents: readonly FoldEvent[];
   readonly appliedChanges: readonly Readonly<Record<string, JsonValue>>[];
+  readonly appliedEventCount?: number;
+  readonly appliedChangeCount?: number;
 }
 
 export interface ProjectionResponse {
   readonly entries: readonly FoldLogEntry[];
   readonly state: SerializedFoldState;
+  readonly total?: number;
+  readonly projected?: number;
 }
 
 export type BrainPage = "overview" | "memory" | "history" | "trajectories" | "fleet" | "steering" | "events" | "state";

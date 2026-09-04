@@ -20,8 +20,10 @@ function objectValue(value: JsonValue | undefined): Readonly<Record<string, Json
 
 export function nodeDisplayLabel(id: string, node: SerializedFoldNode): string {
   const memory = objectValue(node.properties.memory);
+  const tree = objectValue(node.properties.tree);
   const candidates = [
     memory?.summary,
+    tree?.taskId,
     node.properties.title,
     node.properties.name,
     node.properties.label,
@@ -70,18 +72,32 @@ function displayValue(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
+function appliedEventCount(state: SerializedFoldState): number {
+  return state.appliedEventCount ?? state.appliedEvents.length;
+}
+
 export function StatePage({
   canonicalState,
   workingState,
+  canonicalTotal,
+  canonicalProjected,
+  workingTotal,
+  workingProjected,
 }: {
   readonly canonicalState: SerializedFoldState;
   readonly workingState: SerializedFoldState;
+  readonly canonicalTotal?: number;
+  readonly canonicalProjected?: number;
+  readonly workingTotal?: number;
+  readonly workingProjected?: number;
 }) {
   const [view, setView] = useState<StateView>("nodes");
   const [mode, setMode] = useState<ProjectionMode>("canonical");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
   const state = mode === "canonical" ? canonicalState : workingState;
+  const total = mode === "canonical" ? canonicalTotal : workingTotal;
+  const projected = mode === "canonical" ? canonicalProjected : workingProjected;
   const rows = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return stateRows(state, view).filter((row) =>
@@ -109,7 +125,7 @@ export function StatePage({
         <div className="state-toolbar__controls">
           <div className="segmented-control segmented-control--mode" role="group" aria-label="Projection mode">
             <button type="button" aria-pressed={mode === "canonical"} onClick={() => setMode("canonical")}>Canon</button>
-            <button type="button" aria-pressed={mode === "working"} onClick={() => setMode("working")}>Working <span>+{Math.max(0, workingState.appliedEvents.length - canonicalState.appliedEvents.length)}</span></button>
+            <button type="button" aria-pressed={mode === "working"} onClick={() => setMode("working")}>Working <span>+{Math.max(0, appliedEventCount(workingState) - appliedEventCount(canonicalState))}</span></button>
           </div>
           <div className="segmented-control" role="tablist" aria-label="State view">
             <button type="button" role="tab" aria-selected={view === "nodes"} onClick={() => switchView("nodes")}><Box aria-hidden="true" />Nodes <span>{counts.nodes}</span></button>
@@ -118,6 +134,9 @@ export function StatePage({
             <button type="button" role="tab" aria-selected={view === "diagnostics"} onClick={() => switchView("diagnostics")}><AlertTriangle aria-hidden="true" />Diagnostics <span>{counts.diagnostics}</span></button>
           </div>
         </div>
+        {total !== undefined && projected !== undefined && (
+          <span className="result-count">Latest {projected.toLocaleString()} of {total.toLocaleString()} events</span>
+        )}
         <SearchField value={query} onChange={setQuery} placeholder={`Search ${view}`} />
       </div>
 

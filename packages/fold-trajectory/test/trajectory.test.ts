@@ -93,7 +93,7 @@ describe("Fold trajectory lifecycle", () => {
     expect(treeEvent).toMatchObject({
       kind: "trajectory.tree-recorded",
       capture: { scope: { workspace: "workspace-a", space: "space-a" } },
-      changes: [{ subject: "trajectory-tree:refresh-regression", nodeKind: "x.fold.trajectory-tree" }],
+      changes: [{ subject: "trajectory-tree-revision:refresh-regression:event-1", nodeKind: "x.fold.trajectory-tree" }],
     });
     expect(trajectoryLogRecordsFromEvent(runEvent)[0]).toMatchObject({
       recordType: "trajectory",

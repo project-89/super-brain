@@ -100,7 +100,7 @@ export function makeTrajectoryTreeRecordedEvent(
   return eventFor(context, stamp, {
     kind: "trajectory.tree-recorded",
     title: `Shared decision tree recorded for ${tree.taskId}`,
-    subject: `trajectory-tree:${tree.taskId}`,
+    subject: `trajectory-tree-revision:${tree.taskId}:${stamp.id}`,
     nodeKind: TRAJECTORY_TREE_NODE_KIND,
     record,
   });

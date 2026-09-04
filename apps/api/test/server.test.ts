@@ -477,6 +477,26 @@ describe("Fold HTTP API", () => {
       );
       expect(projection.status).toBe(200);
       expect(projection.body.state.nodes.map(([id]: [string]) => id)).toEqual(["visible"]);
+
+      const compactProjection = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/projection?compact=true&limit=1",
+        { token: "token-a" },
+      );
+      expect(compactProjection).toMatchObject({
+        status: 200,
+        body: {
+          entries: [],
+          total: 1,
+          projected: 1,
+          state: {
+            appliedEvents: [],
+            appliedChanges: [],
+            appliedEventCount: 1,
+            appliedChangeCount: 1,
+          },
+        },
+      });
     } finally {
       await api.close();
     }

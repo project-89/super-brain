@@ -131,5 +131,31 @@ describe("F1: canonical Change replay", () => {
       /multiple changes for target/,
     );
   });
-});
 
+  it("can replace an existing create for bounded inspection projections", () => {
+    const first = fixtureEvent({
+      id: "event_0001",
+      at: { t: 1, worldDate: "2026-08-14" },
+      changes: [{ verb: "create", subject: "revision", nodeKind: "concept", after: { old: true } }],
+    });
+    const second = fixtureEvent({
+      id: "event_0002",
+      at: { t: 2, worldDate: "2026-08-14" },
+      changes: [{ verb: "create", subject: "revision", nodeKind: "concept", after: { current: true } }],
+    });
+
+    const state = fold([canon(first), canon(second)], {
+      include: "canon",
+      existingCreate: "replace",
+    });
+
+    expect(state.nodes.get("revision")?.properties).toEqual({ current: true });
+    expect(state.values.has('["revision","old",null,null]')).toBe(false);
+    expect(state.diagnostics).toEqual([{
+      kind: "existing-create-replaced",
+      eventId: "event_0002",
+      changeIndex: 0,
+      subject: "revision",
+    }]);
+  });
+});

@@ -67,6 +67,24 @@ describe("Fold API client", () => {
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret-token");
   });
 
+  it("requests bounded compact projections for the state inspector", async () => {
+    const response = {
+      entries: [],
+      state: {
+        values: [], nodes: [], edges: [], redirects: [], diagnostics: [],
+        appliedEvents: [], appliedChanges: [], appliedEventCount: 0, appliedChangeCount: 0,
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(response));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await client.projection(true);
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/projection?include=canon%2Bdraft&compact=true&limit=500",
+    );
+  });
+
   it("forms a server-scoped personal-memory create request", async () => {
     const memory = { id: "memory-id" };
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ memory }, 201));

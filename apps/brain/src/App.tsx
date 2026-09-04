@@ -233,6 +233,10 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
         <StatePage
           canonicalState={snapshot.projection.state}
           workingState={snapshot.workingProjection.state}
+          canonicalTotal={snapshot.projection.total}
+          canonicalProjected={snapshot.projection.projected}
+          workingTotal={snapshot.workingProjection.total}
+          workingProjected={snapshot.workingProjection.projected}
         />
       );
     }

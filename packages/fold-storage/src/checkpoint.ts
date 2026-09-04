@@ -52,13 +52,18 @@ export function materializeFoldState(state: FoldState): MaterializedFoldState {
   const redirects = [...state.redirects.entries()]
     .sort(([left], [right]) => compareText(left, right))
     .map(([from, to]) => [from, to] as [string, string]);
-  const diagnostics = state.diagnostics.map((diagnostic) => ({
+  const diagnostics = state.diagnostics.map((diagnostic) => diagnostic.kind === "before-mismatch" ? {
     kind: diagnostic.kind,
     eventId: diagnostic.eventId,
     changeIndex: diagnostic.changeIndex,
     expected: diagnostic.expected,
     ...(diagnostic.actual === undefined ? {} : { actual: diagnostic.actual }),
-  }));
+  } : {
+    kind: diagnostic.kind,
+    eventId: diagnostic.eventId,
+    changeIndex: diagnostic.changeIndex,
+    subject: diagnostic.subject,
+  });
   return { values, nodes, edges, redirects, diagnostics };
 }
 

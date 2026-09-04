@@ -10,11 +10,13 @@ import {
   EventOrderError,
   FoldValidationError,
   eventSchema,
+  fold,
   jsonValueSchema,
   serializeFoldState,
   type Author,
   type FoldEvent,
   type FoldLogEntry,
+  type FoldState,
 } from "@_89/fold";
 import type {
   EpistemicEventContext,
@@ -400,6 +402,19 @@ function responseHeaders(): Record<string, string> {
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, responseHeaders());
   response.end(JSON.stringify(body));
+}
+
+function compactFoldState(state: FoldState): unknown {
+  const serialized = JSON.parse(serializeFoldState({
+    ...state,
+    appliedEvents: [],
+    appliedChanges: [],
+  })) as Record<string, unknown>;
+  return {
+    ...serialized,
+    appliedEventCount: state.appliedEvents.length,
+    appliedChangeCount: state.appliedChanges.length,
+  };
 }
 
 function corsOriginSet(origins: readonly string[] | undefined): ReadonlySet<string> | undefined {
@@ -1394,6 +1409,26 @@ async function handleRequest(
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const include = includeFromUrl(url);
     const cursor = cursorFromUrl(url);
+    const limit = positiveIntegerQuery(url, "limit", 1_000);
+    const compact = url.searchParams.get("compact") === "true";
+    if (limit !== undefined || compact) {
+      const entries = await sdk.listEntries(access, {
+        ...(include === undefined ? {} : { include }),
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      const projectedEntries = limit === undefined ? entries : entries.slice(-limit);
+      const state = fold(projectedEntries, {
+        include: "canon+draft",
+        existingCreate: "replace",
+      });
+      sendJson(response, 200, {
+        entries: compact ? [] : projectedEntries,
+        total: entries.length,
+        projected: projectedEntries.length,
+        state: compact ? compactFoldState(state) : JSON.parse(serializeFoldState(state)),
+      });
+      return;
+    }
     const projected = await sdk.project(access, {
       ...(include === undefined ? {} : { include }),
       ...(cursor === undefined ? {} : { cursor }),

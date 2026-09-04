@@ -1130,7 +1130,7 @@ export class CaptureEngine {
         : artifactsById.get(unit.boundaryStep.artifactId);
       const eventTime = eventTimeFromStep(unit.boundaryStep) ?? storedBoundary?.eventTime ?? Date.parse(session.lastSeenAt);
       const safeEventTime = (Number.isFinite(eventTime) ? eventTime : Date.now()) +
-        (completedUnitCount + 1) / 10_000;
+        completedUnitCount + 1;
       const artifact: VaultArtifact = {
         id: unit.boundaryStep.artifactId ?? hash(`backfill:${session.source}:${session.sessionId}:${unit.endStepNumber}`),
         eventTime: safeEventTime,

@@ -24,7 +24,7 @@ const materializedEdgeSchema = z
   })
   .strict();
 
-const materializedDiagnosticSchema = z
+const beforeMismatchDiagnosticSchema = z
   .object({
     kind: z.literal("before-mismatch"),
     eventId: z.string().min(1),
@@ -33,6 +33,20 @@ const materializedDiagnosticSchema = z
     actual: jsonValueSchema.optional(),
   })
   .strict();
+
+const existingCreateReplacedDiagnosticSchema = z
+  .object({
+    kind: z.literal("existing-create-replaced"),
+    eventId: z.string().min(1),
+    changeIndex: z.number().int().nonnegative(),
+    subject: z.string().min(1),
+  })
+  .strict();
+
+const materializedDiagnosticSchema = z.discriminatedUnion("kind", [
+  beforeMismatchDiagnosticSchema,
+  existingCreateReplacedDiagnosticSchema,
+]);
 
 export const materializedFoldStateSchema = z
   .object({

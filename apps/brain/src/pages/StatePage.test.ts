@@ -19,6 +19,7 @@ describe("state node labels", () => {
 
   it("prefers common semantic labels and falls back to the node ID", () => {
     expect(nodeDisplayLabel("operator-view", node({ title: "Operator view" }))).toBe("Operator view");
+    expect(nodeDisplayLabel("tree-revision-id", node({ tree: { taskId: "operator-view" } }))).toBe("operator-view");
     expect(nodeDisplayLabel("operator-view", node({}))).toBe("operator-view");
   });
 });

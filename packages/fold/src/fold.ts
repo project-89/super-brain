@@ -55,6 +55,15 @@ export interface BeforeMismatchDiagnostic {
   readonly actual?: JsonValue;
 }
 
+export interface ExistingCreateReplacedDiagnostic {
+  readonly kind: "existing-create-replaced";
+  readonly eventId: string;
+  readonly changeIndex: number;
+  readonly subject: string;
+}
+
+export type FoldDiagnostic = BeforeMismatchDiagnostic | ExistingCreateReplacedDiagnostic;
+
 export interface AppliedChange {
   readonly eventId: string;
   readonly changeIndex: number;
@@ -66,7 +75,7 @@ export interface FoldState {
   readonly nodes: Map<string, FoldNode>;
   readonly edges: Map<string, FoldEdge>;
   readonly redirects: Map<string, string>;
-  readonly diagnostics: BeforeMismatchDiagnostic[];
+  readonly diagnostics: FoldDiagnostic[];
   readonly appliedEvents: FoldEvent[];
   readonly appliedChanges: AppliedChange[];
 }
@@ -75,6 +84,7 @@ export interface FoldOptions {
   readonly include: "canon" | "canon+draft";
   readonly cursor?: ForkCursor;
   readonly components?: ComponentRegistry;
+  readonly existingCreate?: "error" | "replace";
 }
 
 export class FoldValidationError extends Error {
@@ -229,11 +239,24 @@ function applyChange(
   change: Change,
   changeIndex: number,
   components: ComponentRegistry,
+  existingCreate: "error" | "replace",
 ): void {
   switch (change.verb) {
     case "create": {
-      if (state.nodes.get(change.subject)?.exists === true) {
+      const current = state.nodes.get(change.subject);
+      if (current?.exists === true && existingCreate === "error") {
         throw new FoldValidationError(`cannot create existing node ${change.subject}`);
+      }
+      if (current?.exists === true) {
+        state.diagnostics.push({
+          kind: "existing-create-replaced",
+          eventId: event.id,
+          changeIndex,
+          subject: change.subject,
+        });
+        for (const component of Object.keys(current.properties)) {
+          state.values.delete(componentCellKey(change.subject, component));
+        }
       }
       state.nodes.set(change.subject, {
         id: change.subject,
@@ -354,6 +377,7 @@ export function fold(
   const seenEventIds = new Set<string>();
   const state = emptyState();
   const components = { ...coreComponentRegistry, ...options.components };
+  const existingCreate = options.existingCreate ?? "error";
 
   for (const { event } of entries) {
     if (seenEventIds.has(event.id)) {
@@ -363,7 +387,7 @@ export function fold(
     assertUniqueEventTargets(event);
 
     event.changes.forEach((change, changeIndex) => {
-      applyChange(state, event, change, changeIndex, components);
+      applyChange(state, event, change, changeIndex, components, existingCreate);
     });
     state.appliedEvents.push(event);
   }
