@@ -531,8 +531,15 @@ export class SuperBrainClient {
       },
     );
     if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { readonly error?: { readonly code?: string; readonly message?: string } };
-      throw new SuperBrainApiError(response.status, body.error?.code ?? "stream_failed", body.error?.message ?? "Event stream failed");
+      const body = await response.json().catch(() => ({})) as {
+        readonly error?: { readonly code?: string; readonly message?: string; readonly details?: unknown };
+      };
+      throw new SuperBrainApiError(
+        response.status,
+        body.error?.code ?? "stream_failed",
+        body.error?.message ?? "Event stream failed",
+        body.error?.details,
+      );
     }
     if (response.body === null) throw new SuperBrainApiError(502, "stream_unavailable", "Event stream has no response body");
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -563,6 +570,7 @@ export class SuperBrainClient {
     let cursor = await this.consumerCursor(options.consumerId);
     const reconnect = options.reconnect ?? true;
     do {
+      let delayMs = options.reconnectDelayMs ?? 1_000;
       try {
         for await (const event of this.eventStream({
           ...(cursor === undefined ? { replay: options.replay ?? "tail" } : { after: cursor }),
@@ -576,10 +584,16 @@ export class SuperBrainClient {
         }
       } catch (error) {
         if (options.signal?.aborted === true) return;
-        if (!reconnect || (error instanceof SuperBrainApiError && error.status < 500)) throw error;
+        if (!reconnect || (error instanceof SuperBrainApiError && error.status < 500 && error.status !== 429)) throw error;
+        if (error instanceof SuperBrainApiError && error.status === 429) {
+          const retryAfterSeconds = (error.details as { readonly retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+          if (typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+            delayMs = Math.max(delayMs, Math.ceil(retryAfterSeconds * 1_000));
+          }
+        }
       }
       if (!reconnect || options.signal?.aborted === true) return;
-      await sleep(options.reconnectDelayMs ?? 1_000, options.signal);
+      await sleep(delayMs, options.signal);
     } while (true);
   }
 }

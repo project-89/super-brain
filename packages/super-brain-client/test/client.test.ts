@@ -137,6 +137,33 @@ describe("SuperBrainClient", () => {
     expect((fetchMock as any).mock.calls).toHaveLength(4);
   });
 
+  it("retries a rate-limited stream from the durable cursor", async () => {
+    const encoder = new TextEncoder();
+    const controller = new AbortController();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ cursor: { t: 10, eventId: "event-a" } }))
+      .mockResolvedValueOnce(jsonResponse({
+        error: {
+          code: "rate_limited",
+          message: "Wait",
+          details: { retryAfterSeconds: 0.001 },
+        },
+      }, 429))
+      .mockResolvedValueOnce(new Response(new ReadableStream({ start(stream) {
+        stream.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-b\"},\"status\":\"canon\"},\"cursor\":{\"t\":11,\"eventId\":\"event-b\"}}\n\n"));
+        stream.close();
+      } }), { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({ cursor: { t: 11, eventId: "event-b" } })) as unknown as typeof fetch;
+    await client(fetchMock).consumeEvents({
+      consumerId: "worker-a",
+      reconnectDelayMs: 0,
+      signal: controller.signal,
+      onEvent() { controller.abort(); },
+    });
+    expect((fetchMock as any).mock.calls[1][0]).toContain("afterT=10&afterEventId=event-a");
+    expect((fetchMock as any).mock.calls[2][0]).toContain("afterT=10&afterEventId=event-a");
+  });
+
   it("returns stable API errors", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ error: { code: "denied", message: "No" } }, 403)) as unknown as typeof fetch;
     await expect(client(fetchMock).memoryCandidates()).rejects.toEqual(expect.objectContaining<Partial<SuperBrainApiError>>({ status: 403, code: "denied", message: "No" }));
