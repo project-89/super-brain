@@ -4,11 +4,12 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   EventOrderError,
   FoldValidationError,
+  continueFold,
   eventSchema,
   fold,
   jsonValueSchema,
@@ -38,6 +39,7 @@ import {
   TrajectoryTaskUnavailableError,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type MemoryPageCursor,
   type RankedMemoryRecallRequest,
   type TrajectoryTaskReport,
   type FoldSdkSteeringContext,
@@ -209,6 +211,7 @@ const reasoningRequestSchema = recallRequestSchema
   .extend({
     question: z.string().trim().min(1).max(2_000),
     actorId: z.string().trim().min(1).max(300).optional(),
+    providerId: z.string().trim().min(1).max(300).optional(),
     limit: z.number().int().min(1).max(10).optional(),
   })
   .strict();
@@ -417,6 +420,146 @@ function compactFoldState(state: FoldState): unknown {
   };
 }
 
+type ProjectionSection = "nodes" | "edges" | "values" | "redirects" | "diagnostics";
+
+interface CachedProjection {
+  readonly entryKeys: readonly string[];
+  readonly state: FoldState;
+  readonly appliedChangeCount: number;
+}
+
+const projectionCaches = new WeakMap<object, Map<string, CachedProjection>>();
+
+function projectionAccessKey(access: FoldSdkAccessContext, include: "canon" | "canon+draft"): string {
+  return JSON.stringify([
+    include,
+    access.principalId,
+    access.organizationId ?? "",
+    access.workspaceId,
+    access.platformDataAccess === true,
+    Object.entries(access.spaceRoles).sort(([left], [right]) => left.localeCompare(right)),
+  ]);
+}
+
+function projectionEntryKey(entry: FoldLogEntry): string {
+  return `${entry.status}\0${entry.event.at.t}\0${entry.event.id}`;
+}
+
+function cloneProjectionState(state: FoldState): FoldState {
+  return {
+    values: new Map(state.values),
+    nodes: new Map(state.nodes),
+    edges: new Map(state.edges),
+    redirects: new Map(state.redirects),
+    diagnostics: [...state.diagnostics],
+    appliedEvents: [],
+    appliedChanges: [],
+  };
+}
+
+function isEntryPrefix(prefix: readonly string[], entries: readonly string[]): boolean {
+  return prefix.length <= entries.length && prefix.every((entry, index) => entry === entries[index]);
+}
+
+async function cachedProjection(
+  sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
+  access: FoldSdkAccessContext,
+  include: "canon" | "canon+draft",
+): Promise<CachedProjection> {
+  const entries = await sdk.listEntries(access, { include });
+  const entryKeys = entries.map(projectionEntryKey);
+  let cache = projectionCaches.get(sdk);
+  if (cache === undefined) {
+    cache = new Map();
+    projectionCaches.set(sdk, cache);
+  }
+  const key = projectionAccessKey(access, include);
+  const current = cache.get(key);
+  if (current !== undefined && isEntryPrefix(current.entryKeys, entryKeys)) {
+    if (current.entryKeys.length === entryKeys.length) return current;
+    const suffix = entries.slice(current.entryKeys.length);
+    continueFold(current.state, suffix, {
+      include: "canon+draft",
+      existingCreate: "replace",
+      retainApplied: false,
+      validatedInput: true,
+      orderedInput: true,
+    });
+    const updated = {
+      entryKeys,
+      state: current.state,
+      appliedChangeCount: current.appliedChangeCount + suffix.reduce((total, entry) => total + entry.event.changes.length, 0),
+    };
+    cache.set(key, updated);
+    return updated;
+  }
+
+  const alternateInclude = include === "canon" ? "canon+draft" : "canon";
+  const alternate = cache.get(projectionAccessKey(access, alternateInclude));
+  if (
+    alternate !== undefined &&
+    alternate.entryKeys.length === entryKeys.length &&
+    alternate.entryKeys.every((entry, index) => entry === entryKeys[index])
+  ) {
+    const copied = { ...alternate, entryKeys, state: cloneProjectionState(alternate.state) };
+    cache.set(key, copied);
+    return copied;
+  }
+
+  const state = fold(entries, {
+    include: "canon+draft",
+    existingCreate: "replace",
+    retainApplied: false,
+    validatedInput: true,
+    orderedInput: true,
+  });
+  const rebuilt = {
+    entryKeys,
+    state,
+    appliedChangeCount: entries.reduce((total, entry) => total + entry.event.changes.length, 0),
+  };
+  cache.set(key, rebuilt);
+  return rebuilt;
+}
+
+function projectionSectionRows(state: FoldState, section: ProjectionSection): readonly (readonly [string, unknown])[] {
+  if (section === "nodes") return [...state.nodes.entries()].sort(([left], [right]) => left.localeCompare(right));
+  if (section === "edges") return [...state.edges.entries()].sort(([left], [right]) => left.localeCompare(right));
+  if (section === "values") return [...state.values.entries()].sort(([left], [right]) => left.localeCompare(right));
+  if (section === "redirects") return [...state.redirects.entries()].sort(([left], [right]) => left.localeCompare(right));
+  return state.diagnostics
+    .map((diagnostic, index) => [`${diagnostic.eventId}\0${diagnostic.changeIndex}\0${index}`, diagnostic] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+function projectionSectionPage(
+  state: FoldState,
+  section: ProjectionSection,
+  include: "canon" | "canon+draft",
+  limit: number,
+  cursor: PageCursor | undefined,
+  query: string,
+): { readonly rows: readonly (readonly [string, unknown])[]; readonly total: number; readonly nextCursor?: string } {
+  const cursorKey = `${include}:${section}:${createHash("sha256").update(query).digest("hex").slice(0, 16)}`;
+  if (cursor !== undefined && cursor.key !== cursorKey) {
+    throw new ApiHttpError(400, "invalid_cursor", "Page cursor does not match the projection query");
+  }
+  const needle = query.toLocaleLowerCase();
+  const filtered = projectionSectionRows(state, section).filter(([id, value]) =>
+    needle.length === 0 || `${id}\n${JSON.stringify(value)}`.toLocaleLowerCase().includes(needle)
+  );
+  const remaining = cursor === undefined ? filtered : filtered.filter(([id]) => id > cursor.id);
+  const rows = remaining.slice(0, limit);
+  const last = rows.at(-1);
+  return {
+    rows,
+    total: filtered.length,
+    ...(last !== undefined && rows.length < remaining.length
+      ? { nextCursor: encodePageCursor({ kind: "state", key: cursorKey, id: last[0] }) }
+      : {}),
+  };
+}
+
 function corsOriginSet(origins: readonly string[] | undefined): ReadonlySet<string> | undefined {
   if (origins === undefined) return undefined;
   if (origins.length === 0) throw new TypeError("corsOrigins must not be empty when configured");
@@ -475,7 +618,9 @@ function applyRateLimit(
   dependencies: ApiDependencies,
 ): void {
   if (dependencies.rateLimiter === undefined) return;
-  const decision = dependencies.rateLimiter.consume(request.socket.remoteAddress ?? "unknown");
+  const credential = request.headers.authorization ?? "anonymous";
+  const fingerprint = createHash("sha256").update(credential).digest("hex").slice(0, 24);
+  const decision = dependencies.rateLimiter.consume(`${request.socket.remoteAddress ?? "unknown"}:${fingerprint}`);
   response.setHeader("ratelimit-limit", decision.limit.toString());
   response.setHeader("ratelimit-remaining", decision.remaining.toString());
   response.setHeader("ratelimit-reset", Math.ceil(decision.resetAt / 1_000).toString());
@@ -675,6 +820,62 @@ function cursorFromUrl(url: URL): FoldSdkCursor | undefined {
     throw new ApiHttpError(400, "invalid_cursor", "Cursor values are invalid");
   }
   return { t, eventId };
+}
+
+type PageCursorKind = "memory" | "candidate" | "run" | "trajectory" | "trajectory-run" | "event" | "state";
+
+interface PageCursor {
+  readonly kind: PageCursorKind;
+  readonly key: string | number;
+  readonly id: string;
+}
+
+const pageCursorSchema = z.object({
+  kind: z.enum(["memory", "candidate", "run", "trajectory", "trajectory-run", "event", "state"]),
+  key: z.union([z.string(), z.number().finite()]),
+  id: z.string().trim().min(1).max(10_000),
+}).strict();
+
+function encodePageCursor(cursor: PageCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function pageCursorFromUrl(url: URL, expectedKind: PageCursorKind): PageCursor | undefined {
+  const raw = url.searchParams.get("pageCursor");
+  if (raw === null) return undefined;
+  try {
+    const cursor = pageCursorSchema.parse(JSON.parse(Buffer.from(raw, "base64url").toString("utf8")));
+    if (cursor.kind !== expectedKind) throw new Error("cursor kind mismatch");
+    return cursor;
+  } catch {
+    throw new ApiHttpError(400, "invalid_cursor", "Page cursor is invalid");
+  }
+}
+
+function pagedNewestFirst<T>(
+  items: readonly T[],
+  kind: PageCursorKind,
+  limit: number | undefined,
+  cursor: PageCursor | undefined,
+  keyOf: (item: T) => string | number,
+  idOf: (item: T) => string,
+): { readonly items: readonly T[]; readonly total: number; readonly nextCursor?: string } {
+  const remaining = cursor === undefined
+    ? items
+    : items.filter((item) => {
+      const key = keyOf(item);
+      if (typeof key !== typeof cursor.key) return false;
+      return key < cursor.key || (key === cursor.key && idOf(item) > cursor.id);
+    });
+  const page = limit === undefined ? remaining : remaining.slice(0, limit);
+  const last = page.at(-1);
+  return {
+    items: page,
+    total: items.length,
+    ...(last !== undefined && page.length < remaining.length
+      ? { nextCursor: encodePageCursor({ kind, key: keyOf(last), id: idOf(last) }) }
+      : {}),
+  };
 }
 
 function includeFromUrl(url: URL): "canon" | "canon+draft" | undefined {
@@ -1383,11 +1584,48 @@ async function handleRequest(
       const include = includeFromUrl(url);
       const cursor = cursorFromUrl(url);
       const limit = positiveIntegerQuery(url, "limit", 1_000);
-      const entries = await sdk.listEntries(access, {
+      const order = url.searchParams.get("order") ?? "asc";
+      if (order !== "asc" && order !== "desc") {
+        throw new ApiHttpError(400, "invalid_query", "order must be asc or desc");
+      }
+      const pageCursor = pageCursorFromUrl(url, "event");
+      if (pageCursor !== undefined && order !== "desc") {
+        throw new ApiHttpError(400, "invalid_cursor", "Page cursor requires order=desc");
+      }
+      let entries = await sdk.listEntries(access, {
         ...(include === undefined ? {} : { include }),
         ...(cursor === undefined ? {} : { cursor }),
         ...(url.searchParams.has("kind") ? { kinds: url.searchParams.getAll("kind") } : {}),
       });
+      const identityFilters = {
+        sessionId: "session",
+        runId: "run",
+        projectId: "project",
+        actorId: "agent",
+      } as const;
+      for (const [queryKey, identityKey] of Object.entries(identityFilters)) {
+        const value = url.searchParams.get(queryKey);
+        if (value !== null) entries = entries.filter(({ event }) => event.capture.identity?.[identityKey] === value);
+      }
+      if (order === "desc") {
+        const ordered = [...entries].sort((left, right) =>
+          right.event.at.t - left.event.at.t || left.event.id.localeCompare(right.event.id)
+        );
+        const page = pagedNewestFirst(
+          ordered,
+          "event",
+          limit,
+          pageCursor,
+          ({ event }) => event.at.t,
+          ({ event }) => event.id,
+        );
+        sendJson(response, 200, {
+          entries: page.items,
+          total: page.total,
+          ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        });
+        return;
+      }
       sendJson(response, 200, {
         entries: limit === undefined ? entries : entries.slice(-limit),
         total: entries.length,
@@ -1411,6 +1649,53 @@ async function handleRequest(
     const cursor = cursorFromUrl(url);
     const limit = positiveIntegerQuery(url, "limit", 1_000);
     const compact = url.searchParams.get("compact") === "true";
+    const rawSection = url.searchParams.get("section");
+    const section = rawSection === null ? undefined : z.enum(["nodes", "edges", "values", "redirects", "diagnostics"]).parse(rawSection);
+    if (section !== undefined) {
+      if (cursor !== undefined) throw new ApiHttpError(400, "invalid_cursor", "Event cursor cannot be combined with a projection section");
+      const pageLimit = limit ?? 100;
+      if (pageLimit > 200) throw new ApiHttpError(400, "invalid_request", "Projection section limit must be within [1, 200]");
+      const projectionInclude = include ?? "canon";
+      const cached = await cachedProjection(sdk, access, projectionInclude);
+      const page = projectionSectionPage(
+        cached.state,
+        section,
+        projectionInclude,
+        pageLimit,
+        pageCursorFromUrl(url, "state"),
+        (url.searchParams.get("query") ?? "").trim(),
+      );
+      const emptyState = {
+        values: [], nodes: [], edges: [], redirects: [], diagnostics: [],
+        appliedEvents: [], appliedChanges: [],
+        appliedEventCount: cached.entryKeys.length,
+        appliedChangeCount: cached.appliedChangeCount,
+      };
+      sendJson(response, 200, {
+        entries: [],
+        total: cached.entryKeys.length,
+        projected: cached.entryKeys.length,
+        section,
+        sectionTotal: page.total,
+        counts: {
+          nodes: cached.state.nodes.size,
+          edges: cached.state.edges.size,
+          values: cached.state.values.size,
+          redirects: cached.state.redirects.size,
+          diagnostics: cached.state.diagnostics.length,
+        },
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        state: {
+          ...emptyState,
+          ...(section === "nodes" ? { nodes: page.rows } : {}),
+          ...(section === "edges" ? { edges: page.rows } : {}),
+          ...(section === "values" ? { values: page.rows } : {}),
+          ...(section === "redirects" ? { redirects: page.rows } : {}),
+          ...(section === "diagnostics" ? { diagnostics: page.rows.map(([, value]) => value) } : {}),
+        },
+      });
+      return;
+    }
     if (limit !== undefined || compact) {
       const entries = await sdk.listEntries(access, {
         ...(include === undefined ? {} : { include }),
@@ -1442,7 +1727,21 @@ async function handleRequest(
 
   if (resource === "trajectory-tasks" && resourceId === undefined) {
     if (method === "GET") {
-      sendJson(response, 200, { tasks: await sdk.trajectoryTasks(access) });
+      const tasks = await sdk.trajectoryTasks(access);
+      const limit = positiveIntegerQuery(url, "limit", 1_000);
+      const page = pagedNewestFirst(
+        tasks,
+        "trajectory",
+        limit,
+        pageCursorFromUrl(url, "trajectory"),
+        (task) => task.lastRecordedAt,
+        (task) => task.taskId,
+      );
+      sendJson(response, 200, {
+        tasks: page.items,
+        total: page.total,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+      });
       return;
     }
     if (method === "POST") {
@@ -1492,11 +1791,23 @@ async function handleRequest(
     const rawSource = url.searchParams.get("source");
     const source = rawSource === null ? undefined : transcriptSourceSchema.parse(rawSource);
     const projectId = url.searchParams.get("projectId") ?? undefined;
+    const runs = await sdk.transcriptRuns(access, {
+      ...(source === undefined ? {} : { source }),
+      ...(projectId === undefined ? {} : { projectId }),
+    });
+    const limit = positiveIntegerQuery(url, "limit", 1_000);
+    const page = pagedNewestFirst(
+      runs,
+      "run",
+      limit,
+      pageCursorFromUrl(url, "run"),
+      (run) => run.endedAt ?? run.startedAt ?? "",
+      (run) => run.id,
+    );
     sendJson(response, 200, {
-      runs: await sdk.transcriptRuns(access, {
-        ...(source === undefined ? {} : { source }),
-        ...(projectId === undefined ? {} : { projectId }),
-      }),
+      runs: page.items,
+      total: page.total,
+      ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
     });
     return;
   }
@@ -1601,7 +1912,17 @@ async function handleRequest(
     const steering = body.actorId === undefined
       ? undefined
       : await sdk.steeringSnapshot(access, body.actorId);
-    const reasoner = dependencies.reasoner ?? new LocalEvidenceReasoner();
+    let reasoner;
+    try {
+      reasoner = dependencies.reasoners?.provider(body.providerId)
+        ?? dependencies.reasoner
+        ?? new LocalEvidenceReasoner();
+      if (body.providerId !== undefined && dependencies.reasoners === undefined && reasoner.descriptor.id !== body.providerId) {
+        throw new TypeError(`reasoning provider is unavailable: ${body.providerId}`);
+      }
+    } catch (error) {
+      throw new ApiHttpError(400, "reasoning_provider_unavailable", error instanceof Error ? error.message : "Reasoning provider is unavailable");
+    }
     const result = validateReasoningResult(
       await reasoner.answer({
         question: body.question,
@@ -1625,11 +1946,42 @@ async function handleRequest(
     return;
   }
 
+  if (resource === "reasoning" && resourceId === "providers" && resourceSegments.length === 2) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const fallback = dependencies.reasoner ?? new LocalEvidenceReasoner();
+    sendJson(response, 200, {
+      providers: dependencies.reasoners?.statuses ?? [{ ...fallback.descriptor, configured: true, isDefault: true }],
+    });
+    return;
+  }
+
   if (resource === "trajectory-tasks" && resourceId !== undefined && resourceSegments.length === 2) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const report = await sdk.trajectoryReport(access, resourceId);
     if (report === undefined) throw new TrajectoryTaskUnavailableError(resourceId);
-    sendJson(response, 200, { report: serializeTrajectoryReport(report) });
+    const limit = positiveIntegerQuery(url, "limit", 1_000) ?? 100;
+    const page = pagedNewestFirst(
+      [...report.records].sort((left, right) =>
+        right.recordedAt - left.recordedAt || left.trajectory.id.localeCompare(right.trajectory.id)
+      ),
+      "trajectory-run",
+      limit,
+      pageCursorFromUrl(url, "trajectory-run"),
+      (record) => record.recordedAt,
+      (record) => record.trajectory.id,
+    );
+    const ids = new Set(page.items.map((record) => record.trajectory.id));
+    sendJson(response, 200, {
+      report: {
+        ...serializeTrajectoryReport(report),
+        records: page.items,
+        projected: report.projected.filter(({ id }) => ids.has(id)),
+        divergences: report.divergences.filter(({ trajectoryId }) => ids.has(trajectoryId)),
+        evaluations: report.evaluations.filter(({ trajectoryId }) => ids.has(trajectoryId)),
+        runTotal: page.total,
+        ...(page.nextCursor === undefined ? {} : { runCursor: page.nextCursor }),
+      },
+    });
     return;
   }
 
@@ -1656,13 +2008,31 @@ async function handleRequest(
       if (rawOffset !== undefined && (!Number.isInteger(rawOffset) || rawOffset < 0)) {
         throw new ApiHttpError(400, "invalid_query", "offset must be a non-negative integer");
       }
+      const candidates = await sdk.memoryCandidates(access, {
+        ...(status === undefined ? {} : { status }),
+        ...(url.searchParams.has("projectId") ? { projectIds: url.searchParams.getAll("projectId") } : {}),
+      });
+      if (rawOffset !== undefined) {
+        sendJson(response, 200, {
+          candidates: limit === undefined
+            ? candidates.slice(rawOffset)
+            : candidates.slice(rawOffset, rawOffset + limit),
+          total: candidates.length,
+        });
+        return;
+      }
+      const page = pagedNewestFirst(
+        candidates,
+        "candidate",
+        limit,
+        pageCursorFromUrl(url, "candidate"),
+        ({ candidate }) => candidate.proposedAt,
+        ({ candidate }) => candidate.id,
+      );
       sendJson(response, 200, {
-        candidates: await sdk.memoryCandidates(access, {
-          ...(status === undefined ? {} : { status }),
-          ...(url.searchParams.has("projectId") ? { projectIds: url.searchParams.getAll("projectId") } : {}),
-          ...(limit === undefined ? {} : { limit }),
-          ...(rawOffset === undefined ? {} : { offset: rawOffset }),
-        }),
+        candidates: page.items,
+        total: page.total,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       });
       return;
     }
@@ -1780,7 +2150,32 @@ async function handleRequest(
 
   if (resource === "memories" && resourceId === undefined) {
     if (method === "GET") {
-      sendJson(response, 200, { memories: await sdk.recallMemories(access, recallFromUrl(url)) });
+      const recall = recallFromUrl(url);
+      const rawCursor = pageCursorFromUrl(url, "memory");
+      let memoryCursor: MemoryPageCursor | undefined;
+      if (rawCursor !== undefined) {
+        if (typeof rawCursor.key !== "number") {
+          throw new ApiHttpError(400, "invalid_cursor", "Memory page cursor is invalid");
+        }
+        memoryCursor = { createdAt: rawCursor.key, memoryId: rawCursor.id };
+      }
+      const { limit, ...filters } = recall;
+      const page = await sdk.recallMemoryPage(access, {
+        ...filters,
+        ...(limit === undefined ? {} : { limit }),
+        ...(memoryCursor === undefined ? {} : { cursor: memoryCursor }),
+      });
+      sendJson(response, 200, {
+        memories: page.memories,
+        total: page.total,
+        ...(page.nextCursor === undefined ? {} : {
+          nextCursor: encodePageCursor({
+            kind: "memory",
+            key: page.nextCursor.createdAt,
+            id: page.nextCursor.memoryId,
+          }),
+        }),
+      });
       return;
     }
     if (method === "POST") {

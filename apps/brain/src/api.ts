@@ -1,16 +1,22 @@
 import { nextEventStamp, uuidV7 } from "./ids";
 import type {
   ConnectionSettings,
+  CaptureHealth,
+  CursorPage,
   FoldLogEntry,
   FleetResponse,
+  HookArtifact,
+  HookSource,
   MemoryDraft,
   MemoryCandidateView,
   MemoryScope,
   PersonalMemory,
   ProjectionResponse,
+  ProjectionSection,
   RecalledMemory,
   RankedMemoryRecallResult,
   ReasoningResponse,
+  ReasoningProviderStatus,
   SharedDecisionTree,
   SteeringCandidateDraft,
   SteeringIntentionEnd,
@@ -20,6 +26,7 @@ import type {
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
   TranscriptProjectSummary,
+  TranscriptArtifactRecord,
   TranscriptRun,
   TranscriptRunDetail,
   TranscriptSource,
@@ -88,39 +95,144 @@ export class FoldApiClient {
     return body as T;
   }
 
+  async captureHealth(): Promise<CaptureHealth> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.settings.captureBaseUrl}/health`, { signal: this.signal });
+    } catch (error) {
+      throw new FoldApiError(0, "capture_unavailable", error instanceof Error ? error.message : "Capture daemon unavailable");
+    }
+    const body = await response.json().catch(() => ({})) as CaptureHealth & ApiErrorBody;
+    if (!response.ok) {
+      throw new FoldApiError(response.status, body.error?.code ?? "capture_unavailable", body.error?.message ?? "Capture daemon unavailable");
+    }
+    return body;
+  }
+
+  async transcriptArtifactPage(options: {
+    readonly source: TranscriptSource;
+    readonly sha256: string;
+    readonly limit?: number;
+    readonly cursor?: string;
+  }): Promise<CursorPage<TranscriptArtifactRecord>> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("cursor", options.cursor);
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.settings.captureBaseUrl}/artifacts/${encodeURIComponent(options.source)}/${encodeURIComponent(options.sha256)}${params.size === 0 ? "" : `?${params}`}`,
+        {
+          headers: { "x-super-brain-operator-token": this.settings.captureOperatorToken },
+          signal: this.signal,
+        },
+      );
+    } catch (error) {
+      throw new FoldApiError(0, "artifact_unavailable", error instanceof Error ? error.message : "Transcript artifact unavailable");
+    }
+    const body = await response.json().catch(() => ({})) as {
+      readonly records?: readonly TranscriptArtifactRecord[];
+      readonly total?: number;
+      readonly nextCursor?: string;
+      readonly error?: string;
+    };
+    if (!response.ok || body.records === undefined || body.total === undefined) {
+      throw new FoldApiError(response.status, "artifact_unavailable", body.error ?? "Transcript artifact unavailable");
+    }
+    return { items: body.records, total: body.total, ...(body.nextCursor === undefined ? {} : { nextCursor: body.nextCursor }) };
+  }
+
+  async hookArtifact(source: HookSource, artifactId: string): Promise<HookArtifact> {
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.settings.captureBaseUrl}/hook-artifacts/${encodeURIComponent(source)}/${encodeURIComponent(artifactId)}`,
+        {
+          headers: { "x-super-brain-operator-token": this.settings.captureOperatorToken },
+          signal: this.signal,
+        },
+      );
+    } catch (error) {
+      throw new FoldApiError(0, "artifact_unavailable", error instanceof Error ? error.message : "Hook artifact unavailable");
+    }
+    const body = await response.json().catch(() => ({})) as { readonly artifact?: HookArtifact; readonly error?: string };
+    if (!response.ok || body.artifact === undefined) {
+      throw new FoldApiError(response.status, "artifact_unavailable", body.error ?? "Hook artifact unavailable");
+    }
+    return body.artifact;
+  }
+
   async listEvents(options: {
     readonly includeDrafts?: boolean;
     readonly kinds?: readonly string[];
     readonly limit?: number;
   } = {}) {
+    return (await this.listEventsPage(options)).items;
+  }
+
+  async listEventsPage(options: {
+    readonly includeDrafts?: boolean;
+    readonly kinds?: readonly string[];
+    readonly limit?: number;
+    readonly cursor?: string;
+    readonly sessionId?: string;
+    readonly runId?: string;
+    readonly projectId?: string;
+    readonly actorId?: string;
+  } = {}): Promise<CursorPage<FoldLogEntry>> {
     const params = new URLSearchParams();
     if (options.includeDrafts) params.set("include", "canon+draft");
     appendRepeated(params, "kind", options.kinds);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
+    params.set("order", "desc");
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    if (options.sessionId !== undefined) params.set("sessionId", options.sessionId);
+    if (options.runId !== undefined) params.set("runId", options.runId);
+    if (options.projectId !== undefined) params.set("projectId", options.projectId);
+    if (options.actorId !== undefined) params.set("actorId", options.actorId);
     const query = params.size > 0 ? `?${params.toString()}` : "";
-    const response = await this.request<{ readonly entries: readonly FoldLogEntry[] }>(
+    const response = await this.request<{ readonly entries: readonly FoldLogEntry[]; readonly total: number; readonly nextCursor?: string }>(
       `${this.workspacePath("events")}${query}`,
     );
-    return response.entries;
+    return {
+      items: response.entries,
+      total: response.total,
+      ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }),
+    };
   }
 
-  async projection(includeDrafts = false): Promise<ProjectionResponse> {
-    const query = includeDrafts
-      ? "?include=canon%2Bdraft&compact=true&limit=500"
-      : "?compact=true&limit=500";
-    return this.request<ProjectionResponse>(`${this.workspacePath("projection")}${query}`);
+  async projection(
+    includeDrafts = false,
+    section: ProjectionSection = "nodes",
+    options: { readonly cursor?: string; readonly query?: string } = {},
+  ): Promise<ProjectionResponse> {
+    const params = new URLSearchParams({ compact: "true", section, limit: "100" });
+    if (includeDrafts) params.set("include", "canon+draft");
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    if (options.query?.trim()) params.set("query", options.query.trim());
+    return this.request<ProjectionResponse>(`${this.workspacePath("projection")}?${params}`);
   }
 
   async listTrajectoryTasks(): Promise<readonly TrajectoryTaskSummary[]> {
-    const response = await this.request<{ readonly tasks: readonly TrajectoryTaskSummary[] }>(
-      this.workspacePath("trajectory-tasks"),
-    );
-    return response.tasks;
+    return (await this.listTrajectoryTaskPage()).items;
   }
 
-  async trajectoryReport(taskId: string): Promise<TrajectoryTaskReport> {
+  async listTrajectoryTaskPage(options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<CursorPage<TrajectoryTaskSummary>> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    const response = await this.request<{ readonly tasks: readonly TrajectoryTaskSummary[]; readonly total: number; readonly nextCursor?: string }>(
+      `${this.workspacePath("trajectory-tasks")}${params.size === 0 ? "" : `?${params}`}`,
+    );
+    return { items: response.tasks, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
+  }
+
+  async trajectoryReport(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<TrajectoryTaskReport> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
     const response = await this.request<{ readonly report: TrajectoryTaskReport }>(
-      `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}`,
+      `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}${params.size === 0 ? "" : `?${params}`}`,
     );
     return response.report;
   }
@@ -140,14 +252,25 @@ export class FoldApiClient {
     readonly projectId?: string;
     readonly source?: TranscriptSource;
   } = {}): Promise<readonly TranscriptRun[]> {
+    return (await this.listTranscriptRunPage(options)).items;
+  }
+
+  async listTranscriptRunPage(options: {
+    readonly projectId?: string;
+    readonly source?: TranscriptSource;
+    readonly limit?: number;
+    readonly cursor?: string;
+  } = {}): Promise<CursorPage<TranscriptRun>> {
     const params = new URLSearchParams();
     if (options.projectId !== undefined) params.set("projectId", options.projectId);
     if (options.source !== undefined) params.set("source", options.source);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
     const query = params.size === 0 ? "" : `?${params.toString()}`;
-    const response = await this.request<{ readonly runs: readonly TranscriptRun[] }>(
+    const response = await this.request<{ readonly runs: readonly TranscriptRun[]; readonly total: number; readonly nextCursor?: string }>(
       `${this.workspacePath("transcript-runs")}${query}`,
     );
-    return response.runs;
+    return { items: response.runs, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
   }
 
   async transcriptRun(runId: string): Promise<TranscriptRunDetail> {
@@ -205,10 +328,22 @@ export class FoldApiClient {
     await this.steer(actorId, { action: "end", intentionId, end });
   }
 
-  async askReasoning(question: string, actorId?: string): Promise<ReasoningResponse> {
+  async reasoningProviders(): Promise<readonly ReasoningProviderStatus[]> {
+    const response = await this.request<{ readonly providers: readonly ReasoningProviderStatus[] }>(
+      this.workspacePath("reasoning/providers"),
+    );
+    return response.providers;
+  }
+
+  async askReasoning(question: string, actorId?: string, providerId?: string): Promise<ReasoningResponse> {
     return this.request<ReasoningResponse>(this.workspacePath("reasoning/ask"), {
       method: "POST",
-      body: JSON.stringify({ question, ...(actorId === undefined ? {} : { actorId }), limit: 5 }),
+      body: JSON.stringify({
+        question,
+        ...(actorId === undefined ? {} : { actorId }),
+        ...(providerId === undefined ? {} : { providerId }),
+        limit: 5,
+      }),
     });
   }
 
@@ -260,6 +395,19 @@ export class FoldApiClient {
     readonly to?: number;
     readonly limit?: number;
   } = {}): Promise<readonly RecalledMemory[]> {
+    return (await this.recallMemoryPage(options)).items;
+  }
+
+  async recallMemoryPage(options: {
+    readonly scope?: MemoryScope;
+    readonly tags?: readonly string[];
+    readonly sources?: readonly string[];
+    readonly projectIds?: readonly string[];
+    readonly from?: number;
+    readonly to?: number;
+    readonly limit?: number;
+    readonly cursor?: string;
+  } = {}): Promise<CursorPage<RecalledMemory>> {
     const params = new URLSearchParams();
     if (options.scope !== undefined) {
       params.set("scope", options.scope.kind);
@@ -271,11 +419,12 @@ export class FoldApiClient {
     if (options.from !== undefined) params.set("from", options.from.toString());
     if (options.to !== undefined) params.set("to", options.to.toString());
     if (options.limit !== undefined) params.set("limit", options.limit.toString());
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
     const query = params.size > 0 ? `?${params.toString()}` : "";
-    const response = await this.request<{ readonly memories: readonly RecalledMemory[] }>(
+    const response = await this.request<{ readonly memories: readonly RecalledMemory[]; readonly total: number; readonly nextCursor?: string }>(
       `${this.workspacePath("memories")}${query}`,
     );
-    return response.memories;
+    return { items: response.memories, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
   }
 
   async rankMemories(options: {
@@ -320,14 +469,24 @@ export class FoldApiClient {
     readonly offset?: number;
     readonly limit?: number;
   } = {}): Promise<readonly MemoryCandidateView[]> {
+    return (await this.listMemoryCandidatePage(options)).items;
+  }
+
+  async listMemoryCandidatePage(options: {
+    readonly status?: MemoryCandidateView["status"];
+    readonly offset?: number;
+    readonly limit?: number;
+    readonly cursor?: string;
+  } = {}): Promise<CursorPage<MemoryCandidateView>> {
     const query = new URLSearchParams();
     if (options.status !== undefined) query.set("status", options.status);
     if (options.offset !== undefined) query.set("offset", options.offset.toString());
     if (options.limit !== undefined) query.set("limit", options.limit.toString());
-    const response = await this.request<{ readonly candidates: readonly MemoryCandidateView[] }>(
+    if (options.cursor !== undefined) query.set("pageCursor", options.cursor);
+    const response = await this.request<{ readonly candidates: readonly MemoryCandidateView[]; readonly total: number; readonly nextCursor?: string }>(
       `${this.workspacePath("memory-candidates")}${query.size === 0 ? "" : `?${query}`}`,
     );
-    return response.candidates;
+    return { items: response.candidates, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
   }
 
   async acceptMemoryCandidate(candidateId: string): Promise<PersonalMemory> {

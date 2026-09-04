@@ -2,14 +2,30 @@ import { GitCommitHorizontal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField, StatusBadge } from "../components/Common";
+import { LoadMore } from "../components/LoadMore";
 import { compactJson, uniqueSorted } from "../format";
+import type { FoldApiClient } from "../api";
 import type { FoldLogEntry } from "../types";
+import { useCursorList } from "../use-cursor-list";
 
-export function EventsPage({ entries }: { readonly entries: readonly FoldLogEntry[] }) {
+export function EventsPage({ entries: initialEntries, total, cursor, api }: {
+  readonly entries: readonly FoldLogEntry[];
+  readonly total: number;
+  readonly cursor?: string;
+  readonly api: FoldApiClient;
+}) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("all");
   const [selectedId, setSelectedId] = useState<string>();
+  const eventPage = useCursorList({
+    initialItems: initialEntries,
+    initialTotal: total,
+    initialCursor: cursor,
+    keyOf: (entry) => entry.event.id,
+    loadPage: (nextCursor) => api.listEventsPage({ includeDrafts: true, limit: 100, cursor: nextCursor }),
+  });
+  const entries = eventPage.items;
   const kinds = useMemo(() => uniqueSorted(entries.map(({ event }) => event.kind)), [entries]);
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -40,7 +56,7 @@ export function EventsPage({ entries }: { readonly entries: readonly FoldLogEntr
         <SearchField value={query} onChange={setQuery} placeholder="Search events" />
         <label className="compact-field"><span>Status</span><select value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">All statuses</option><option value="canon">Canon</option><option value="draft">Draft</option></select></label>
         <label className="compact-field compact-field--kind"><span>Kind</span><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="all">All kinds</option>{kinds.map((value) => <option key={value}>{value}</option>)}</select></label>
-        <span className="result-count">{filtered.length} {filtered.length === 1 ? "event" : "events"}</span>
+        <span className="result-count">{filtered.length} shown · {eventPage.total} total</span>
       </div>
 
       <section className="event-layout">
@@ -62,6 +78,14 @@ export function EventsPage({ entries }: { readonly entries: readonly FoldLogEntr
                   ))}
                 </tbody>
               </table>
+              <LoadMore
+                loaded={entries.length}
+                total={eventPage.total}
+                hasMore={eventPage.cursor !== undefined}
+                loading={eventPage.loadingMore}
+                error={eventPage.loadError}
+                onLoadMore={() => void eventPage.loadMore()}
+              />
             </div>
           )}
         </div>

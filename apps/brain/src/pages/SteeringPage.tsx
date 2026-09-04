@@ -19,6 +19,7 @@ import { formatDateTime, uniqueSorted } from "../format";
 import type {
   FleetSession,
   ReasoningResponse,
+  ReasoningProviderStatus,
   SteeringActorSnapshot,
   SteeringCandidate,
   SteeringCandidateDraft,
@@ -65,6 +66,21 @@ export function SteeringPage({
   const [reasoning, setReasoning] = useState<ReasoningResponse>();
   const [reasoningPending, setReasoningPending] = useState(false);
   const [reasoningError, setReasoningError] = useState<string>();
+  const [providers, setProviders] = useState<readonly ReasoningProviderStatus[]>([]);
+  const [providerId, setProviderId] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void api.reasoningProviders().then(
+      (next) => {
+        if (!active) return;
+        setProviders(next);
+        setProviderId((current) => current || next.find(({ isDefault }) => isDefault)?.id || next.find(({ configured }) => configured)?.id || "");
+      },
+      (caught: unknown) => { if (active) setReasoningError(caught instanceof Error ? caught.message : "Reasoning providers unavailable"); },
+    );
+    return () => { active = false; };
+  }, [api]);
 
   useEffect(() => {
     if (actorIds.length === 0) setSelectedActorId(undefined);
@@ -112,7 +128,7 @@ export function SteeringPage({
     setReasoningPending(true);
     setReasoningError(undefined);
     try {
-      setReasoning(await api.askReasoning(question.trim(), questionActor || undefined));
+      setReasoning(await api.askReasoning(question.trim(), questionActor || undefined, providerId || undefined));
     } catch (caught) {
       setReasoning(undefined);
       setReasoningError(caught instanceof Error ? caught.message : "Reasoning request failed");
@@ -166,12 +182,13 @@ export function SteeringPage({
           <MessageSquareText aria-hidden="true" />
           <label><span className="sr-only">Question</span><input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask across authorized memory" /></label>
           <label className="compact-field"><span>Actor context</span><select value={questionActor} onChange={(event) => setQuestionActor(event.target.value)}><option value="">No actor</option>{actorIds.map((actorId) => <option key={actorId}>{actorId}</option>)}</select></label>
+          <label className="compact-field"><span>Provider</span><select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id} disabled={provider.configured === false}>{provider.provider ?? provider.kind} · {provider.model ?? provider.id}{provider.configured === false ? " (not configured)" : ""}</option>)}</select></label>
           <button className="icon-button reasoning-console__send" type="submit" disabled={reasoningPending || !question.trim()} aria-label="Ask" title="Ask"><Send aria-hidden="true" /></button>
         </form>
         {reasoningError !== undefined && <span className="reasoning-error" role="alert">{reasoningError}</span>}
         {reasoning !== undefined && (
           <div className="reasoning-answer">
-            <header><span className="eyebrow">{reasoning.provider.kind} / {reasoning.provider.id}</span><span>{reasoning.ranking.kind} recall / {reasoning.ranking.corpusSize} scanned</span></header>
+            <header><span className="eyebrow">{reasoning.provider.provider ?? reasoning.provider.kind} / {reasoning.provider.model ?? reasoning.provider.id}</span><span>{reasoning.ranking.kind} recall / {reasoning.ranking.corpusSize} scanned</span></header>
             <p>{reasoning.answer}</p>
             {reasoning.evidence.length > 0 && <ul>{reasoning.evidence.map((item) => <li key={item.memoryId}><Lightbulb aria-hidden="true" /><span><strong>{item.summary || "Untitled memory"}</strong><small>{item.source}{item.score === undefined ? "" : ` / ${Math.round(item.score * 100)}%`}</small></span></li>)}</ul>}
           </div>

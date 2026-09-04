@@ -1,10 +1,16 @@
-import { AlertTriangle, Box, Braces, GitBranch } from "lucide-react";
-import { useMemo, useState } from "react";
+import { AlertTriangle, Box, Braces, GitBranch, GitMerge, LoaderCircle } from "lucide-react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 
+import type { FoldApiClient } from "../api";
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
-import type { JsonValue, SerializedFoldNode, SerializedFoldState } from "../types";
+import { LoadMore } from "../components/LoadMore";
+import type {
+  JsonValue,
+  ProjectionResponse,
+  ProjectionSection,
+  SerializedFoldNode,
+} from "../types";
 
-type StateView = "nodes" | "edges" | "values" | "diagnostics";
 type ProjectionMode = "canonical" | "working";
 
 interface StateRow {
@@ -20,9 +26,11 @@ function objectValue(value: JsonValue | undefined): Readonly<Record<string, Json
 
 export function nodeDisplayLabel(id: string, node: SerializedFoldNode): string {
   const memory = objectValue(node.properties.memory);
+  const candidate = objectValue(node.properties.candidate);
   const tree = objectValue(node.properties.tree);
   const candidates = [
     memory?.summary,
+    candidate?.summary,
     tree?.taskId,
     node.properties.title,
     node.properties.name,
@@ -42,29 +50,22 @@ function componentDisplayLabel(id: string): string {
   }
 }
 
-function stateRows(state: SerializedFoldState, view: StateView): StateRow[] {
-  if (view === "nodes") {
-    return state.nodes.map(([id, value]) => ({
-      id,
-      label: nodeDisplayLabel(id, value),
-      kind: value.nodeKind ?? "node",
-      value,
-    }));
+function responseRows(response: ProjectionResponse, section: ProjectionSection): StateRow[] {
+  if (section === "nodes") {
+    return response.state.nodes.map(([id, value]) => ({ id, label: nodeDisplayLabel(id, value), kind: value.nodeKind ?? "node", value }));
   }
-  if (view === "edges") {
-    return state.edges.map(([id, value]) => ({
-      id,
-      label: `${value.subject} → ${value.object}`,
-      kind: value.edgeType,
-      value,
-    }));
+  if (section === "edges") {
+    return response.state.edges.map(([id, value]) => ({ id, label: `${value.subject} → ${value.object}`, kind: value.edgeType, value }));
   }
-  if (view === "values") {
-    return state.values.map(([id, value]) => ({ id, label: componentDisplayLabel(id), kind: "component", value }));
+  if (section === "values") {
+    return response.state.values.map(([id, value]) => ({ id, label: componentDisplayLabel(id), kind: "component", value }));
   }
-  return state.diagnostics.map((value, index) => {
-    const id = String(value.eventId ?? `diagnostic-${index + 1}`);
-    return { id, label: id, kind: String(value.kind ?? "diagnostic"), value };
+  if (section === "redirects") {
+    return response.state.redirects.map(([id, value]) => ({ id, label: `${id} → ${value}`, kind: "redirect", value: { from: id, to: value } }));
+  }
+  return response.state.diagnostics.map((value, index) => {
+    const id = `${String(value.eventId ?? "diagnostic")}:${String(value.changeIndex ?? index)}`;
+    return { id, label: String(value.eventId ?? id), kind: String(value.kind ?? "diagnostic"), value };
   });
 }
 
@@ -72,51 +73,95 @@ function displayValue(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
-function appliedEventCount(state: SerializedFoldState): number {
-  return state.appliedEventCount ?? state.appliedEvents.length;
+function cacheKey(mode: ProjectionMode, section: ProjectionSection, query: string): string {
+  return `${mode}:${section}:${query}`;
 }
 
-export function StatePage({
-  canonicalState,
-  workingState,
-  canonicalTotal,
-  canonicalProjected,
-  workingTotal,
-  workingProjected,
-}: {
-  readonly canonicalState: SerializedFoldState;
-  readonly workingState: SerializedFoldState;
-  readonly canonicalTotal?: number;
-  readonly canonicalProjected?: number;
-  readonly workingTotal?: number;
-  readonly workingProjected?: number;
+function sectionIcon(section: ProjectionSection) {
+  if (section === "nodes") return <Box aria-hidden="true" />;
+  if (section === "edges") return <GitBranch aria-hidden="true" />;
+  if (section === "values") return <Braces aria-hidden="true" />;
+  if (section === "redirects") return <GitMerge aria-hidden="true" />;
+  return <AlertTriangle aria-hidden="true" />;
+}
+
+export function StatePage({ canonical, api }: {
+  readonly canonical: ProjectionResponse;
+  readonly api: FoldApiClient;
 }) {
-  const [view, setView] = useState<StateView>("nodes");
+  const [section, setSection] = useState<ProjectionSection>("nodes");
   const [mode, setMode] = useState<ProjectionMode>("canonical");
   const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query.trim());
   const [selectedId, setSelectedId] = useState<string>();
-  const state = mode === "canonical" ? canonicalState : workingState;
-  const total = mode === "canonical" ? canonicalTotal : workingTotal;
-  const projected = mode === "canonical" ? canonicalProjected : workingProjected;
-  const rows = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    return stateRows(state, view).filter((row) =>
-      !needle || `${row.label}\n${row.id}\n${row.kind}\n${displayValue(row.value)}`.toLocaleLowerCase().includes(needle),
-    );
-  }, [query, state, view]);
+  const initialKey = cacheKey("canonical", "nodes", "");
+  const [pages, setPages] = useState<Readonly<Record<string, ProjectionResponse>>>({ [initialKey]: canonical });
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string>();
+  const key = cacheKey(mode, section, deferredQuery);
+  const response = pages[key];
+  const rows = useMemo(() => response === undefined ? [] : responseRows(response, section), [response, section]);
   const selected = rows.find((row) => row.id === selectedId) ?? rows[0];
 
-  const switchView = (next: StateView) => {
-    setView(next);
+  useEffect(() => {
+    setPages({ [initialKey]: canonical });
+  }, [canonical, initialKey]);
+
+  useEffect(() => {
     setSelectedId(undefined);
+    if (pages[key] !== undefined) return;
+    let active = true;
+    setLoading(true);
+    setLoadError(undefined);
+    void api.projection(mode === "working", section, { query: deferredQuery }).then(
+      (page) => {
+        if (!active) return;
+        setPages((current) => ({ ...current, [key]: page }));
+        setLoading(false);
+      },
+      (caught: unknown) => {
+        if (!active) return;
+        setLoadError(caught instanceof Error ? caught.message : "Projection unavailable");
+        setLoading(false);
+      },
+    );
+    return () => { active = false; };
+  }, [api, deferredQuery, key, mode, pages, section]);
+
+  const loadMore = async () => {
+    if (response?.nextCursor === undefined || loading) return;
+    setLoading(true);
+    setLoadError(undefined);
+    try {
+      const next = await api.projection(mode === "working", section, {
+        cursor: response.nextCursor,
+        query: deferredQuery,
+      });
+      setPages((current) => ({
+        ...current,
+        [key]: {
+          ...next,
+          state: {
+            ...next.state,
+            nodes: [...(current[key]?.state.nodes ?? []), ...next.state.nodes],
+            edges: [...(current[key]?.state.edges ?? []), ...next.state.edges],
+            values: [...(current[key]?.state.values ?? []), ...next.state.values],
+            redirects: [...(current[key]?.state.redirects ?? []), ...next.state.redirects],
+            diagnostics: [...(current[key]?.state.diagnostics ?? []), ...next.state.diagnostics],
+          },
+        },
+      }));
+    } catch (caught) {
+      setLoadError(caught instanceof Error ? caught.message : "Unable to load more state");
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const counts: Record<StateView, number> = {
-    nodes: state.nodes.length,
-    edges: state.edges.length,
-    values: state.values.length,
-    diagnostics: state.diagnostics.length,
-  };
+  const counts = response?.counts ?? canonical.counts ?? { nodes: 0, edges: 0, values: 0, redirects: 0, diagnostics: 0 };
+  const canonicalApplied = canonical.state.appliedEventCount ?? canonical.projected ?? 0;
+  const workingApplied = mode === "working" ? response?.state.appliedEventCount : undefined;
+  const sectionTotal = response?.sectionTotal ?? 0;
 
   return (
     <div className="page page--state">
@@ -125,31 +170,38 @@ export function StatePage({
         <div className="state-toolbar__controls">
           <div className="segmented-control segmented-control--mode" role="group" aria-label="Projection mode">
             <button type="button" aria-pressed={mode === "canonical"} onClick={() => setMode("canonical")}>Canon</button>
-            <button type="button" aria-pressed={mode === "working"} onClick={() => setMode("working")}>Working <span>+{Math.max(0, appliedEventCount(workingState) - appliedEventCount(canonicalState))}</span></button>
+            <button type="button" aria-pressed={mode === "working"} onClick={() => setMode("working")}>Working{workingApplied === undefined ? "" : <span>+{Math.max(0, workingApplied - canonicalApplied)}</span>}</button>
           </div>
           <div className="segmented-control" role="tablist" aria-label="State view">
-            <button type="button" role="tab" aria-selected={view === "nodes"} onClick={() => switchView("nodes")}><Box aria-hidden="true" />Nodes <span>{counts.nodes}</span></button>
-            <button type="button" role="tab" aria-selected={view === "edges"} onClick={() => switchView("edges")}><GitBranch aria-hidden="true" />Edges <span>{counts.edges}</span></button>
-            <button type="button" role="tab" aria-selected={view === "values"} onClick={() => switchView("values")}><Braces aria-hidden="true" />Values <span>{counts.values}</span></button>
-            <button type="button" role="tab" aria-selected={view === "diagnostics"} onClick={() => switchView("diagnostics")}><AlertTriangle aria-hidden="true" />Diagnostics <span>{counts.diagnostics}</span></button>
+            {(["nodes", "edges", "values", "redirects", "diagnostics"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={section === value} onClick={() => setSection(value)}>{sectionIcon(value)}{value[0]!.toUpperCase() + value.slice(1)} <span>{counts[value].toLocaleString()}</span></button>)}
           </div>
         </div>
-        {total !== undefined && projected !== undefined && (
-          <span className="result-count">Latest {projected.toLocaleString()} of {total.toLocaleString()} events</span>
+        {response?.total !== undefined && response.projected !== undefined && (
+          <span className="result-count">Full projection · {response.projected.toLocaleString()} of {response.total.toLocaleString()} events</span>
         )}
-        <SearchField value={query} onChange={setQuery} placeholder={`Search ${view}`} />
+        <SearchField value={query} onChange={setQuery} placeholder={`Search ${section}`} />
       </div>
 
       <section className="state-layout">
         <div className="state-list" role="tabpanel">
-          {rows.length === 0 ? (
-            <EmptyState title={`No ${view}`} />
+          {loading && response === undefined ? <div className="state-page-loading"><LoaderCircle aria-hidden="true" />Loading {section}</div> : loadError !== undefined && response === undefined ? (
+            <div className="fleet-activity-error"><AlertTriangle aria-hidden="true" />{loadError}</div>
+          ) : rows.length === 0 ? (
+            <EmptyState title={`No ${section}`} />
           ) : rows.map((row) => (
             <button className={row.id === selected?.id ? "is-selected" : undefined} type="button" key={row.id} onClick={() => setSelectedId(row.id)}>
-              <span className="state-list__icon">{view === "nodes" ? <Box aria-hidden="true" /> : view === "edges" ? <GitBranch aria-hidden="true" /> : view === "values" ? <Braces aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}</span>
+              <span className="state-list__icon">{sectionIcon(section)}</span>
               <span><strong>{row.label}</strong><small>{row.kind}</small>{row.label !== row.id && <code className="state-list__id">{row.id}</code>}</span>
             </button>
           ))}
+          {response !== undefined && <LoadMore
+            loaded={rows.length}
+            total={sectionTotal}
+            hasMore={response.nextCursor !== undefined}
+            loading={loading}
+            error={loadError}
+            onLoadMore={() => void loadMore()}
+          />}
         </div>
         <article className="json-inspector">
           {selected === undefined ? <EmptyState title="No state selected" /> : <><header><span className="eyebrow">{selected.kind}</span><h2>{selected.label}</h2>{selected.label !== selected.id && <code className="json-inspector__id">{selected.id}</code>}</header><pre>{displayValue(selected.value as JsonValue)}</pre></>}

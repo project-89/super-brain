@@ -139,6 +139,24 @@ describe("SDK personal memory API", () => {
     });
   });
 
+  it("pages authorized memories newest first with a stable cursor", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    const ids = [MEMORY_A, MEMORY_B, "01890f47-7c00-7000-8000-000000000003"];
+    for (const [index, id] of ids.entries()) {
+      await sdk.recordMemory(memoryContext(), stamp(`event-page-${index}`, 100 + index), {
+        id,
+        source: "conversation",
+        summary: `Memory ${index}`,
+      });
+    }
+    const first = await sdk.recallMemoryPage(access(), { limit: 2 });
+    expect(first.memories.map(({ memory }) => memory.id)).toEqual([ids[2], ids[1]]);
+    expect(first.total).toBe(3);
+    const second = await sdk.recallMemoryPage(access(), { limit: 2, cursor: first.nextCursor! });
+    expect(second.memories.map(({ memory }) => memory.id)).toEqual([ids[0]]);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
   it("ranks the complete authorized corpus beyond the response limit", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     for (let index = 0; index < 125; index += 1) {

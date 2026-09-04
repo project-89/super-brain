@@ -2,8 +2,11 @@ import { Check, Edit3, ListFilter, Plus, Search, Sparkles, ThumbsDown, ThumbsUp,
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
+import { LoadMore } from "../components/LoadMore";
+import type { FoldApiClient } from "../api";
 import { formatDateTime, memoryContent, uniqueSorted } from "../format";
 import type { FoldLogEntry, MemoryCandidate, MemoryCandidateView, MemoryScope, PersonalMemory, RankedMemoryRecallResult, RecalledMemory } from "../types";
+import { useCursorList } from "../use-cursor-list";
 
 type RecallMode = "filter" | "ranked";
 
@@ -37,9 +40,14 @@ function feedbackByMemory(events: readonly FoldLogEntry[]): ReadonlyMap<string, 
 }
 
 export function MemoryPage({
-  memories,
-  candidates,
+  memories: initialMemories,
+  memoryTotal,
+  memoryCursor,
+  candidates: initialCandidates,
+  candidateTotal,
+  candidateCursor,
   feedbackEvents,
+  api,
   onRank,
   onCreate,
   onEdit,
@@ -50,8 +58,13 @@ export function MemoryPage({
   mutationPending,
 }: {
   readonly memories: readonly RecalledMemory[];
+  readonly memoryTotal: number;
+  readonly memoryCursor?: string;
   readonly candidates: readonly MemoryCandidateView[];
+  readonly candidateTotal: number;
+  readonly candidateCursor?: string;
   readonly feedbackEvents: readonly FoldLogEntry[];
+  readonly api: FoldApiClient;
   readonly onRank: (options: {
     readonly query: string;
     readonly scope?: MemoryScope;
@@ -67,6 +80,22 @@ export function MemoryPage({
   readonly onRejectCandidate: (candidate: MemoryCandidate, reason: string) => Promise<void>;
   readonly mutationPending: boolean;
 }) {
+  const memoryPage = useCursorList({
+    initialItems: initialMemories,
+    initialTotal: memoryTotal,
+    initialCursor: memoryCursor,
+    keyOf: ({ memory }) => memory.id,
+    loadPage: (cursor) => api.recallMemoryPage({ scope: { kind: "all" }, limit: 100, cursor }),
+  });
+  const candidatePage = useCursorList({
+    initialItems: initialCandidates,
+    initialTotal: candidateTotal,
+    initialCursor: candidateCursor,
+    keyOf: ({ candidate }) => candidate.id,
+    loadPage: (cursor) => api.listMemoryCandidatePage({ status: "proposed", limit: 100, cursor }),
+  });
+  const memories = memoryPage.items;
+  const candidates = candidatePage.items;
   const [view, setView] = useState<"memories" | "candidates">("memories");
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<RecallMode>("filter");
@@ -149,7 +178,7 @@ export function MemoryPage({
       />
       <div className="segmented-control memory-view" role="group" aria-label="Memory view">
         <button type="button" aria-pressed={view === "memories"} onClick={() => setView("memories")}>Memories</button>
-        <button type="button" aria-pressed={view === "candidates"} onClick={() => setView("candidates")}>Proposals <span>{candidates.filter(({ status }) => status === "proposed").length}</span></button>
+        <button type="button" aria-pressed={view === "candidates"} onClick={() => setView("candidates")}>Proposals <span>{candidatePage.total}</span></button>
       </div>
       {view === "memories" ? <>
       <form className="filter-bar memory-filter-bar" onSubmit={(event) => { event.preventDefault(); if (mode === "ranked") void runRankedSearch(); }}>
@@ -162,7 +191,7 @@ export function MemoryPage({
         <label className="compact-field"><span>Scope</span><select value={scope} onChange={(event) => setScope(event.target.value)}><option value="all">All accessible</option><option value="workspace">Workspace only</option><option value="space">Space</option></select></label>
         {scope === "space" && <label className="compact-field compact-field--space"><span>Space</span><input value={spaceId} onChange={(event) => setSpaceId(event.target.value)} /></label>}
         {mode === "ranked" && <button className="icon-button memory-search-button" type="submit" disabled={rankingPending || !query.trim() || (scope === "space" && !spaceId.trim())} aria-label="Run ranked search" title="Run ranked search"><Search aria-hidden="true" /></button>}
-        <span className="result-count">{filtered.length} {filtered.length === 1 ? "memory" : "memories"}</span>
+        <span className="result-count">{filtered.length} shown · {memoryPage.total} total</span>
         <span className="ranking-status">{validatedMemories}/{memories.length} validated · {feedbackEvents.length} feedback signals</span>
         {mode === "ranked" && rankedFingerprint === fingerprint && ranked !== undefined && <span className={`ranking-status ranking-status--${ranked.ranking.kind}`}>{ranked.ranking.kind} / {ranked.ranking.id} / {ranked.ranking.corpusSize} scanned</span>}
         {rankingError !== undefined && <span className="filter-error" role="alert">{rankingError}</span>}
@@ -190,6 +219,7 @@ export function MemoryPage({
             </button>
             );
           })}
+          {mode === "filter" && <LoadMore loaded={memories.length} total={memoryPage.total} hasMore={memoryPage.cursor !== undefined} loading={memoryPage.loadingMore} error={memoryPage.loadError} onLoadMore={() => void memoryPage.loadMore()} />}
         </div>
 
         <article className="detail-pane">
@@ -235,6 +265,11 @@ export function MemoryPage({
           pending={mutationPending}
           onAccept={onAcceptCandidate}
           onReject={onRejectCandidate}
+          total={candidatePage.total}
+          hasMore={candidatePage.cursor !== undefined}
+          loadingMore={candidatePage.loadingMore}
+          loadError={candidatePage.loadError}
+          onLoadMore={() => void candidatePage.loadMore()}
         />
       )}
     </div>
@@ -246,11 +281,21 @@ function CandidateReview({
   pending,
   onAccept,
   onReject,
+  total,
+  hasMore,
+  loadingMore,
+  loadError,
+  onLoadMore,
 }: {
   readonly candidates: readonly MemoryCandidateView[];
   readonly pending: boolean;
   readonly onAccept: (candidate: MemoryCandidate) => Promise<void>;
   readonly onReject: (candidate: MemoryCandidate, reason: string) => Promise<void>;
+  readonly total: number;
+  readonly hasMore: boolean;
+  readonly loadingMore: boolean;
+  readonly loadError?: string;
+  readonly onLoadMore: () => void;
 }) {
   const [selectedId, setSelectedId] = useState<string>();
   const [reason, setReason] = useState("");
@@ -279,6 +324,7 @@ function CandidateReview({
               <span className="memory-row__meta"><span>{view.status}</span><span>{view.candidate.audience}</span><span>{Math.round(view.candidate.confidence * 100)}% confidence</span></span>
             </button>
           ))}
+          <LoadMore loaded={filtered.length} total={total} hasMore={hasMore} loading={loadingMore} error={loadError} onLoadMore={onLoadMore} />
         </div>
         <article className="detail-pane">
           {selected === undefined ? <EmptyState title="Select a proposal" /> : (

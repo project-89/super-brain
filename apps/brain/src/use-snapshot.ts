@@ -49,6 +49,11 @@ function emptySnapshot(): BrainSnapshot {
     steering: EMPTY_STEERING,
     projection: EMPTY_PROJECTION,
     workingProjection: EMPTY_PROJECTION,
+    memoryTotal: 0,
+    memoryCandidateTotal: 0,
+    trajectoryTaskTotal: 0,
+    transcriptRunTotal: 0,
+    eventTotal: 0,
     loadedAt: Date.now(),
   };
 }
@@ -56,55 +61,87 @@ function emptySnapshot(): BrainSnapshot {
 async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSnapshot> {
   const snapshot = emptySnapshot();
   if (page === "overview") {
-    const [memories, transcriptProjects, transcriptRuns] = await Promise.all([
-      client.recallMemories({ scope: { kind: "all" }, limit: 4 }),
+    const [memoryPage, candidatePage, taskPage, transcriptProjects, runPage, fleet, captureHealth] = await Promise.all([
+      client.recallMemoryPage({ scope: { kind: "all" }, limit: 4 }),
+      client.listMemoryCandidatePage({ status: "proposed", limit: 1 }),
+      client.listTrajectoryTaskPage({ limit: 1 }),
       client.listTranscriptProjects(),
-      client.listTranscriptRuns(),
+      client.listTranscriptRunPage({ limit: 100 }),
+      client.fleet(),
+      client.captureHealth().catch(() => undefined),
     ]);
-    return { ...snapshot, memories, transcriptProjects, transcriptRuns };
+    return {
+      ...snapshot,
+      memories: memoryPage.items,
+      memoryTotal: memoryPage.total,
+      memoryCandidates: candidatePage.items,
+      memoryCandidateTotal: candidatePage.total,
+      trajectoryTasks: taskPage.items,
+      trajectoryTaskTotal: taskPage.total,
+      transcriptProjects,
+      transcriptRuns: runPage.items,
+      transcriptRunTotal: runPage.total,
+      fleet,
+      ...(captureHealth === undefined ? {} : { captureHealth }),
+    };
   }
   if (page === "memory") {
-    const [memories, memoryCandidates, events] = await Promise.all([
-      client.recallMemories({ scope: { kind: "all" }, limit: 100 }),
-      client.listMemoryCandidates({ status: "proposed", limit: 1_000 }),
-      client.listEvents({ kinds: ["memory.feedback-recorded"], limit: 1_000 }),
+    const [memoryPage, candidatePage, events] = await Promise.all([
+      client.recallMemoryPage({ scope: { kind: "all" }, limit: 100 }),
+      client.listMemoryCandidatePage({ status: "proposed", limit: 100 }),
+      client.listEvents({ kinds: ["memory.feedback-recorded"] }),
     ]);
-    return { ...snapshot, memories, memoryCandidates, events };
+    return {
+      ...snapshot,
+      memories: memoryPage.items,
+      memoryTotal: memoryPage.total,
+      ...(memoryPage.nextCursor === undefined ? {} : { memoryCursor: memoryPage.nextCursor }),
+      memoryCandidates: candidatePage.items,
+      memoryCandidateTotal: candidatePage.total,
+      ...(candidatePage.nextCursor === undefined ? {} : { memoryCandidateCursor: candidatePage.nextCursor }),
+      events,
+    };
   }
   if (page === "history") {
-    const [transcriptProjects, transcriptRuns] = await Promise.all([
+    const [transcriptProjects, runPage] = await Promise.all([
       client.listTranscriptProjects(),
-      client.listTranscriptRuns(),
+      client.listTranscriptRunPage({ limit: 100 }),
     ]);
-    return { ...snapshot, transcriptProjects, transcriptRuns };
+    return {
+      ...snapshot,
+      transcriptProjects,
+      transcriptRuns: runPage.items,
+      transcriptRunTotal: runPage.total,
+      ...(runPage.nextCursor === undefined ? {} : { transcriptRunCursor: runPage.nextCursor }),
+    };
   }
   if (page === "trajectories") {
-    return { ...snapshot, trajectoryTasks: await client.listTrajectoryTasks() };
+    const taskPage = await client.listTrajectoryTaskPage({ limit: 50 });
+    return {
+      ...snapshot,
+      trajectoryTasks: taskPage.items,
+      trajectoryTaskTotal: taskPage.total,
+      ...(taskPage.nextCursor === undefined ? {} : { trajectoryTaskCursor: taskPage.nextCursor }),
+    };
   }
   if (page === "fleet") {
-    const [fleet, events] = await Promise.all([
-      client.fleet(),
-      client.listEvents({
-        includeDrafts: true,
-        kinds: ["terminal.observation", "terminal.classification"],
-        limit: 200,
-      }),
-    ]);
-    return { ...snapshot, fleet, events };
+    return { ...snapshot, fleet: await client.fleet() };
   }
   if (page === "steering") {
     const [fleet, steering] = await Promise.all([client.fleet(), client.steering()]);
     return { ...snapshot, fleet, steering };
   }
   if (page === "events") {
-    const events = await client.listEvents({ includeDrafts: true, limit: 200 });
-    return { ...snapshot, events };
+    const eventPage = await client.listEventsPage({ includeDrafts: true, limit: 100 });
+    return {
+      ...snapshot,
+      events: eventPage.items,
+      eventTotal: eventPage.total,
+      ...(eventPage.nextCursor === undefined ? {} : { eventCursor: eventPage.nextCursor }),
+    };
   }
-  const [projection, workingProjection] = await Promise.all([
-    client.projection(),
-    client.projection(true),
-  ]);
-  return { ...snapshot, projection, workingProjection };
+  const projection = await client.projection();
+  return { ...snapshot, projection };
 }
 
 export function useSnapshot(connection: ConnectionSettings, page: BrainPage) {

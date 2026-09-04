@@ -13,11 +13,14 @@
   },
   "dependencies": {
     "@clerk/react": "^6.15.1",
+    "@dagrejs/dagre": "^3.1.1",
+    "@xyflow/react": "^12.11.6",
     "lucide-react": "^1.33.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
+    "@types/dagre": "^0.7.54",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",

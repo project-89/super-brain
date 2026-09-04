@@ -3,6 +3,7 @@ import {
   Bot,
   Clock3,
   Database,
+  Eye,
   FileJson,
   FolderGit2,
   GitBranch,
@@ -14,13 +15,16 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { FoldApiClient } from "../api";
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
+import { LoadMore } from "../components/LoadMore";
 import { formatDateTime, formatRelative } from "../format";
 import type {
   TranscriptProjectSummary,
+  TranscriptArtifactRecord,
   TranscriptRun,
   TranscriptRunDetail,
   TranscriptSource,
 } from "../types";
+import { useCursorList } from "../use-cursor-list";
 
 type SourceFilter = "all" | TranscriptSource;
 
@@ -47,15 +51,84 @@ function matchesProject(run: TranscriptRun, projectId: string): boolean {
   return run.projectId === projectId || run.segments.some((segment) => segment.projectId === projectId);
 }
 
+function artifactRecordLabel(record: TranscriptArtifactRecord): string {
+  const value = record.value;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return `Record ${record.ordinal + 1}`;
+  const object = value as Record<string, unknown>;
+  const message = typeof object.message === "object" && object.message !== null && !Array.isArray(object.message)
+    ? object.message as Record<string, unknown>
+    : undefined;
+  const kind = typeof object.type === "string" ? object.type : typeof object.event === "string" ? object.event : undefined;
+  const role = typeof object.role === "string" ? object.role : typeof message?.role === "string" ? message.role : undefined;
+  return [kind, role].filter(Boolean).join(" · ") || `Record ${record.ordinal + 1}`;
+}
+
+function TranscriptArtifactRecords({ api, detail }: { readonly api: FoldApiClient; readonly detail: TranscriptRunDetail }) {
+  const [firstPage, setFirstPage] = useState<{ readonly items: readonly TranscriptArtifactRecord[]; readonly total: number; readonly nextCursor?: string }>();
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    let active = true;
+    setFirstPage(undefined);
+    setError(undefined);
+    if (!detail.artifact.stored) {
+      setError("This historical import recorded metadata only; no local transcript artifact was retained.");
+      return () => { active = false; };
+    }
+    void api.transcriptArtifactPage({ source: detail.artifact.source, sha256: detail.artifact.sha256, limit: 100 }).then(
+      (page) => { if (active) setFirstPage(page); },
+      (caught: unknown) => { if (active) setError(caught instanceof Error ? caught.message : "Transcript evidence unavailable"); },
+    );
+    return () => { active = false; };
+  }, [api, detail]);
+  if (error !== undefined) return <div className="history-evidence-error"><AlertCircle aria-hidden="true" /><span>{error}</span></div>;
+  if (firstPage === undefined) return <div className="history-loading"><span /><span /><span /></div>;
+  return <TranscriptArtifactList api={api} detail={detail} firstPage={firstPage} />;
+}
+
+function TranscriptArtifactList({ api, detail, firstPage }: {
+  readonly api: FoldApiClient;
+  readonly detail: TranscriptRunDetail;
+  readonly firstPage: { readonly items: readonly TranscriptArtifactRecord[]; readonly total: number; readonly nextCursor?: string };
+}) {
+  const page = useCursorList({
+    initialItems: firstPage.items,
+    initialTotal: firstPage.total,
+    initialCursor: firstPage.nextCursor,
+    keyOf: (record) => String(record.ordinal),
+    loadPage: (cursor) => api.transcriptArtifactPage({ source: detail.artifact.source, sha256: detail.artifact.sha256, limit: 100, cursor }),
+  });
+  return <>
+    <ol className="history-evidence-records">
+      {page.items.map((record) => <li key={record.ordinal}>
+        <header><span>{record.ordinal + 1}</span><strong>{artifactRecordLabel(record)}</strong></header>
+        <pre>{JSON.stringify(record.value, null, 2)}</pre>
+      </li>)}
+    </ol>
+    <LoadMore loaded={page.items.length} total={page.total} hasMore={page.cursor !== undefined} loading={page.loadingMore} error={page.loadError} onLoadMore={() => void page.loadMore()} />
+  </>;
+}
+
 export function HistoryPage({
   projects,
-  runs,
+  runs: initialRuns,
+  total,
+  cursor,
   api,
 }: {
   readonly projects: readonly TranscriptProjectSummary[];
   readonly runs: readonly TranscriptRun[];
+  readonly total: number;
+  readonly cursor?: string;
   readonly api: FoldApiClient;
 }) {
+  const runPage = useCursorList({
+    initialItems: initialRuns,
+    initialTotal: total,
+    initialCursor: cursor,
+    keyOf: (run) => run.id,
+    loadPage: (nextCursor) => api.listTranscriptRunPage({ limit: 100, cursor: nextCursor }),
+  });
+  const runs = runPage.items;
   const [projectId, setProjectId] = useState("all");
   const [source, setSource] = useState<SourceFilter>("all");
   const [query, setQuery] = useState("");
@@ -63,6 +136,8 @@ export function HistoryPage({
   const [detail, setDetail] = useState<TranscriptRunDetail>();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [visibleTurnCount, setVisibleTurnCount] = useState(100);
+  const [visibleActionCount, setVisibleActionCount] = useState(100);
 
   const projectNames = useMemo(
     () => new Map(projects.map(({ project }) => [project.id, project.name])),
@@ -118,8 +193,15 @@ export function HistoryPage({
   const totalActions = runs.reduce((sum, run) => sum + run.counts.actions, 0);
   const turns = detail?.chunks.flatMap((chunk) => chunk.turns) ?? [];
   const actions = detail?.chunks.flatMap((chunk) => chunk.actions) ?? [];
-  const visibleTurns = turns.slice(-40).reverse();
-  const visibleActions = actions.slice(-60).reverse();
+  const newestTurns = [...turns].reverse();
+  const newestActions = [...actions].reverse();
+  const visibleTurns = newestTurns.slice(0, visibleTurnCount);
+  const visibleActions = newestActions.slice(0, visibleActionCount);
+
+  useEffect(() => {
+    setVisibleTurnCount(100);
+    setVisibleActionCount(100);
+  }, [selectedRunId]);
 
   return (
     <div className="page page--history">
@@ -127,9 +209,9 @@ export function HistoryPage({
 
       <section className="history-metrics" aria-label="Transcript history totals">
         <div><FolderGit2 aria-hidden="true" /><span><strong>{projects.length}</strong><small>Projects</small></span></div>
-        <div><Bot aria-hidden="true" /><span><strong>{runs.length}</strong><small>Runs</small></span></div>
-        <div><MessageSquare aria-hidden="true" /><span><strong>{totalTurns}</strong><small>Turns</small></span></div>
-        <div><Wrench aria-hidden="true" /><span><strong>{totalActions}</strong><small>Actions</small></span></div>
+        <div><Bot aria-hidden="true" /><span><strong>{runPage.total}</strong><small>Runs</small></span></div>
+        <div><MessageSquare aria-hidden="true" /><span><strong>{totalTurns}</strong><small>Loaded turns</small></span></div>
+        <div><Wrench aria-hidden="true" /><span><strong>{totalActions}</strong><small>Loaded actions</small></span></div>
       </section>
 
       <div className="history-toolbar">
@@ -141,7 +223,7 @@ export function HistoryPage({
             </button>
           ))}
         </div>
-        <span className="history-toolbar__count">{filteredRuns.length} runs</span>
+        <span className="history-toolbar__count">{filteredRuns.length} shown · {runPage.total} total</span>
       </div>
 
       <section className="history-workspace">
@@ -149,7 +231,7 @@ export function HistoryPage({
           <header><span className="eyebrow">Projects</span><strong>{projects.length}</strong></header>
           <button type="button" className={projectId === "all" ? "is-selected" : undefined} onClick={() => setProjectId("all")}>
             <span className="history-project-icon"><Database aria-hidden="true" /></span>
-            <span><strong>All projects</strong><small>{runs.length} runs</small></span>
+            <span><strong>All projects</strong><small>{runPage.total} runs</small></span>
           </button>
           {projects.map((summary) => (
             <button key={summary.project.id} type="button" className={projectId === summary.project.id ? "is-selected" : undefined} onClick={() => setProjectId(summary.project.id)}>
@@ -177,6 +259,14 @@ export function HistoryPage({
               <span className="history-run-counts">{run.counts.turns}t · {run.counts.actions}a</span>
             </button>
           ))}
+          <LoadMore
+            loaded={runs.length}
+            total={runPage.total}
+            hasMore={runPage.cursor !== undefined}
+            loading={runPage.loadingMore}
+            error={runPage.loadError}
+            onLoadMore={() => void runPage.loadMore()}
+          />
         </div>
 
         <article className="history-detail">
@@ -208,6 +298,11 @@ export function HistoryPage({
                 <div><dt>Anonymization</dt><dd>{detail.artifact.anonymizationPolicy ?? "none"}</dd></div>
               </dl>
 
+              <section className="history-evidence">
+                <header><span><span className="eyebrow">Local artifact</span><h3><Eye aria-hidden="true" />Transcript evidence</h3></span><strong>{detail.artifact.contentPolicy}</strong></header>
+                <TranscriptArtifactRecords key={detail.artifact.sha256} api={api} detail={detail} />
+              </section>
+
               <section className="history-segments">
                 <header><span className="eyebrow">Context segments</span><strong>{detail.run.segments.length}</strong></header>
                 <div>
@@ -225,25 +320,25 @@ export function HistoryPage({
                 <section>
                   <header><span className="eyebrow">Turns</span><strong>{turns.length}</strong></header>
                   {visibleTurns.length === 0 ? <EmptyState title="No captured turns" /> : (
-                    <ol>{visibleTurns.map((turn) => (
+                    <><ol>{visibleTurns.map((turn) => (
                       <li key={turn.id}>
                         <Clock3 aria-hidden="true" />
                         <span><strong>Turn {turn.ordinal + 1}</strong><small>{turn.roles.join(" · ")}</small></span>
                         <i>{turn.messageCount}m · {turn.actionCount}a</i>
                       </li>
-                    ))}</ol>
+                    ))}</ol><LoadMore loaded={visibleTurns.length} total={turns.length} hasMore={visibleTurns.length < turns.length} loading={false} onLoadMore={() => setVisibleTurnCount((current) => Math.min(current + 100, turns.length))} /></>
                   )}
                 </section>
                 <section>
                   <header><span className="eyebrow">Observable actions</span><strong>{actions.length}</strong></header>
                   {visibleActions.length === 0 ? <EmptyState title="No captured actions" /> : (
-                    <ol>{visibleActions.map((action) => (
+                    <><ol>{visibleActions.map((action) => (
                       <li key={action.id}>
                         <Wrench aria-hidden="true" />
                         <span><strong>{action.name ?? action.kind}</strong><small>{action.kind}</small></span>
                         <i>{action.status ?? "observed"}</i>
                       </li>
-                    ))}</ol>
+                    ))}</ol><LoadMore loaded={visibleActions.length} total={actions.length} hasMore={visibleActions.length < actions.length} loading={false} onLoadMore={() => setVisibleActionCount((current) => Math.min(current + 100, actions.length))} /></>
                   )}
                 </section>
               </div>

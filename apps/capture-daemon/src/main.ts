@@ -112,7 +112,7 @@ async function run(args: readonly string[]): Promise<void> {
     const result = await updateCaptureConfig(path, patch);
     setTimeout(() => process.kill(process.pid, "SIGTERM"), 100).unref();
     return result.config;
-  });
+  }, vaultEncryptionKey);
   await server.start();
   processor.start();
   const heartbeats = setInterval(() => void engine.heartbeat().catch(() => undefined), config.heartbeatIntervalMs);

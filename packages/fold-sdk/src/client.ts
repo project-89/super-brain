@@ -115,6 +115,8 @@ import type {
   MemoryCandidateMutationResult,
   MemoryCandidateRejectionResult,
   MemoryMutationResult,
+  MemoryPage,
+  MemoryPageCursor,
   MemoryRanker,
   RankedMemoryRecallRequest,
   RankedMemoryRecallResult,
@@ -137,7 +139,6 @@ const MEMORY_EVENT_KINDS = new Set([
   "memory.revised",
   "memory.forgotten",
 ]);
-const MAX_MEMORY_RANKING_CORPUS = 10_000;
 const TRAJECTORY_EVENT_KINDS = new Set([
   "trajectory.tree-recorded",
   "trajectory.recorded",
@@ -1169,6 +1170,41 @@ export class FoldSdk {
     });
   }
 
+  recallMemoryPage(
+    access: FoldSdkAccessContext,
+    request: Omit<RecallRequest, "limit" | "candidates"> & {
+      readonly limit?: number;
+      readonly cursor?: MemoryPageCursor;
+    } = {},
+  ): Promise<MemoryPage> {
+    return this.enqueue(async () => {
+      const { limit = MAX_RECALL_LIMIT, cursor, ...filters } = request;
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_RECALL_LIMIT) {
+        throw new FoldSdkError(`memory page limit must be an integer within [1, ${MAX_RECALL_LIMIT}]`);
+      }
+      if (cursor !== undefined && (!Number.isFinite(cursor.createdAt) || cursor.memoryId.trim().length === 0)) {
+        throw new FoldSdkError("memory page cursor is invalid");
+      }
+      const { projection } = await this.memoryProjection(access);
+      const corpus = recallMemoryCorpus(projection, access, filters);
+      const remaining = cursor === undefined
+        ? corpus
+        : corpus.filter((memory) =>
+          memory.createdAt < cursor.createdAt ||
+          (memory.createdAt === cursor.createdAt && memory.id > cursor.memoryId)
+        );
+      const page = remaining.slice(0, limit);
+      const last = page.at(-1);
+      return {
+        memories: page.map((memory) => ({ memory })),
+        total: corpus.length,
+        ...(last !== undefined && remaining.length > page.length
+          ? { nextCursor: { createdAt: last.createdAt, memoryId: last.id } }
+          : {}),
+      };
+    });
+  }
+
   rankMemories(
     access: FoldSdkAccessContext,
     request: RankedMemoryRecallRequest,
@@ -1189,7 +1225,7 @@ export class FoldSdk {
         throw new FoldSdkError(`memory ranking limit must be an integer within [1, ${MAX_RECALL_LIMIT}]`);
       }
       const { projection } = await this.memoryProjection(access);
-      const corpus = recallMemoryCorpus(projection, access, filters).slice(0, MAX_MEMORY_RANKING_CORPUS);
+      const corpus = recallMemoryCorpus(projection, access, filters);
       const candidates = await ranker.rank({
         ...(access.organizationId === undefined ? {} : { organizationId: access.organizationId }),
         workspaceId: access.workspaceId,

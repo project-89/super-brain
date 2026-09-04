@@ -85,6 +85,9 @@ export interface FoldOptions {
   readonly cursor?: ForkCursor;
   readonly components?: ComponentRegistry;
   readonly existingCreate?: "error" | "replace";
+  readonly retainApplied?: boolean;
+  readonly validatedInput?: boolean;
+  readonly orderedInput?: boolean;
 }
 
 export class FoldValidationError extends Error {
@@ -240,6 +243,7 @@ function applyChange(
   changeIndex: number,
   components: ComponentRegistry,
   existingCreate: "error" | "replace",
+  retainApplied: boolean,
 ): void {
   switch (change.verb) {
     case "create": {
@@ -356,28 +360,28 @@ function applyChange(
     }
   }
 
-  state.appliedChanges.push({ eventId: event.id, changeIndex, change });
+  if (retainApplied) state.appliedChanges.push({ eventId: event.id, changeIndex, change });
 }
 
-export function fold(
+function applyEntries(
+  state: FoldState,
   inputEntries: readonly FoldLogEntry[],
   options: FoldOptions,
 ): FoldState {
-  const parsedEntries = inputEntries.map(({ event, status }) => ({
-    event: eventSchema.parse(event),
-    status,
-  }));
+  const parsedEntries = options.validatedInput === true
+    ? inputEntries
+    : inputEntries.map(({ event, status }) => ({ event: eventSchema.parse(event), status }));
   const included = parsedEntries.filter(
     ({ status }) => options.include === "canon+draft" || status === "canon",
   );
   const entries = options.cursor === undefined
-    ? sortLog(included)
+    ? options.orderedInput === true ? included : sortLog(included)
     : forkAt(included, options.cursor);
 
-  const seenEventIds = new Set<string>();
-  const state = emptyState();
+  const seenEventIds = new Set(state.appliedEvents.map(({ id }) => id));
   const components = { ...coreComponentRegistry, ...options.components };
   const existingCreate = options.existingCreate ?? "error";
+  const retainApplied = options.retainApplied ?? true;
 
   for (const { event } of entries) {
     if (seenEventIds.has(event.id)) {
@@ -387,12 +391,28 @@ export function fold(
     assertUniqueEventTargets(event);
 
     event.changes.forEach((change, changeIndex) => {
-      applyChange(state, event, change, changeIndex, components, existingCreate);
+      applyChange(state, event, change, changeIndex, components, existingCreate, retainApplied);
     });
-    state.appliedEvents.push(event);
+    if (retainApplied) state.appliedEvents.push(event);
   }
 
   return state;
+}
+
+export function fold(
+  inputEntries: readonly FoldLogEntry[],
+  options: FoldOptions,
+): FoldState {
+  return applyEntries(emptyState(), inputEntries, options);
+}
+
+/** Applies an already-ordered append-only suffix to an existing projection. */
+export function continueFold(
+  state: FoldState,
+  inputEntries: readonly FoldLogEntry[],
+  options: FoldOptions,
+): FoldState {
+  return applyEntries(state, inputEntries, options);
 }
 
 function stableJson(value: unknown): unknown {

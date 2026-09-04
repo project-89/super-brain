@@ -36,6 +36,7 @@ const OBSERVATION_KINDS: ReadonlySet<string> = new Set([
   "human_decision",
   "steering_applied",
   "task_complete",
+  "harness_event",
   "output",
 ]);
 const TERMINAL_STATES: ReadonlySet<string> = new Set([

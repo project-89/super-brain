@@ -13,7 +13,7 @@ async function git(cwd: string, args: readonly string[]): Promise<string | undef
   try {
     const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
       timeout: 750,
-      maxBuffer: 128 * 1024,
+      maxBuffer: 16 * 1024 * 1024,
       encoding: "utf8",
     });
     const value = stdout.trim();
@@ -33,7 +33,7 @@ function statusPaths(status: string | undefined): readonly string[] {
     if (line.length < 4) return [];
     const path = line.slice(3).split(" -> ").at(-1)?.replace(/^"|"$/g, "").trim();
     return path === undefined || path.length === 0 ? [] : [path];
-  }))].sort().slice(0, 200);
+  }))].sort();
 }
 
 export async function refreshProject(project: ProjectIdentity): Promise<ProjectIdentity> {

@@ -132,6 +132,17 @@ export interface MemoryCandidateListOptions {
   readonly limit?: number;
 }
 
+export interface MemoryPageCursor {
+  readonly createdAt: number;
+  readonly memoryId: string;
+}
+
+export interface MemoryPage {
+  readonly memories: readonly RecalledMemory[];
+  readonly total: number;
+  readonly nextCursor?: MemoryPageCursor;
+}
+
 export type MemoryRankingKind = "lexical" | "semantic";
 
 export interface MemoryRankerDescriptor {

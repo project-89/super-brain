@@ -91,6 +91,7 @@ export type TerminalObservationKind =
   | "human_decision"
   | "steering_applied"
   | "task_complete"
+  | "harness_event"
   | "output";
 
 export interface TerminalObservation {

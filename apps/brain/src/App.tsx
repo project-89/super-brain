@@ -164,8 +164,13 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
       return (
         <MemoryPage
           memories={snapshot.memories}
+          memoryTotal={snapshot.memoryTotal}
+          memoryCursor={snapshot.memoryCursor}
           candidates={snapshot.memoryCandidates}
+          candidateTotal={snapshot.memoryCandidateTotal}
+          candidateCursor={snapshot.memoryCandidateCursor}
           feedbackEvents={snapshot.events}
+          api={api}
           onRank={(options) => api.rankMemories(options)}
           onCreate={() => setMemoryDialog({ open: true })}
           onEdit={(memory) => setMemoryDialog({ open: true, memory })}
@@ -215,15 +220,33 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
         />
       );
     }
-    if (page === "events") return <EventsPage entries={snapshot.events} />;
+    if (page === "events") {
+      return <EventsPage entries={snapshot.events} total={snapshot.eventTotal} cursor={snapshot.eventCursor} api={api} />;
+    }
     if (page === "trajectories") {
-      return <TrajectoriesPage tasks={snapshot.trajectoryTasks} api={api} onImport={() => setTrajectoryImportOpen(true)} />;
+      return (
+        <TrajectoriesPage
+          tasks={snapshot.trajectoryTasks}
+          total={snapshot.trajectoryTaskTotal}
+          cursor={snapshot.trajectoryTaskCursor}
+          api={api}
+          onImport={() => setTrajectoryImportOpen(true)}
+        />
+      );
     }
     if (page === "history") {
-      return <HistoryPage projects={snapshot.transcriptProjects} runs={snapshot.transcriptRuns} api={api} />;
+      return (
+        <HistoryPage
+          projects={snapshot.transcriptProjects}
+          runs={snapshot.transcriptRuns}
+          total={snapshot.transcriptRunTotal}
+          cursor={snapshot.transcriptRunCursor}
+          api={api}
+        />
+      );
     }
     if (page === "fleet") {
-      return <FleetPage response={snapshot.fleet} events={snapshot.events} />;
+      return <FleetPage response={snapshot.fleet} api={api} />;
     }
     if (page === "steering") {
       return <SteeringPage response={snapshot.steering} fleet={snapshot.fleet.fleet.sessions} api={api} onRefresh={() => refresh(true)} />;
@@ -231,12 +254,8 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
     if (page === "state") {
       return (
         <StatePage
-          canonicalState={snapshot.projection.state}
-          workingState={snapshot.workingProjection.state}
-          canonicalTotal={snapshot.projection.total}
-          canonicalProjected={snapshot.projection.projected}
-          workingTotal={snapshot.workingProjection.total}
-          workingProjected={snapshot.workingProjection.projected}
+          canonical={snapshot.projection}
+          api={api}
         />
       );
     }

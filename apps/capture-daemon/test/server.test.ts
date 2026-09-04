@@ -34,8 +34,10 @@ describe("capture operator settings", () => {
     });
     const config = { ...parsed, port: 0 };
     const spool = new DurableSpool(config.stateRoot);
-    const engine = new CaptureEngine(config, new StateStore(config.stateRoot), new HookVault(config.vaultRoot), spool);
+    const vault = new HookVault(config.vaultRoot);
+    const engine = new CaptureEngine(config, new StateStore(config.stateRoot), vault, spool);
     await engine.initialize();
+    const artifact = await vault.store("codex", { session_id: "session-a", hook_event_name: "PostToolUse", output: "complete" }, 1);
     const update = vi.fn(async (patch) => ({ ...config, ...patch }));
     const server = new CaptureHttpServer(config, engine, spool, update);
     const address = await server.start();
@@ -65,6 +67,14 @@ describe("capture operator settings", () => {
         restartRequired: true,
       });
       expect(update).toHaveBeenCalledOnce();
+
+      const artifactUrl = `http://${address.host}:${address.port}/hook-artifacts/codex/${artifact.id}`;
+      expect((await fetch(artifactUrl)).status).toBe(401);
+      const artifactResponse = await fetch(artifactUrl, { headers });
+      expect(artifactResponse.status).toBe(200);
+      await expect(artifactResponse.json()).resolves.toMatchObject({
+        artifact: { id: artifact.id, source: "codex", payload: { output: "complete" } },
+      });
     } finally {
       await server.close();
     }

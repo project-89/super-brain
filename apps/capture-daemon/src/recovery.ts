@@ -100,7 +100,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
       });
     } else if (name === "HermesStep") {
       const tools = Array.isArray(payload.tool_names)
-        ? payload.tool_names.filter((value): value is string => typeof value === "string" && value.trim().length > 0).slice(0, 50)
+        ? payload.tool_names.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         : [];
       for (const rawTool of tools) {
         const tool = bounded(rawTool.trim(), 200);

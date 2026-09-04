@@ -247,13 +247,48 @@ describe("capture daemon", () => {
     };
     const merged = mergedHookSettings(settings, "/repo/dist/main.js", "/config.json", "claude-code");
     expect(merged.model).toBe("claude-sonnet");
-    const stop = (merged.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>).Stop;
+    const hooks = merged.hooks as Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+    const stop = hooks.Stop;
     expect(stop).toBeDefined();
     expect(stop!.map((group) => group.hooks[0]?.command)).toEqual([
       "notify-send done",
       expect.stringContaining("super-brain-capture"),
     ]);
     expect(Object.keys(merged.hooks as object)).toContain("PostToolUseFailure");
+    expect(hooks.FileChanged?.[0]?.matcher).toContain("package.json");
+  });
+
+  it("pages every changed path into canonical observations and maps watched file changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-path-pages-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "path-pages", cwd: process.cwd() };
+    await engine.ingest("claude-code", { ...common, hook_event_name: "SessionStart" });
+    await engine.ingest("claude-code", {
+      ...common,
+      hook_event_name: "PostToolUse",
+      tool_name: "Edit",
+      tool_input: { file_path: Array.from({ length: 205 }, (_, index) => join(process.cwd(), `file-${index}.ts`)) },
+    });
+    await engine.ingest("claude-code", {
+      ...common,
+      hook_event_name: "FileChanged",
+      file_path: join(process.cwd(), "package.json"),
+      event: "change",
+    });
+
+    const changes = (await spool.list()).flatMap(({ job }) => {
+      if (job.kind !== "event" || job.event.kind !== "terminal.observation") return [];
+      const change = job.event.changes[0];
+      if (change?.verb !== "create" || change.after.observation !== "file_changed") return [];
+      return [change.after.data as Record<string, unknown>];
+    });
+    const paged = changes.filter((data) => data.pathPageCount === 2);
+    expect(paged).toHaveLength(2);
+    expect(paged.flatMap((data) => data.paths as string[])).toHaveLength(205);
+    expect(changes.some((data) => (data.paths as string[]).some((path) => path.endsWith("package.json")) && data.event === "change")).toBe(true);
   });
 
   it("groups repeated prompts into one shared task with stable stage nodes", async () => {

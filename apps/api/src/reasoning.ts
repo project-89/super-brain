@@ -7,6 +7,13 @@ export type ReasoningProviderKind = "extractive" | "model";
 export interface ReasoningProviderDescriptor {
   readonly id: string;
   readonly kind: ReasoningProviderKind;
+  readonly provider?: "local" | "gemini" | "claude" | "codex" | "custom";
+  readonly model?: string;
+}
+
+export interface ReasoningProviderStatus extends ReasoningProviderDescriptor {
+  readonly configured: boolean;
+  readonly isDefault: boolean;
 }
 
 export interface ReasoningEvidence {
@@ -40,7 +47,7 @@ function compactText(value: JsonValue): string {
 }
 
 export class LocalEvidenceReasoner implements ReasoningProvider {
-  readonly descriptor = { id: "local-evidence-v1", kind: "extractive" } as const;
+  readonly descriptor = { id: "local-evidence-v1", kind: "extractive", provider: "local" } as const;
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
     const evidence = request.evidence.slice(0, 3);
@@ -62,6 +69,182 @@ export class LocalEvidenceReasoner implements ReasoningProvider {
       ].join(" "),
       citations: evidence.map(({ memoryId }) => memoryId),
     };
+  }
+}
+
+const resultSchema = z.object({ answer: z.string(), citations: z.array(z.string()) }).strict();
+const resultJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["answer", "citations"],
+  properties: {
+    answer: { type: "string" },
+    citations: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+function modelPrompt(request: ReasoningProviderRequest): string {
+  return JSON.stringify({
+    task: "Answer the question using only the supplied authorized memory evidence and optional steering state.",
+    question: request.question,
+    evidence: request.evidence,
+    ...(request.steering === undefined ? {} : { steering: request.steering }),
+    constraints: {
+      output: { answer: "string", citations: "unique memoryId strings used by the answer" },
+      citeOnlyMemoryIds: request.evidence.map(({ memoryId }) => memoryId),
+      noUnsupportedClaims: true,
+    },
+  });
+}
+
+function parsedModelResult(text: string): ReasoningProviderResult {
+  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try {
+    return resultSchema.parse(JSON.parse(trimmed));
+  } catch {
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start < 0 || end <= start) throw new TypeError("reasoning provider returned invalid structured output");
+    return resultSchema.parse(JSON.parse(trimmed.slice(start, end + 1)));
+  }
+}
+
+async function providerFailure(response: Response, provider: string): Promise<never> {
+  const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 1_000);
+  throw new Error(`${provider} reasoning failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+}
+
+interface NativeReasonerOptions {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly timeoutMs?: number;
+  readonly fetch?: typeof fetch;
+}
+
+abstract class NativeModelReasoner implements ReasoningProvider {
+  abstract readonly descriptor: ReasoningProviderDescriptor;
+  abstract answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult>;
+  protected readonly apiKey: string;
+  protected readonly model: string;
+  protected readonly timeoutMs: number;
+  protected readonly fetchImpl: typeof fetch;
+
+  constructor(options: NativeReasonerOptions) {
+    this.apiKey = options.apiKey.trim();
+    this.model = options.model.trim();
+    if (!this.apiKey || !this.model) throw new TypeError("reasoning provider API key and model are required");
+    this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.fetchImpl = options.fetch ?? fetch;
+  }
+}
+
+export class GeminiReasoner extends NativeModelReasoner {
+  readonly descriptor: ReasoningProviderDescriptor;
+  constructor(options: NativeReasonerOptions) {
+    super(options);
+    this.descriptor = { id: `gemini:${this.model}`, kind: "model", provider: "gemini", model: this.model };
+  }
+
+  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+    const response = await this.fetchImpl(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
+        signal: AbortSignal.timeout(this.timeoutMs),
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: modelPrompt(request) }] }],
+          generationConfig: { responseMimeType: "application/json", responseJsonSchema: resultJsonSchema },
+        }),
+      },
+    );
+    if (!response.ok) return providerFailure(response, "Gemini");
+    const body = await response.json() as { candidates?: readonly { content?: { parts?: readonly { text?: string }[] } }[] };
+    const text = body.candidates?.flatMap(({ content }) => content?.parts ?? []).map((part) => part.text ?? "").join("") ?? "";
+    return parsedModelResult(text);
+  }
+}
+
+export class CodexReasoner extends NativeModelReasoner {
+  readonly descriptor: ReasoningProviderDescriptor;
+  constructor(options: NativeReasonerOptions) {
+    super(options);
+    this.descriptor = { id: `codex:${this.model}`, kind: "model", provider: "codex", model: this.model };
+  }
+
+  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+    const response = await this.fetchImpl("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "authorization": `Bearer ${this.apiKey}`, "content-type": "application/json" },
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({
+        model: this.model,
+        input: modelPrompt(request),
+        text: { format: { type: "json_schema", name: "memory_answer", strict: true, schema: resultJsonSchema } },
+      }),
+    });
+    if (!response.ok) return providerFailure(response, "Codex");
+    const body = await response.json() as {
+      output_text?: string;
+      output?: readonly { content?: readonly { type?: string; text?: string }[] }[];
+    };
+    const text = body.output_text ?? body.output?.flatMap(({ content }) => content ?? []).map((item) => item.text ?? "").join("") ?? "";
+    return parsedModelResult(text);
+  }
+}
+
+export class ClaudeReasoner extends NativeModelReasoner {
+  readonly descriptor: ReasoningProviderDescriptor;
+  constructor(options: NativeReasonerOptions) {
+    super(options);
+    this.descriptor = { id: `claude:${this.model}`, kind: "model", provider: "claude", model: this.model };
+  }
+
+  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+    const response = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "anthropic-version": "2023-06-01", "content-type": "application/json", "x-api-key": this.apiKey },
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: 4_096,
+        system: "Return only a JSON object matching the requested output contract.",
+        messages: [{ role: "user", content: modelPrompt(request) }],
+      }),
+    });
+    if (!response.ok) return providerFailure(response, "Claude");
+    const body = await response.json() as { content?: readonly { type?: string; text?: string }[] };
+    return parsedModelResult(body.content?.map((item) => item.text ?? "").join("") ?? "");
+  }
+}
+
+export class ReasoningProviderCatalog {
+  private readonly providers: ReadonlyMap<string, ReasoningProvider>;
+  readonly statuses: readonly ReasoningProviderStatus[];
+  readonly defaultId: string;
+
+  constructor(options: {
+    readonly providers: readonly ReasoningProvider[];
+    readonly known?: readonly ReasoningProviderDescriptor[];
+    readonly defaultProvider?: string;
+  }) {
+    if (options.providers.length === 0) throw new TypeError("at least one reasoning provider is required");
+    this.providers = new Map(options.providers.map((provider) => [provider.descriptor.id, provider]));
+    const requested = options.defaultProvider;
+    this.defaultId = options.providers.find(({ descriptor }) => descriptor.id === requested || descriptor.provider === requested)?.descriptor.id
+      ?? options.providers[0]!.descriptor.id;
+    const known = options.known ?? options.providers.map(({ descriptor }) => descriptor);
+    this.statuses = known.map((descriptor) => ({
+      ...descriptor,
+      configured: this.providers.has(descriptor.id),
+      isDefault: descriptor.id === this.defaultId,
+    }));
+  }
+
+  provider(id?: string): ReasoningProvider {
+    const provider = this.providers.get(id ?? this.defaultId);
+    if (provider === undefined) throw new TypeError(`reasoning provider is unavailable: ${id}`);
+    return provider;
   }
 }
 
@@ -107,7 +290,7 @@ export class HttpModelReasoner implements ReasoningProvider {
       throw new TypeError("reasoning provider input budget must be an integer within [1000, 1000000]");
     }
     this.fetchImpl = options.fetch ?? fetch;
-    this.descriptor = { id: `http-model:${this.model}`, kind: "model" };
+    this.descriptor = { id: `http-model:${this.model}`, kind: "model", provider: "custom", model: this.model };
   }
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {

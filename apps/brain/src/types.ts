@@ -18,6 +18,33 @@ export interface CapturePolicySettings {
   readonly anonymizationPolicy: "none" | "pseudonymous" | "strict";
 }
 
+export interface CaptureHealth {
+  readonly status: "ok";
+  readonly activeSessions: number;
+  readonly knownSessions: number;
+  readonly unfinishedSessions: number;
+  readonly staleSessions: number;
+  readonly receivedHooks: number;
+  readonly duplicateHooks: number;
+  readonly lastHookAt?: string;
+  readonly truncatedSteps: number;
+  readonly finalizedSessions: number;
+  readonly finalizedUnits: number;
+  readonly oldestUnfinishedAgeMs?: number;
+  readonly pendingJobs: number;
+  readonly failedJobs: number;
+  readonly lastFailureAt?: string;
+  readonly lastFailure?: string;
+  readonly relayFailures: { readonly count: number; readonly lastFailureAt?: string; readonly lastFailure?: string };
+  readonly policy: {
+    readonly reasoning: "exclude" | "include";
+    readonly encryptedReasoning: "retain" | "exclude";
+    readonly reasoningTrees: "exclude" | "summaries";
+    readonly anonymization: "none" | "pseudonymous" | "strict";
+    readonly treeSnapshotEveryEvents: number;
+  };
+}
+
 export interface EventAuthor {
   readonly kind: "human" | "simulation" | "agent" | "rule" | "generator" | "ingest" | "sensor";
   readonly id: string;
@@ -176,6 +203,18 @@ export interface ProjectionResponse {
   readonly state: SerializedFoldState;
   readonly total?: number;
   readonly projected?: number;
+  readonly section?: ProjectionSection;
+  readonly sectionTotal?: number;
+  readonly nextCursor?: string;
+  readonly counts?: Readonly<Record<ProjectionSection, number>>;
+}
+
+export type ProjectionSection = "nodes" | "edges" | "values" | "redirects" | "diagnostics";
+
+export interface CursorPage<T> {
+  readonly items: readonly T[];
+  readonly total: number;
+  readonly nextCursor?: string;
 }
 
 export type BrainPage = "overview" | "memory" | "history" | "trajectories" | "fleet" | "steering" | "events" | "state";
@@ -191,10 +230,30 @@ export interface BrainSnapshot {
   readonly steering: SteeringResponse;
   readonly projection: ProjectionResponse;
   readonly workingProjection: ProjectionResponse;
+  readonly memoryTotal: number;
+  readonly memoryCursor?: string;
+  readonly memoryCandidateTotal: number;
+  readonly memoryCandidateCursor?: string;
+  readonly trajectoryTaskTotal: number;
+  readonly trajectoryTaskCursor?: string;
+  readonly transcriptRunTotal: number;
+  readonly transcriptRunCursor?: string;
+  readonly eventTotal: number;
+  readonly eventCursor?: string;
+  readonly captureHealth?: CaptureHealth;
   readonly loadedAt: number;
 }
 
 export type TranscriptSource = "claude-code" | "codex";
+export type HookSource = TranscriptSource | "hermes" | "unknown";
+
+export interface HookArtifact {
+  readonly id: string;
+  readonly source: HookSource;
+  readonly receivedAt: string;
+  readonly eventTime: number;
+  readonly payload: Readonly<Record<string, JsonValue>>;
+}
 export type TranscriptIdentityResolution = "resolved" | "estimated" | "unassigned";
 
 export interface TranscriptProject {
@@ -262,6 +321,11 @@ export interface TranscriptArtifact {
   readonly anonymizationPolicy?: "none" | "pseudonymous" | "strict";
   readonly stored: boolean;
   readonly redactionCount: number;
+}
+
+export interface TranscriptArtifactRecord {
+  readonly ordinal: number;
+  readonly value: JsonValue;
 }
 
 export interface TranscriptTurn {
@@ -497,6 +561,8 @@ export interface TrajectoryTaskReport {
       readonly detail?: string;
     };
   }[];
+  readonly runTotal?: number;
+  readonly runCursor?: string;
 }
 
 export interface TrajectoryImportBundle {
@@ -630,7 +696,7 @@ export type SteeringIntentionEnd =
 export interface ReasoningResponse {
   readonly answer: string;
   readonly citations: readonly string[];
-  readonly provider: { readonly id: string; readonly kind: "extractive" | "model" };
+  readonly provider: ReasoningProviderStatus;
   readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic"; readonly corpusSize: number };
   readonly evidence: readonly {
     readonly memoryId: string;
@@ -639,4 +705,13 @@ export interface ReasoningResponse {
     readonly score?: number;
   }[];
   readonly steering?: SteeringActorSnapshot;
+}
+
+export interface ReasoningProviderStatus {
+  readonly id: string;
+  readonly kind: "extractive" | "model";
+  readonly provider?: "local" | "gemini" | "claude" | "codex" | "custom";
+  readonly model?: string;
+  readonly configured?: boolean;
+  readonly isDefault?: boolean;
 }

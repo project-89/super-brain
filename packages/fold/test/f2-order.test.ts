@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   EventOrderError,
+  continueFold,
   fold,
   forkAt,
   validateProducerOrder,
@@ -69,5 +70,16 @@ describe("F2: deterministic event order and fork cursors", () => {
     const alpha = fixtureEvent({ id: "event_alpha", at: { t: 42, worldDate: "2026-08-14" } });
 
     expect(() => validateProducerOrder([zulu, alpha])).toThrow(/not lexicographically monotonic/);
+  });
+
+  it("continues a projection without retaining the applied event payloads", () => {
+    const state = fold([canon(first)], { include: "canon", retainApplied: false });
+    expect(state.appliedEvents).toEqual([]);
+    expect(state.appliedChanges).toEqual([]);
+
+    continueFold(state, [canon(second)], { include: "canon", retainApplied: false });
+    expect(state.appliedEvents).toEqual([]);
+    expect(state.appliedChanges).toEqual([]);
+    expect([...state.values.values()]).toContain("closed");
   });
 });

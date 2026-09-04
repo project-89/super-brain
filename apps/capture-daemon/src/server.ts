@@ -2,7 +2,8 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { CaptureEngine } from "./capture.js";
-import { DurableSpool, readRelayFailureSummary } from "./storage.js";
+import { DurableSpool, readHookVaultArtifact, readRelayFailureSummary } from "./storage.js";
+import { readTranscriptArtifactPage, type TranscriptVaultSource } from "./transcript-vault.js";
 import type { CaptureConfig, CapturePolicyPatch, CapturePolicySettings, HookSource } from "./types.js";
 
 function send(response: ServerResponse, status: number, body: unknown): void {
@@ -88,6 +89,7 @@ export class CaptureHttpServer {
     private readonly engine: CaptureEngine,
     private readonly spool: DurableSpool,
     private readonly updatePolicy?: (patch: CapturePolicyPatch) => Promise<CaptureConfig>,
+    private readonly vaultEncryptionKey?: Uint8Array,
   ) {}
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
@@ -152,6 +154,52 @@ export class CaptureHttpServer {
           return;
         }
         send(response, 405, { error: "method_not_allowed" });
+        return;
+      }
+      const artifactMatch = /^\/artifacts\/(claude-code|codex)\/([a-f0-9]{64})$/i.exec(url.pathname);
+      if (artifactMatch !== null) {
+        if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) {
+          send(response, 401, { error: "unauthorized" });
+          return;
+        }
+        if (request.method !== "GET") {
+          send(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit === null ? 100 : Number(rawLimit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new TypeError("limit must be an integer within [1, 200]");
+        send(response, 200, await readTranscriptArtifactPage({
+          vaultRoot: this.config.vaultRoot,
+          ...(this.vaultEncryptionKey === undefined ? {} : { encryptionKey: this.vaultEncryptionKey }),
+          source: artifactMatch[1] as TranscriptVaultSource,
+          sha256: artifactMatch[2]!.toLowerCase(),
+          limit,
+          rawCursor: url.searchParams.get("cursor"),
+        }));
+        return;
+      }
+      const hookArtifactMatch = /^\/hook-artifacts\/(claude-code|codex|hermes|unknown)\/([a-f0-9]{64})$/i.exec(url.pathname);
+      if (hookArtifactMatch !== null) {
+        if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) {
+          send(response, 401, { error: "unauthorized" });
+          return;
+        }
+        if (request.method !== "GET") {
+          send(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        const artifact = await readHookVaultArtifact({
+          vaultRoot: this.config.vaultRoot,
+          source: hookArtifactMatch[1]!.toLowerCase() as HookSource,
+          artifactId: hookArtifactMatch[2]!.toLowerCase(),
+          ...(this.vaultEncryptionKey === undefined ? {} : { encryptionKey: this.vaultEncryptionKey }),
+        });
+        if (artifact === undefined) {
+          send(response, 404, { error: "artifact_not_found" });
+          return;
+        }
+        send(response, 200, { artifact });
         return;
       }
       if (request.method !== "POST" || !["/hook", "/checkpoint", "/decision"].includes(url.pathname)) {

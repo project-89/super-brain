@@ -13,7 +13,16 @@ import {
 import { JournalSdkRegistry, PostgresSdkRegistry } from "./registry.js";
 import { FixedWindowRateLimiter } from "./rate-limit.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
-import { HttpModelReasoner, LocalEvidenceReasoner } from "./reasoning.js";
+import {
+  ClaudeReasoner,
+  CodexReasoner,
+  GeminiReasoner,
+  HttpModelReasoner,
+  LocalEvidenceReasoner,
+  ReasoningProviderCatalog,
+  type ReasoningProvider,
+  type ReasoningProviderDescriptor,
+} from "./reasoning.js";
 import { createApiServer } from "./server.js";
 import { HttpMemoryEmbeddingProvider } from "./embeddings.js";
 import { installApiLaunchAgent } from "./install.js";
@@ -199,29 +208,45 @@ async function main(): Promise<void> {
   );
   if (fleetOrphanAfterMs === 0) throw new TypeError("FOLD_FLEET_ORPHAN_AFTER_MS must be greater than zero");
   const corsOrigins = corsOriginsFromEnvironment(process.env.FOLD_API_CORS_ORIGINS);
+  const reasoningTimeoutMs = nonNegativeIntegerFromEnvironment(
+    "FOLD_REASONING_TIMEOUT_MS",
+    process.env.FOLD_REASONING_TIMEOUT_MS,
+    60_000,
+  );
+  const geminiModel = process.env.FOLD_GEMINI_MODEL ?? "gemini-flash-latest";
+  const claudeModel = process.env.FOLD_CLAUDE_MODEL ?? "claude-sonnet-5";
+  const codexModel = process.env.FOLD_CODEX_MODEL ?? "gpt-5.3-codex";
+  const knownProviders: ReasoningProviderDescriptor[] = [
+    { id: `gemini:${geminiModel}`, kind: "model", provider: "gemini", model: geminiModel },
+    { id: `claude:${claudeModel}`, kind: "model", provider: "claude", model: claudeModel },
+    { id: `codex:${codexModel}`, kind: "model", provider: "codex", model: codexModel },
+  ];
+  const configuredProviders: ReasoningProvider[] = [];
+  const geminiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (geminiKey !== undefined && geminiKey.trim()) configuredProviders.push(new GeminiReasoner({ apiKey: geminiKey, model: geminiModel, timeoutMs: reasoningTimeoutMs }));
+  if (process.env.ANTHROPIC_API_KEY?.trim()) configuredProviders.push(new ClaudeReasoner({ apiKey: process.env.ANTHROPIC_API_KEY, model: claudeModel, timeoutMs: reasoningTimeoutMs }));
+  if (process.env.OPENAI_API_KEY?.trim()) configuredProviders.push(new CodexReasoner({ apiKey: process.env.OPENAI_API_KEY, model: codexModel, timeoutMs: reasoningTimeoutMs }));
   const reasoningUrl = process.env.FOLD_REASONING_URL;
-  const reasoner = reasoningUrl === undefined
-    ? new LocalEvidenceReasoner()
-    : new HttpModelReasoner({
-        url: reasoningUrl,
-        model: requiredEnvironment("FOLD_REASONING_MODEL", process.env.FOLD_REASONING_MODEL),
-        ...(process.env.FOLD_REASONING_TOKEN === undefined ? {} : { token: process.env.FOLD_REASONING_TOKEN }),
-        timeoutMs: nonNegativeIntegerFromEnvironment(
-          "FOLD_REASONING_TIMEOUT_MS",
-          process.env.FOLD_REASONING_TIMEOUT_MS,
-          30_000,
-        ),
-        maxEvidence: nonNegativeIntegerFromEnvironment(
-          "FOLD_REASONING_MAX_EVIDENCE",
-          process.env.FOLD_REASONING_MAX_EVIDENCE,
-          10,
-        ),
-        maxInputCharacters: nonNegativeIntegerFromEnvironment(
-          "FOLD_REASONING_MAX_INPUT_CHARACTERS",
-          process.env.FOLD_REASONING_MAX_INPUT_CHARACTERS,
-          50_000,
-        ),
-      });
+  if (reasoningUrl !== undefined) {
+    const custom = new HttpModelReasoner({
+      url: reasoningUrl,
+      model: requiredEnvironment("FOLD_REASONING_MODEL", process.env.FOLD_REASONING_MODEL),
+      ...(process.env.FOLD_REASONING_TOKEN === undefined ? {} : { token: process.env.FOLD_REASONING_TOKEN }),
+      timeoutMs: reasoningTimeoutMs,
+      maxEvidence: nonNegativeIntegerFromEnvironment("FOLD_REASONING_MAX_EVIDENCE", process.env.FOLD_REASONING_MAX_EVIDENCE, 10),
+      maxInputCharacters: nonNegativeIntegerFromEnvironment("FOLD_REASONING_MAX_INPUT_CHARACTERS", process.env.FOLD_REASONING_MAX_INPUT_CHARACTERS, 50_000),
+    });
+    configuredProviders.push(custom);
+    knownProviders.push(custom.descriptor);
+  }
+  const localReasoner = new LocalEvidenceReasoner();
+  configuredProviders.push(localReasoner);
+  knownProviders.push(localReasoner.descriptor);
+  const reasoners = new ReasoningProviderCatalog({
+    providers: configuredProviders,
+    known: knownProviders,
+    defaultProvider: process.env.FOLD_REASONING_DEFAULT_PROVIDER ?? (geminiKey?.trim() ? "gemini" : "local"),
+  });
   let server: ReturnType<typeof createApiServer>;
   try {
     await registry.open();
@@ -243,7 +268,7 @@ async function main(): Promise<void> {
         : new PostgresMembershipResolver(tenantAdministration),
       sdks: registry,
       memoryRanker: vectorRanker ?? new LocalLexicalMemoryRanker(),
-      reasoner,
+      reasoners,
       ...(tenantAdministration === undefined ? {} : { tenantAdministration }),
       ...(clerkProvisioningWebhook === undefined ? {} : { identityProvisioningWebhook: clerkProvisioningWebhook }),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),

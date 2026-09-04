@@ -212,6 +212,17 @@ describe("Fold HTTP API", () => {
     }
   });
 
+  it("does not let one credential consume another credential's rate limit", async () => {
+    const api = await startApi({ rateLimiter: new FixedWindowRateLimiter(1) });
+    try {
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { token: "token-a" })).status).toBe(200);
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { token: "token-a" })).status).toBe(429);
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { token: "token-b" })).status).toBe(200);
+    } finally {
+      await api.close();
+    }
+  });
+
   it("serves public health and fails closed on authentication and membership", async () => {
     const api = await startApi();
     try {
@@ -460,6 +471,21 @@ describe("Fold HTTP API", () => {
       expect(bounded.body).toMatchObject({ total: 2 });
       expect(bounded.body.entries.map((entry: any) => entry.event.id)).toEqual(["event-b"]);
 
+      const newest = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/events?include=canon%2Bdraft&order=desc&limit=1",
+        { token: "token-a" },
+      );
+      expect(newest.body.entries.map((entry: any) => entry.event.id)).toEqual(["event-b"]);
+      expect(newest.body.total).toBe(2);
+      const older = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/events?include=canon%2Bdraft&order=desc&limit=1&pageCursor=${encodeURIComponent(newest.body.nextCursor)}`,
+        { token: "token-a" },
+      );
+      expect(older.body).toMatchObject({ total: 2, entries: [{ event: { id: "event-a" } }] });
+      expect(older.body.nextCursor).toBeUndefined();
+
       const invalidLimit = await apiRequest(
         api.baseUrl,
         "/v1/workspaces/workspace-1/events?limit=0",
@@ -495,6 +521,22 @@ describe("Fold HTTP API", () => {
             appliedEventCount: 1,
             appliedChangeCount: 1,
           },
+        },
+      });
+
+      const section = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/projection?compact=true&section=nodes&limit=1",
+        { token: "token-a" },
+      );
+      expect(section).toMatchObject({
+        status: 200,
+        body: {
+          entries: [],
+          section: "nodes",
+          sectionTotal: 1,
+          counts: { nodes: 1 },
+          state: { nodes: [["visible", expect.any(Object)]], appliedEvents: [], appliedChanges: [] },
         },
       });
     } finally {
@@ -945,6 +987,16 @@ describe("Fold HTTP API", () => {
         },
       });
 
+      const providers = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/reasoning/providers",
+        { token: "token-a" },
+      );
+      expect(providers).toMatchObject({
+        status: 200,
+        body: { providers: [{ id: "local-evidence-v1", configured: true, isDefault: true }] },
+      });
+
       const entries = await apiRequest(
         api.baseUrl,
         "/v1/workspaces/workspace-1/events",
@@ -1093,6 +1145,24 @@ describe("Fold HTTP API", () => {
       });
       expect(Array.isArray(report.body.report.analysis.edgeOutcomes)).toBe(true);
       expect(report.body.report.analysis.edgeOutcomes).toHaveLength(6);
+
+      const latestRun = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/trajectory-tasks/refresh-regression?limit=1",
+        { token: "token-a" },
+      );
+      expect(latestRun.body.report).toMatchObject({
+        runTotal: 2,
+        records: [{ trajectory: { id: "run-b" } }],
+      });
+      expect(latestRun.body.report.runCursor).toBeTypeOf("string");
+      const olderRun = await apiRequest(
+        api.baseUrl,
+        `/v1/workspaces/workspace-1/trajectory-tasks/refresh-regression?limit=1&pageCursor=${encodeURIComponent(latestRun.body.report.runCursor)}`,
+        { token: "token-a" },
+      );
+      expect(olderRun.body.report).toMatchObject({ runTotal: 2, records: [{ trajectory: { id: "run-a" } }] });
+      expect(olderRun.body.report.runCursor).toBeUndefined();
 
       const duplicate = await apiRequest(
         api.baseUrl,

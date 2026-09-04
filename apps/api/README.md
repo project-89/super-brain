@@ -131,6 +131,16 @@ Optional environment:
   provisioning and cannot be combined with `FOLD_CLERK_BINDINGS_JSON`;
 - `FOLD_CLERK_DEFAULT_WORKSPACE`, default `default`, names the workspace granted
   by Clerk organization membership events.
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) enables native Gemini reasoning;
+  `FOLD_GEMINI_MODEL` defaults to Google's hot-swapped `gemini-flash-latest`
+  alias;
+- `ANTHROPIC_API_KEY` enables native Claude reasoning;
+  `FOLD_CLAUDE_MODEL` defaults to `claude-sonnet-5`;
+- `OPENAI_API_KEY` enables native Codex reasoning;
+  `FOLD_CODEX_MODEL` defaults to `gpt-5.3-codex`;
+- `FOLD_REASONING_DEFAULT_PROVIDER` accepts a configured provider ID or the
+  short provider name (`gemini`, `claude`, `codex`, `custom`, or `local`).
+  Gemini is the default whenever its key is configured.
 
 Build and run with:
 
@@ -166,7 +176,7 @@ organization.
 | `GET`, `POST` | `/:tenant/events` | Access-filtered records or authenticated append |
 | `GET` | `/:tenant/event-stream` | Resumable filtered SSE after an exclusive cursor |
 | `GET`, `POST` | `/:tenant/consumers/:consumerId` | Principal-scoped durable consumer cursor |
-| `GET` | `/:tenant/projection` | Access-filtered materialized Fold state |
+| `GET` | `/:tenant/projection` | Access-filtered materialized Fold state or cursor-paged state section |
 | `GET`, `POST` | `/:tenant/memories` | Metadata recall or personal-memory creation |
 | `POST` | `/:tenant/memories/recall` | Recall with optional semantic candidates |
 | `POST` | `/:tenant/memories/search` | Server-ranked recall over an authorized corpus |
@@ -175,7 +185,7 @@ organization.
 | `POST` | `/:tenant/memory-candidate-imports` | Atomic proposal batches of at most 100 |
 | `POST` | `/:tenant/memory-candidate-promotions` | Atomic accepted-memory batches of at most 100 |
 | `GET`, `POST` | `/:tenant/trajectory-tasks` | Task summaries or shared-tree creation |
-| `GET` | `/:tenant/trajectory-tasks/:taskId` | Projection, route, divergence, and review report |
+| `GET` | `/:tenant/trajectory-tasks/:taskId` | Projection, route, divergence, and cursor-paged run report |
 | `POST` | `/:tenant/trajectories` | Record a projected model run |
 | `GET` | `/:tenant/fleet` | Rebuilt sessions, freshness, and recovery plans |
 | `GET` | `/:tenant/transcript-projects` | Imported project summaries |
@@ -190,11 +200,21 @@ organization.
 | `GET` | `/:tenant/steering` | Replayed per-actor candidates and intentions |
 | `GET`, `POST` | `/:tenant/steering/:actorId` | Actor state or owner/admin steering action |
 | `POST` | `/:tenant/reasoning/ask` | Noncanonical provider answer over authorized evidence |
+| `GET` | `/:tenant/reasoning/providers` | Configured/default reasoning providers and exact models |
 
 Event reads accept `include=canon|canon+draft`, paired `cursorT` and
-`cursorEventId`, and repeated `kind` filters. Memory reads accept
+`cursorEventId`, repeated `kind` filters, or newest-first `pageCursor`
+pagination with capture identity filters. Memory, memory-candidate,
+transcript-run, and trajectory-task lists also return an opaque `nextCursor`
+and total count. Memory reads accept
 `scope=all|workspace|space`, `spaceId`, repeated `tag` and `source`, `from`,
 `to`, and `limit`.
+
+The State UI requests `projection` with `section=nodes|edges|values|redirects|diagnostics`,
+an optional whole-section `query`, and an opaque `pageCursor`. These responses
+include complete collection counts but only one page of state rows. The API
+keeps a revision-aware projection and incrementally folds append-only suffixes,
+so paging never requires a 100+ MB projection response.
 
 Event append authors must exactly match the author bound to the credential.
 Memory authorship, creator scope, principal identity, and workspace are derived
@@ -216,15 +236,16 @@ an owner or admin role.
 
 Ranked recall defaults to the deterministic `local-bm25-v1` lexical provider.
 `ApiDependencies.memoryRanker` is the host port for an embedding or vector
-provider. The SDK gives that provider an already-authorized, minimized corpus
-(bounded at 10,000 memories) and reapplies current access to every returned
-candidate. Responses
+provider. The SDK gives that provider the complete already-authorized,
+minimized corpus and reapplies current access to every returned candidate.
+Responses
 identify the provider as `lexical` or `semantic`; the local provider is never
 presented as semantic retrieval.
 
-Pull reasoning defaults to `local-evidence-v1`, an explicitly `extractive`
-provider that briefs ranked memory and optional actor state. A host may inject a
-`model` provider through `ApiDependencies.reasoner`. Provider citations are
+Pull reasoning uses native Gemini, Claude, or Codex providers when their
+server-side credentials are configured. Gemini is preferred by default;
+otherwise `local-evidence-v1` remains an explicitly labeled `extractive`
+fallback. A host may also inject a custom provider. Provider citations are
 restricted to the authorized evidence supplied for that request. Questions and
 answers are not appended to Fold implicitly.
 

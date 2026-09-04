@@ -104,7 +104,12 @@ function changedPaths(payload: Record<string, unknown>, root: string): string[] 
     .flatMap((value) => Array.isArray(value) ? value : [value])
     .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     .map((value) => canonicalPath(value, root));
-  return [...new Set(values)].slice(0, 50);
+  return [...new Set(values)];
+}
+
+function pagesOf<T>(values: readonly T[], size: number): readonly (readonly T[])[] {
+  if (values.length === 0) return [[]];
+  return Array.from({ length: Math.ceil(values.length / size) }, (_, index) => values.slice(index * size, (index + 1) * size));
 }
 
 function commandText(payload: Record<string, unknown>): string {
@@ -709,7 +714,7 @@ export class CaptureEngine {
       });
     } else if (name === "HermesStep") {
       const tools = Array.isArray(payload.tool_names)
-        ? payload.tool_names.filter((value): value is string => typeof value === "string" && value.trim().length > 0).slice(0, 50)
+        ? payload.tool_names.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         : [];
       const iteration = typeof payload.iteration === "number" && Number.isFinite(payload.iteration)
         ? payload.iteration
@@ -775,24 +780,30 @@ export class CaptureEngine {
       const paths = [...new Set([
         ...changedPaths(payload, session.project.root),
         ...(repositoryChanged ? refreshedProject.changedPaths ?? [] : []),
-      ])].slice(0, 200);
+      ])];
       const mutatingTool = /edit|write|patch|notebook/i.test(tool) || repositoryChanged;
       if (success && mutatingTool) session = withoutVerifiedOutcome(session);
       if (success && mutatingTool) {
-        session = await this.observe(session, artifact, index++, {
-          kind: repositoryChanged ? "repository_changed" : "file_changed",
-          data: {
-            toolName: tool,
-            paths,
-            artifactId: artifact.id,
-            ...(beforeProject.head === undefined ? {} : { headBefore: beforeProject.head }),
-            ...(refreshedProject.head === undefined ? {} : { headAfter: refreshedProject.head }),
-            ...(beforeProject.worktreeDigest === undefined ? {} : { worktreeBefore: beforeProject.worktreeDigest }),
-            ...(refreshedProject.worktreeDigest === undefined ? {} : { worktreeAfter: refreshedProject.worktreeDigest }),
-            ...(refreshedProject.dirty === undefined ? {} : { dirty: refreshedProject.dirty }),
-            ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
-          },
-        });
+        const pathPages = pagesOf(paths, 200);
+        for (const [pathPage, pagePaths] of pathPages.entries()) {
+          session = await this.observe(session, artifact, index++, {
+            kind: repositoryChanged ? "repository_changed" : "file_changed",
+            data: {
+              toolName: tool,
+              paths: [...pagePaths],
+              pathPage: pathPage + 1,
+              pathPageCount: pathPages.length,
+              pathCount: paths.length,
+              artifactId: artifact.id,
+              ...(beforeProject.head === undefined ? {} : { headBefore: beforeProject.head }),
+              ...(refreshedProject.head === undefined ? {} : { headAfter: refreshedProject.head }),
+              ...(beforeProject.worktreeDigest === undefined ? {} : { worktreeBefore: beforeProject.worktreeDigest }),
+              ...(refreshedProject.worktreeDigest === undefined ? {} : { worktreeAfter: refreshedProject.worktreeDigest }),
+              ...(refreshedProject.dirty === undefined ? {} : { dirty: refreshedProject.dirty }),
+              ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
+            },
+          });
+        }
       }
       if (verification !== undefined) {
         session = await this.observe(session, artifact, index++, {
@@ -821,6 +832,17 @@ export class CaptureEngine {
           lastVerification: success ? "success" : "failure",
         };
       }
+    } else if (name === "FileChanged") {
+      const rawPath = text(payload.file_path);
+      session = await this.observe(session, artifact, index++, {
+        kind: "file_changed",
+        data: {
+          artifactId: artifact.id,
+          ...(rawPath === undefined ? {} : { paths: [canonicalPath(rawPath, session.project.root)] }),
+          ...(text(payload.event) === undefined ? {} : { event: text(payload.event)! }),
+        },
+      });
+      session = withoutVerifiedOutcome(session);
     } else if (name === "PermissionRequest" || name === "Notification") {
       session = await this.observe(session, artifact, index++, {
         kind: "blocking_prompt",
@@ -899,7 +921,6 @@ export class CaptureEngine {
         ? payload.intention_ids
             .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
             .map((value) => bounded(value.trim(), 500))
-            .slice(0, 20)
         : [];
       if (intentionIds.length === 0) throw new TypeError("steering application requires intention_ids");
       session = await this.observe(session, artifact, index++, {
@@ -921,15 +942,18 @@ export class CaptureEngine {
         }),
         steeringIntentionIds: [...new Set([...(session.steeringIntentionIds ?? []), ...intentionIds])],
       };
-    } else if (name === "Stop") {
+    } else if (name === "Stop" || name === "StopFailure") {
       const reasoning = await this.captureExposedReasoning(session, artifact, index);
       session = reasoning.session;
       index = reasoning.nextIndex;
+      const failed = name === "StopFailure";
       const assistantMessage = text(payload.last_assistant_message) ?? text(payload.lastAssistantMessage) ?? "";
       session = await this.observe(session, artifact, index++, {
         kind: "task_complete",
         data: {
           artifactId: artifact.id,
+          status: failed ? "failure" : "completed",
+          ...(text(payload.error_type) === undefined ? {} : { errorType: text(payload.error_type)! }),
           outputCharacters: assistantMessage.length,
           ...(assistantMessage.length === 0
             ? {}
@@ -940,11 +964,18 @@ export class CaptureEngine {
       session = stepFor(session, {
         nodeKind: "observation",
         role: "model_output",
-        content: "Agent completed a response",
+        content: failed ? `Agent response failed${text(payload.error_type) === undefined ? "" : `: ${text(payload.error_type)!}`}` : "Agent completed a response",
         artifactId: artifact.id,
         eventId: session.lastEventId!,
         ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
+      if (failed) {
+        session = {
+          ...session,
+          explicitOutcome: "failure",
+          reviewText: `VERDICT: reject\nDETAIL: ${text(payload.error_type) ?? "agent response failed"}`,
+        };
+      }
       if (await this.enqueueTrajectory(session, artifact, index, "stop")) {
         index += 2;
         session = completeCurrentUnit(session);
@@ -967,6 +998,23 @@ export class CaptureEngine {
         await this.enqueueTranscript(session, artifact);
       }
       session = { ...session, active: false, finalized: true, finalizationReason: "session-end" };
+    } else if (name !== "SessionStart") {
+      if (name === "PreCompact") {
+        const reasoning = await this.captureExposedReasoning(session, artifact, index);
+        session = reasoning.session;
+        index = reasoning.nextIndex;
+      }
+      const data: Record<string, JsonValue> = { hookEvent: name, artifactId: artifact.id };
+      for (const field of [
+        "agent_id", "agent_type", "task_id", "task_subject", "trigger", "reason", "error_type",
+        "source", "new_model", "old_model", "permission_mode", "notification_type", "mcp_server_name",
+      ]) {
+        const value = text(payload[field]);
+        if (value !== undefined) data[field] = this.privacy.text(value);
+      }
+      session = await this.observe(session, artifact, index++, { kind: "harness_event", data });
+      const switchedModel = text(payload.new_model);
+      if (name === "PostModelSwitch" && switchedModel !== undefined) session = { ...session, model: switchedModel };
     }
 
     const eventsSinceSnapshot = (session.observedEventCount ?? 0) - (session.lastTreeSnapshotEventCount ?? 0);
@@ -1014,61 +1062,66 @@ export class CaptureEngine {
     ) {
       return { session, nextIndex: index };
     }
-    let delta: Awaited<ReturnType<typeof readExposedReasoningDelta>>;
-    try {
-      delta = await readExposedReasoningDelta(
-        session.transcriptPath,
-        session.source,
-        session.reasoningCursor ?? 0,
-        { maxBytes: TRANSCRIPT_DELTA_MAX_BYTES },
-      );
-    } catch {
-      return { session, nextIndex: index };
-    }
     const seen = new Set(session.seenReasoningIds ?? []);
-    const fresh = delta.items.filter(({ id }) => !seen.has(id));
-    let next: CaptureSession = {
-      ...session,
-      reasoningCursor: delta.cursor,
-      seenReasoningIds: [...(session.seenReasoningIds ?? []), ...fresh.map(({ id }) => id)].slice(-5_000),
-    };
-    if (delta.records.length === 0) return { session: next, nextIndex: index };
-    const summaries = fresh.map((item) => ({
-      id: this.privacy.alias("reasoning-record", item.id),
-      text: bounded(this.privacy.text(item.text), 2_000),
-    }));
-    const reasoningArtifact = await this.vault.store(session.source, {
-      hook_event_name: "TranscriptDelta",
-      session_id: session.sessionId,
-      transcript_path: session.transcriptPath,
-      start_cursor: delta.startCursor,
-      end_cursor: delta.cursor,
-      record_count: delta.records.length,
-      records: delta.records,
-      summaries,
-    }, artifact.eventTime);
+    let next: CaptureSession = session;
     let nextIndex = index;
-    if (this.config.reasoningTreePolicy !== "summaries" || summaries.length === 0) {
-      return { session: next, nextIndex };
-    }
-    for (const summary of summaries) {
-      next = await this.observe(next, artifact, nextIndex++, {
-        kind: "reasoning_observed",
-        data: {
-          summary: summary.text,
-          artifactId: reasoningArtifact.id,
-          sourceRecordId: summary.id,
-          ...(next.currentTurnId === undefined ? {} : { turnId: next.currentTurnId }),
-        },
-      });
-      next = stepFor(next, {
-        nodeKind: "decision",
-        role: "model_thought",
-        content: summary.text,
-        artifactId: reasoningArtifact.id,
-        eventId: next.lastEventId!,
-        ...(next.currentTurnId === undefined ? {} : { turnId: next.currentTurnId }),
-      });
+    while (true) {
+      let delta: Awaited<ReturnType<typeof readExposedReasoningDelta>>;
+      try {
+        delta = await readExposedReasoningDelta(
+          session.transcriptPath,
+          session.source,
+          next.reasoningCursor ?? 0,
+          { maxBytes: TRANSCRIPT_DELTA_MAX_BYTES },
+        );
+      } catch {
+        break;
+      }
+      const previousCursor = next.reasoningCursor ?? 0;
+      const fresh = delta.items.filter(({ id }) => !seen.has(id));
+      fresh.forEach(({ id }) => seen.add(id));
+      next = {
+        ...next,
+        reasoningCursor: delta.cursor,
+        seenReasoningIds: [...seen].slice(-5_000),
+      };
+      if (delta.records.length === 0) break;
+      const summaries = fresh.map((item) => ({
+        id: this.privacy.alias("reasoning-record", item.id),
+        text: this.privacy.text(item.text),
+      }));
+      const reasoningArtifact = await this.vault.store(session.source, {
+        hook_event_name: "TranscriptDelta",
+        session_id: session.sessionId,
+        transcript_path: session.transcriptPath,
+        start_cursor: delta.startCursor,
+        end_cursor: delta.cursor,
+        record_count: delta.records.length,
+        records: delta.records,
+        summaries,
+      }, artifact.eventTime + nextIndex);
+      if (this.config.reasoningTreePolicy === "summaries") {
+        for (const summary of summaries) {
+          next = await this.observe(next, artifact, nextIndex++, {
+            kind: "reasoning_observed",
+            data: {
+              summary: summary.text,
+              artifactId: reasoningArtifact.id,
+              sourceRecordId: summary.id,
+              ...(next.currentTurnId === undefined ? {} : { turnId: next.currentTurnId }),
+            },
+          });
+          next = stepFor(next, {
+            nodeKind: "decision",
+            role: "model_thought",
+            content: summary.text,
+            artifactId: reasoningArtifact.id,
+            eventId: next.lastEventId!,
+            ...(next.currentTurnId === undefined ? {} : { turnId: next.currentTurnId }),
+          });
+        }
+      }
+      if (delta.cursor <= previousCursor) break;
     }
     return { session: next, nextIndex };
   }

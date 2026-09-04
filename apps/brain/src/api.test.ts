@@ -62,12 +62,12 @@ describe("Fold API client", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200&order=desc",
     );
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret-token");
   });
 
-  it("requests bounded compact projections for the state inspector", async () => {
+  it("requests a paged projection section for the state inspector", async () => {
     const response = {
       entries: [],
       state: {
@@ -81,7 +81,7 @@ describe("Fold API client", () => {
     await client.projection(true);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/projection?include=canon%2Bdraft&compact=true&limit=500",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/projection?compact=true&section=nodes&limit=100&include=canon%2Bdraft",
     );
   });
 

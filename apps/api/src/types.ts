@@ -6,7 +6,7 @@ import type {
   MemoryRanker,
 } from "@_89/fold-sdk";
 import type { FoldLogEntry } from "@_89/fold";
-import type { ReasoningProvider } from "./reasoning.js";
+import type { ReasoningProvider, ReasoningProviderCatalog } from "./reasoning.js";
 import type { RequestRateLimiter } from "./rate-limit.js";
 import type {
   ExternalIdentityProvisioningEvent,
@@ -158,6 +158,7 @@ export interface ApiDependencies {
   readonly maxBodyBytes?: number;
   readonly memoryRanker?: MemoryRanker;
   readonly reasoner?: ReasoningProvider;
+  readonly reasoners?: ReasoningProviderCatalog;
   readonly rateLimiter?: RequestRateLimiter;
   readonly corsOrigins?: readonly string[];
   readonly reportError?: (error: unknown) => void;

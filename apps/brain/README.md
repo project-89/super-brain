@@ -11,14 +11,15 @@ Work-focused browser client for the authenticated Fold API. It provides:
   per-step projection inspection;
 - imported project and source-qualified run history with context, turn, action,
   artifact, and privacy metadata;
-- replay-built fleet status, freshness, lifecycle, recovery-plan, and canonical
-  activity inspection;
+- replay-built fleet status, freshness, lifecycle, recovery-plan, canonical
+  activity, and operator-authenticated raw hook evidence inspection;
 - provider-labeled pull reasoning over authorized memory and optional actor
   context;
 - replayed human steering with actor discovery, candidate surfacing,
   commit/decline decisions, action recording, and explicit intention endings;
 - canonical and draft event inspection;
-- materialized node, edge, component-value, and diagnostic inspection.
+- cursor-paged materialized node, edge, component-value, redirect, and
+  diagnostic inspection with whole-section search.
 
 Trajectory imports are JSON bundles with a `tree`, optional `spaceId`, and a
 non-empty `trajectories` array. Every run must reference the tree's `taskId` and
@@ -30,7 +31,10 @@ list/detail, and memory metadata interactions were used only as product evidence
 Ranked results show the server-reported provider kind, identifier, scanned
 corpus size, and normalized score so lexical and semantic retrieval remain
 operationally distinguishable.
-The local reasoning provider is visibly labeled `extractive`; the client does
+The reasoning selector lists native Gemini, Claude, and Codex providers with
+their exact model identifiers and visibly disables providers without a
+server-side key. Gemini is selected when configured. The local provider remains
+visibly labeled `extractive`; the client does
 not present it as a model answer. Steering controls follow the server-reported
 owner/admin capability and remain read-only for other workspace roles.
 

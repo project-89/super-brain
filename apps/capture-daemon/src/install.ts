@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 const execFileAsync = promisify(execFile);
-const EVENTS = [
+const CORE_EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
   "PreToolUse",
@@ -16,6 +16,55 @@ const EVENTS = [
   "Stop",
   "SessionEnd",
 ] as const;
+
+const CLAUDE_EVENTS = [
+  ...CORE_EVENTS,
+  "Setup",
+  "InstructionsLoaded",
+  "UserPromptExpansion",
+  "MessageDisplay",
+  "PostToolBatch",
+  "PermissionDenied",
+  "SubagentStart",
+  "SubagentStop",
+  "TaskCreated",
+  "TaskCompleted",
+  "StopFailure",
+  "TeammateIdle",
+  "ConfigChange",
+  "CwdChanged",
+  "FileChanged",
+  "DirectoryAdded",
+  "WorktreeCreate",
+  "WorktreeRemove",
+  "PreCompact",
+  "PostCompact",
+  "PreModelSwitch",
+  "PostModelSwitch",
+  "Elicitation",
+  "ElicitationResult",
+] as const;
+
+const CLAUDE_WATCHED_FILES = [
+  ".env",
+  ".envrc",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "Cargo.lock",
+  "Cargo.toml",
+  "Dockerfile",
+  "Gemfile",
+  "Gemfile.lock",
+  "go.mod",
+  "go.sum",
+  "package-lock.json",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pyproject.toml",
+  "requirements.txt",
+  "uv.lock",
+  "yarn.lock",
+].join("|");
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -81,7 +130,8 @@ export function mergedHookSettings(
     ? settings.hooks as Record<string, unknown>
     : {};
   const hooks: Record<string, unknown> = { ...existingHooks };
-  for (const event of EVENTS) {
+  const events = source === "claude-code" ? CLAUDE_EVENTS : CORE_EVENTS;
+  for (const event of events) {
     const current = Array.isArray(existingHooks[event]) ? existingHooks[event] as Array<Record<string, unknown>> : [];
     const retained = current.filter((group) => {
       const entries = Array.isArray(group.hooks) ? group.hooks as Array<Record<string, unknown>> : [];
@@ -93,6 +143,7 @@ export function mergedHookSettings(
     hooks[event] = [
       ...retained,
       {
+        ...(event === "FileChanged" ? { matcher: CLAUDE_WATCHED_FILES } : {}),
         hooks: [{
           type: "command",
           command: hookCommand(executable, configPath, source),

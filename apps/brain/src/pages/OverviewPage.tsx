@@ -1,9 +1,9 @@
-import { ArrowRight, BookOpen, Bot, FolderGit2, Wrench } from "lucide-react";
+import { Activity, ArrowRight, BookOpen, Bot, BrainCircuit, FolderGit2, RadioTower, Route, Wrench } from "lucide-react";
 import { useMemo } from "react";
 
 import { EmptyState, PageHeader } from "../components/Common";
 import { formatRelative } from "../format";
-import type { BrainSnapshot } from "../types";
+import type { BrainPage, BrainSnapshot } from "../types";
 
 function activitySeries(runs: BrainSnapshot["transcriptRuns"]) {
   const counts = new Map<string, number>();
@@ -27,7 +27,7 @@ export function OverviewPage({
   navigate,
 }: {
   readonly snapshot: BrainSnapshot;
-  readonly navigate: (page: "memory" | "history") => void;
+  readonly navigate: (page: BrainPage) => void;
 }) {
   const turns = snapshot.transcriptRuns.reduce((sum, run) => sum + run.counts.turns, 0);
   const actions = snapshot.transcriptRuns.reduce((sum, run) => sum + run.counts.actions, 0);
@@ -45,9 +45,17 @@ export function OverviewPage({
 
       <section className="metrics-band" aria-label="Workspace totals">
         <div className="metric"><span className="metric__icon metric__icon--green"><FolderGit2 aria-hidden="true" /></span><div><strong>{snapshot.transcriptProjects.length}</strong><span>Projects</span></div></div>
-        <div className="metric"><span className="metric__icon metric__icon--coral"><Bot aria-hidden="true" /></span><div><strong>{snapshot.transcriptRuns.length}</strong><span>Agent runs</span></div></div>
-        <div className="metric"><span className="metric__icon metric__icon--blue"><BookOpen aria-hidden="true" /></span><div><strong>{turns}</strong><span>Turns</span></div></div>
-        <div className="metric"><span className="metric__icon metric__icon--yellow"><Wrench aria-hidden="true" /></span><div><strong>{actions}</strong><span>Actions</span></div></div>
+        <div className="metric"><span className="metric__icon metric__icon--coral"><Bot aria-hidden="true" /></span><div><strong>{snapshot.transcriptRunTotal}</strong><span>Agent runs</span></div></div>
+        <div className="metric"><span className="metric__icon metric__icon--blue"><BookOpen aria-hidden="true" /></span><div><strong>{turns}</strong><span>Recent turns</span></div></div>
+        <div className="metric"><span className="metric__icon metric__icon--yellow"><Wrench aria-hidden="true" /></span><div><strong>{actions}</strong><span>Recent actions</span></div></div>
+      </section>
+
+      <section className="operations-band" aria-label="System operations">
+        <button type="button" onClick={() => navigate("fleet")}><RadioTower aria-hidden="true" /><span><strong>{snapshot.captureHealth === undefined ? "Offline" : "Online"}</strong><small>Capture daemon</small></span></button>
+        <button type="button" onClick={() => navigate("fleet")}><Activity aria-hidden="true" /><span><strong>{snapshot.captureHealth?.activeSessions ?? snapshot.fleet.fleet.sessions.filter(({ availability }) => availability === "available").length}</strong><small>Live sessions</small></span></button>
+        <button type="button" onClick={() => navigate("memory")}><BrainCircuit aria-hidden="true" /><span><strong>{snapshot.memoryCandidateTotal}</strong><small>Memory proposals</small></span></button>
+        <button type="button" onClick={() => navigate("trajectories")}><Route aria-hidden="true" /><span><strong>{snapshot.trajectoryTaskTotal}</strong><small>Decision trees</small></span></button>
+        <button type="button" onClick={() => navigate("fleet")}><RadioTower aria-hidden="true" /><span><strong>{snapshot.fleet.fleet.recoveryActions.length}</strong><small>Recovery actions</small></span></button>
       </section>
 
       <section className="overview-grid">

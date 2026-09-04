@@ -11,6 +11,13 @@ structured reasoning checkpoints, human decisions, session trajectories, and a
 stable transcript import after `SessionEnd`. It does not claim success when no
 verification or explicit verdict was observed.
 
+The Claude installer subscribes to the full current lifecycle surface,
+including subagents, tasks, permissions, compaction, model switches, worktrees,
+elicitation, configuration changes, watched high-value project files, and stop
+failures. Hook-derived file collections are emitted across numbered canonical
+pages instead of being clipped. Hooks without a richer domain mapping are still retained in the vault and emitted as canonical
+`harness_event` observations. Stop failures become failed trajectory outcomes.
+
 Raw exposed reasoning is excluded from transcript artifacts by default. With
 explicit opt-in, the daemon stores complete incremental transcript deltas in the
 private encrypted/redacted vault and adds exposed summaries to periodic
@@ -39,6 +46,15 @@ super-brain-capture configure --reasoning include \
 super-brain-capture rotate-operator-token
 super-brain-capture install-service
 ```
+
+The loopback-only `GET /artifacts/:source/:sha256` endpoint requires the
+separate `x-super-brain-operator-token`. It decrypts already redacted transcript
+records in cursor pages for the History UI; vault files remain encrypted at
+rest, and secret redaction is never disabled.
+
+`GET /hook-artifacts/:source/:artifactId` uses the same operator boundary and
+decrypts one secret-redacted raw hook record for Fleet inspection. Canonical
+activity links to these records without copying raw payloads into the Fold log.
 
 `--anonymize pseudonymous` retains stable keyed joins while hiding identity and
 absolute-path segments. `strict` also obscures full paths, URLs, and IP

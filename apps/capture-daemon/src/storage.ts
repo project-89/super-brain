@@ -477,6 +477,40 @@ export class HookVault {
   }
 }
 
+export async function readHookVaultArtifact(options: {
+  readonly vaultRoot: string;
+  readonly source: HookSource;
+  readonly artifactId: string;
+  readonly encryptionKey?: Uint8Array;
+}): Promise<StoredHookArtifact | undefined> {
+  if (!/^[a-f0-9]{64}$/i.test(options.artifactId)) throw new TypeError("hook artifact id is invalid");
+  const id = options.artifactId.toLowerCase();
+  const directory = join(options.vaultRoot, "hooks", safeSource(options.source), id.slice(0, 2));
+  let serialized: string | undefined;
+  for (const name of [`${id}.json.enc`, `${id}.json`]) {
+    try {
+      serialized = (await readFile(join(directory, name), "utf8")).trim();
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if (serialized === undefined || serialized.length === 0) return undefined;
+  const parsed = JSON.parse(decryptVaultLine(serialized, options.encryptionKey)) as Partial<StoredHookArtifact>;
+  if (
+    parsed.id !== id ||
+    parsed.source !== options.source ||
+    typeof parsed.receivedAt !== "string" ||
+    typeof parsed.eventTime !== "number" ||
+    typeof parsed.payload !== "object" ||
+    parsed.payload === null ||
+    Array.isArray(parsed.payload)
+  ) {
+    throw new Error("hook artifact has an invalid shape");
+  }
+  return parsed as StoredHookArtifact;
+}
+
 export class DurableSpool {
   private readonly pending: string;
   private readonly failed: string;

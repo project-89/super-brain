@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  GeminiReasoner,
   LocalEvidenceReasoner,
   HttpModelReasoner,
+  ReasoningProviderCatalog,
   validateReasoningResult,
   type ReasoningEvidence,
 } from "../src/index.js";
@@ -23,7 +25,7 @@ describe("local evidence reasoner", () => {
       answer: "Relevant evidence: Rotate the access token before retrying.",
       citations: ["memory-a"],
     });
-    expect(reasoner.descriptor).toEqual({ id: "local-evidence-v1", kind: "extractive" });
+    expect(reasoner.descriptor).toEqual({ id: "local-evidence-v1", kind: "extractive", provider: "local" });
   });
 
   it("rejects citations outside the supplied evidence", () => {
@@ -50,7 +52,7 @@ describe("local evidence reasoner", () => {
       answer: "Rotate the token first.",
       citations: ["memory-a"],
     });
-    expect(reasoner.descriptor).toEqual({ id: "http-model:reasoner-1", kind: "model" });
+    expect(reasoner.descriptor).toEqual({ id: "http-model:reasoner-1", kind: "model", provider: "custom", model: "reasoner-1" });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://reasoning.internal/v1/answer");
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer provider-token");
@@ -59,6 +61,22 @@ describe("local evidence reasoner", () => {
       evidence: [{ memoryId: "memory-a" }],
       constraints: { citeOnlyMemoryIds: ["memory-a"], maxAnswerCharacters: 20_000 },
     });
+  });
+
+  it("calls Gemini structured generation and catalogs it as the default", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ answer: "Rotate it.", citations: ["memory-a"] }) }] } }],
+    }), { status: 200 }));
+    const gemini = new GeminiReasoner({ apiKey: "google-key", model: "gemini-fast", fetch: fetchMock as unknown as typeof fetch });
+    await expect(gemini.answer({ question: "What now?", evidence })).resolves.toEqual({ answer: "Rotate it.", citations: ["memory-a"] });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toContain("gemini-fast:generateContent");
+    expect(new Headers(init.headers).get("x-goog-api-key")).toBe("google-key");
+    expect(JSON.parse(init.body as string)).toMatchObject({ generationConfig: { responseMimeType: "application/json" } });
+    const local = new LocalEvidenceReasoner();
+    const catalog = new ReasoningProviderCatalog({ providers: [gemini, local], defaultProvider: "gemini" });
+    expect(catalog.provider()).toBe(gemini);
+    expect(catalog.statuses[0]).toMatchObject({ provider: "gemini", configured: true, isDefault: true });
   });
 
   it("rejects invalid model-provider configuration and responses", async () => {

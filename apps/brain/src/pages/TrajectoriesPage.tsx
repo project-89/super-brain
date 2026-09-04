@@ -9,10 +9,11 @@ import {
   Route,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
 import type { FoldApiClient } from "../api";
-import { EmptyState, PageHeader } from "../components/Common";
+import { EmptyState, PageHeader, SearchField } from "../components/Common";
+import { LoadMore } from "../components/LoadMore";
 import { formatRelative } from "../format";
 import type {
   ProjectedTrajectory,
@@ -20,6 +21,12 @@ import type {
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
 } from "../types";
+import { useCursorList } from "../use-cursor-list";
+
+const TrajectoryGraph = lazy(async () => {
+  const module = await import("../components/TrajectoryGraph");
+  return { default: module.TrajectoryGraph };
+});
 
 function percent(value: number): string {
   return `${Math.round(value * 100)}%`;
@@ -36,37 +43,57 @@ function projectionLabel(step: ProjectedTrajectory["steps"][number]): string {
 }
 
 export function TrajectoriesPage({
-  tasks,
+  tasks: initialTasks,
+  total,
+  cursor,
   api,
   onImport,
 }: {
   readonly tasks: readonly TrajectoryTaskSummary[];
+  readonly total: number;
+  readonly cursor?: string;
   readonly api: FoldApiClient;
   readonly onImport: () => void;
 }) {
+  const taskPage = useCursorList({
+    initialItems: initialTasks,
+    initialTotal: total,
+    initialCursor: cursor,
+    keyOf: (task) => task.taskId,
+    loadPage: (nextCursor) => api.listTrajectoryTaskPage({ limit: 50, cursor: nextCursor }),
+  });
+  const tasks = taskPage.items;
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedRunId, setSelectedRunId] = useState<string>();
   const [report, setReport] = useState<TrajectoryTaskReport>();
   const [loading, setLoading] = useState(false);
+  const [loadingRuns, setLoadingRuns] = useState(false);
+  const [runLoadError, setRunLoadError] = useState<string>();
   const [error, setError] = useState<string>();
+  const [query, setQuery] = useState("");
+  const filteredTasks = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return needle.length === 0 ? tasks : tasks.filter((task) => `${task.taskId}\n${task.tree.nodes.map(({ label }) => label).join("\n")}`.toLowerCase().includes(needle));
+  }, [query, tasks]);
 
   useEffect(() => {
-    if (tasks.length === 0) {
+    if (filteredTasks.length === 0) {
       setSelectedTaskId(undefined);
       setReport(undefined);
       return;
     }
-    if (selectedTaskId === undefined || !tasks.some(({ taskId }) => taskId === selectedTaskId)) {
-      setSelectedTaskId(tasks[0]!.taskId);
+    if (selectedTaskId === undefined || !filteredTasks.some(({ taskId }) => taskId === selectedTaskId)) {
+      setSelectedTaskId(filteredTasks[0]!.taskId);
     }
-  }, [selectedTaskId, tasks]);
+  }, [filteredTasks, selectedTaskId]);
 
   useEffect(() => {
     if (selectedTaskId === undefined) return;
     let active = true;
     setLoading(true);
     setError(undefined);
-    void api.trajectoryReport(selectedTaskId).then(
+    setRunLoadError(undefined);
+    void api.trajectoryReport(selectedTaskId, { limit: 100 }).then(
       (next) => {
         if (!active) return;
         setReport(next);
@@ -87,15 +114,36 @@ export function TrajectoriesPage({
     return () => {
       active = false;
     };
-  }, [api, selectedTaskId, tasks]);
+  }, [api, selectedTaskId]);
 
   const selectedRun = report?.projected.find(({ id }) => id === selectedRunId);
   const selectedRecord = report?.records.find(({ trajectory }) => trajectory.id === selectedRunId);
   const divergence = report?.divergences.find(({ trajectoryId }) => trajectoryId === selectedRunId)?.divergence;
   const evaluation = report?.evaluations.find(({ trajectoryId }) => trajectoryId === selectedRunId);
-  const classifiedRuns = report?.records.filter(({ trajectory }) => trajectory.outcome !== "unknown").length ?? 0;
-  const unknownRuns = (report?.records.length ?? 0) - classifiedRuns;
+  const selectedTask = tasks.find(({ taskId }) => taskId === selectedTaskId);
+  const classifiedRuns = (selectedTask?.successCount ?? 0) + (selectedTask?.failureCount ?? 0);
+  const unknownRuns = selectedTask?.unknownCount ?? 0;
   const nodes = useMemo(() => report === undefined ? new Map() : nodeIndex(report), [report]);
+
+  const loadMoreRuns = async () => {
+    if (selectedTaskId === undefined || report?.runCursor === undefined || loadingRuns) return;
+    setLoadingRuns(true);
+    setRunLoadError(undefined);
+    try {
+      const next = await api.trajectoryReport(selectedTaskId, { limit: 100, cursor: report.runCursor });
+      setReport((current) => current === undefined ? next : {
+        ...next,
+        records: [...current.records, ...next.records],
+        projected: [...current.projected, ...next.projected],
+        divergences: [...current.divergences, ...next.divergences],
+        evaluations: [...current.evaluations, ...next.evaluations],
+      });
+    } catch (caught) {
+      setRunLoadError(caught instanceof Error ? caught.message : "Unable to load more runs");
+    } finally {
+      setLoadingRuns(false);
+    }
+  };
 
   return (
     <div className="page page--trajectories">
@@ -113,8 +161,9 @@ export function TrajectoriesPage({
       ) : (
         <section className="trajectory-workspace">
           <aside className="trajectory-task-list" aria-label="Trajectory tasks">
-            <header><span className="eyebrow">Shared trees</span><strong>{tasks.length} tasks</strong></header>
-            {tasks.map((task) => (
+            <header><span className="eyebrow">Shared trees</span><strong>{filteredTasks.length} / {taskPage.total}</strong></header>
+            <div className="trajectory-task-search"><SearchField value={query} onChange={setQuery} placeholder="Search trees" /></div>
+            {filteredTasks.map((task) => (
               <button
                 key={task.taskId}
                 type="button"
@@ -126,6 +175,14 @@ export function TrajectoriesPage({
                 <time>{formatRelative(task.lastRecordedAt)}</time>
               </button>
             ))}
+            <LoadMore
+              loaded={tasks.length}
+              total={taskPage.total}
+              hasMore={taskPage.cursor !== undefined}
+              loading={taskPage.loadingMore}
+              error={taskPage.loadError}
+              onLoadMore={() => void taskPage.loadMore()}
+            />
           </aside>
 
           <div className="trajectory-report">
@@ -170,6 +227,10 @@ export function TrajectoriesPage({
                   )}
                 </section>
 
+                <Suspense fallback={<div className="tree-graph-loading"><span /><span /><span /></div>}>
+                  <TrajectoryGraph tree={report.tree} successfulPath={report.analysis.mostSuccessfulPath} selectedRun={selectedRun} />
+                </Suspense>
+
                 <section className="trajectory-run-layout">
                   <div className="trajectory-run-list">
                     <header><span className="eyebrow">Captured runs</span><strong>{report.records.length} records</strong></header>
@@ -183,6 +244,7 @@ export function TrajectoriesPage({
                         </button>
                       );
                     })}
+                    <LoadMore loaded={report.records.length} total={report.runTotal ?? report.records.length} hasMore={report.runCursor !== undefined} loading={loadingRuns} error={runLoadError} onLoadMore={() => void loadMoreRuns()} />
                   </div>
 
                   <article className="trajectory-run-inspector">
