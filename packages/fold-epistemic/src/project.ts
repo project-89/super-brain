@@ -6,6 +6,7 @@ import { rebuildMemoryCandidates } from "./candidates.js";
 import { memoryEvidenceContributionsFromEvent } from "./contributions.js";
 import { validReplayMemoryAuthority } from "./access.js";
 import { mergeMemoryEvidence, memoryValidity } from "./validity.js";
+import { memoryFeedbackRecordsFromEvent } from "./feedback.js";
 import { assertUuidV7 } from "./uuidv7.js";
 
 export class MemoryProjectionError extends Error {
@@ -24,6 +25,11 @@ export function rebuildMemories(events: readonly FoldEvent[]): MemoryProjection 
     history.set(memory.revision, memory); revisions.set(memory.id, history);
   };
   for (const event of [...events].sort(compareEventKeys)) {
+    for (const feedback of memoryFeedbackRecordsFromEvent(event)) {
+      if (!("version" in feedback)) continue;
+      const memory = revisions.get(feedback.memoryId)?.get(feedback.memoryRevision);
+      if (!memory || !memories.has(memory.id) || memory.updatedAt > event.at.t || memory.workspaceId !== feedback.workspaceId || event.capture.scope.space !== memory.spaceId || event.capture.scope.creator !== (memory.audience === "personal" ? memory.creatorId : undefined) || (memory.audience === "personal" && feedback.actorId !== memory.creatorId)) throw new MemoryProjectionError("feedback does not match an available historical revision and audience");
+    }
     for (const contribution of memoryEvidenceContributionsFromEvent(event).filter(({ target }) => target === "memory")) {
       const current = memories.get(contribution.targetId);
       if (current === undefined || current.revision !== contribution.baseRevision || contribution.atMs < current.updatedAt || contribution.workspaceId !== current.workspaceId || contribution.spaceId !== current.spaceId || contribution.audience !== current.audience || !validReplayMemoryAuthority(current, contribution.actorId, contribution.authority)) throw new MemoryProjectionError("memory evidence contribution does not match active revision or authority");

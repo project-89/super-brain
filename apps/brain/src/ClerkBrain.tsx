@@ -5,25 +5,12 @@ import {
   UserButton,
   useAuth,
 } from "@clerk/react";
+import { SuperBrainClient, type AuthenticatedSession, type TokenSupplier } from "@_89/super-brain-client";
 import { BrainCircuit } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import App from "./App";
 import type { ConnectionSettings } from "./types";
-
-interface SessionMembership {
-  readonly organizationId: string;
-  readonly organizationRole: "owner" | "admin" | "member";
-  readonly workspaceId: string;
-  readonly workspaceRole: "owner" | "member" | "reader";
-}
-
-interface AuthenticatedSession {
-  readonly principalId: string;
-  readonly identityProvider: string;
-  readonly organizationId: string;
-  readonly memberships: readonly SessionMembership[];
-}
 
 function baseUrl(): string {
   const value = (import.meta.env.VITE_FOLD_API_BASE_URL ?? "/api").trim();
@@ -40,35 +27,31 @@ function AuthSurface({ children }: { readonly children: React.ReactNode }) {
 }
 
 export default function ClerkBrain() {
-  const { getToken, isLoaded, isSignedIn, orgId } = useAuth();
+  const { getToken, isLoaded, isSignedIn, orgId, userId, sessionId } = useAuth();
+  const sessionKey = JSON.stringify([orgId, userId, sessionId]);
+  const [discoveredKey, setDiscoveredKey] = useState<string>();
   const [session, setSession] = useState<AuthenticatedSession>();
-  const [token, setToken] = useState("");
+  const tokenSupplier = useMemo<TokenSupplier>(() => async (signal) => {
+    if (signal?.aborted || !isLoaded || !isSignedIn || orgId == null) return undefined;
+    return (await getToken()) ?? undefined;
+  }, [getToken, isLoaded, isSignedIn, orgId, userId, sessionId]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [error, setError] = useState<string>();
 
   useEffect(() => {
-    setSession(undefined);
+    setSession(undefined); setDiscoveredKey(undefined);
     setWorkspaceId("");
     setError(undefined);
-    if (!isLoaded || !isSignedIn || orgId === undefined) return;
+    if (!isLoaded || !isSignedIn || orgId == null) return;
 
     const controller = new AbortController();
     let timer: number | undefined;
     const refresh = async () => {
       try {
-        const nextToken = await getToken();
-        if (nextToken === null) throw new Error("Clerk did not issue an API token");
-        const response = await fetch(`${baseUrl()}/v1/session`, {
-          headers: { authorization: `Bearer ${nextToken}` },
-          signal: controller.signal,
-        });
-        const body = await response.json() as AuthenticatedSession | { readonly error?: { readonly message?: string } };
-        if (!response.ok) {
-          throw new Error("error" in body ? body.error?.message ?? `Session discovery failed (${response.status})` : `Session discovery failed (${response.status})`);
-        }
-        const discovered = body as AuthenticatedSession;
-        setToken(nextToken);
-        setSession(discovered);
+        const client = new SuperBrainClient({ baseUrl: baseUrl(), organizationId: orgId ?? undefined, workspaceId: "", token: tokenSupplier, signal: controller.signal });
+        const discovered = await client.session();
+        if (controller.signal.aborted) return;
+        setSession(discovered); setDiscoveredKey(sessionKey);
         setWorkspaceId((current) => discovered.memberships.some((membership) => membership.workspaceId === current)
           ? current
           : discovered.memberships[0]?.workspaceId ?? "");
@@ -83,23 +66,24 @@ export default function ClerkBrain() {
       controller.abort();
       if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [getToken, isLoaded, isSignedIn, orgId]);
+  }, [tokenSupplier, isLoaded, isSignedIn, orgId, sessionKey]);
 
   const connection = useMemo<ConnectionSettings | undefined>(() => {
-    if (session === undefined || token.length === 0 || workspaceId.length === 0) return undefined;
+    if (session === undefined || discoveredKey !== sessionKey || workspaceId.length === 0) return undefined;
     return {
       baseUrl: baseUrl(),
       organizationId: session.organizationId,
       workspaceId,
-      token,
+      token: "",
+      tokenSupplier,
       captureBaseUrl: "",
       captureOperatorToken: "",
     };
-  }, [session, token, workspaceId]);
+  }, [session, tokenSupplier, workspaceId, discoveredKey, sessionKey]);
 
   if (!isLoaded) return <AuthSurface><div className="auth-status">Loading identity</div></AuthSurface>;
   if (!isSignedIn) return <AuthSurface><SignIn /></AuthSurface>;
-  if (orgId === undefined) {
+  if (orgId == null) {
     return <AuthSurface><OrganizationList hidePersonal /></AuthSurface>;
   }
   if (error !== undefined) {
@@ -119,7 +103,7 @@ export default function ClerkBrain() {
   }
 
   return (
-    <App
+    <App key={sessionKey}
       connectionOverride={connection}
       accountControls={(
         <div className="account-controls">

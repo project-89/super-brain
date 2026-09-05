@@ -1,3 +1,9 @@
+import type { MemoryApplicability, PersonalMemory, MemoryCandidate, MemoryCandidateView } from "@_89/fold-epistemic";
+import type { TraceRuntimeObservation, AttemptContext, TrajectoryManifest } from "@_89/fold-trace";
+import type { TokenSupplier, TelemetryOutbox } from "@_89/super-brain-client";
+export type { PersonalMemory, MemoryCandidate, MemoryCandidateView } from "@_89/fold-epistemic";
+export type RecalledMemory = import("@_89/fold-epistemic").RecalledMemory & { readonly presentation?: import("@_89/super-brain-client").RecallProvenance };
+export type RankedMemoryRecallResult = Omit<Awaited<ReturnType<import("@_89/super-brain-client").SuperBrainClient["rankMemories"]>>, "memories"> & { readonly memories: readonly RecalledMemory[] };
 export type JsonPrimitive = boolean | number | string | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
@@ -6,6 +12,8 @@ export interface ConnectionSettings {
   readonly organizationId: string;
   readonly workspaceId: string;
   readonly token: string;
+  readonly tokenSupplier?: TokenSupplier;
+  readonly telemetryOutbox?: TelemetryOutbox;
   readonly captureBaseUrl: string;
   readonly captureOperatorToken: string;
 }
@@ -99,78 +107,6 @@ export interface FoldLogEntry {
   readonly status: "canon" | "draft";
 }
 
-export interface PersonalMemory {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly spaceId?: string;
-  readonly creatorId: string;
-  readonly audience: "personal" | "workspace";
-  readonly projectIds: readonly string[];
-  readonly source: string;
-  readonly summary: string;
-  readonly content: JsonValue;
-  readonly tags: readonly string[];
-  readonly entities: readonly {
-    readonly id: string;
-    readonly type: string;
-    readonly name: string;
-  }[];
-  readonly evidence?: readonly {
-    readonly eventId: string;
-    readonly projectId?: string;
-    readonly runId?: string;
-    readonly turnId?: string;
-  }[];
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly revision: number;
-}
-
-export interface RecalledMemory {
-  readonly memory: PersonalMemory;
-  readonly score?: number;
-}
-
-export interface MemoryCandidate {
-  readonly id: string;
-  readonly workspaceId: string;
-  readonly spaceId?: string;
-  readonly proposerId: string;
-  readonly audience: "personal" | "workspace";
-  readonly projectIds: readonly string[];
-  readonly source: string;
-  readonly summary: string;
-  readonly content: JsonValue;
-  readonly tags: readonly string[];
-  readonly entities: PersonalMemory["entities"];
-  readonly evidence: readonly {
-    readonly eventId: string;
-    readonly projectId?: string;
-    readonly runId?: string;
-    readonly turnId?: string;
-  }[];
-  readonly confidence: number;
-  readonly salience: number;
-  readonly extractor: { readonly kind: "rule" | "model" | "human"; readonly id: string; readonly version: string };
-  readonly proposedAt: number;
-  readonly proposalEventId: string;
-}
-
-export interface MemoryCandidateView {
-  readonly candidate: MemoryCandidate;
-  readonly status: "proposed" | "accepted" | "rejected";
-  readonly decision?: Readonly<Record<string, JsonValue>>;
-}
-
-export interface RankedMemoryRecallResult {
-  readonly memories: readonly RecalledMemory[];
-  readonly ranking: {
-    readonly id: string;
-    readonly kind: "lexical" | "semantic";
-    readonly corpusSize: number;
-  };
-}
-
 export interface SerializedFoldNode {
   readonly id: string;
   readonly nodeKind?: string;
@@ -186,28 +122,8 @@ export interface SerializedFoldEdge {
   readonly payload?: JsonValue;
 }
 
-export interface SerializedFoldState {
-  readonly values: readonly [string, JsonValue][];
-  readonly nodes: readonly [string, SerializedFoldNode][];
-  readonly edges: readonly [string, SerializedFoldEdge][];
-  readonly redirects: readonly [string, string][];
-  readonly diagnostics: readonly Readonly<Record<string, JsonValue>>[];
-  readonly appliedEvents: readonly FoldEvent[];
-  readonly appliedChanges: readonly Readonly<Record<string, JsonValue>>[];
-  readonly appliedEventCount?: number;
-  readonly appliedChangeCount?: number;
-}
-
-export interface ProjectionResponse {
-  readonly entries: readonly FoldLogEntry[];
-  readonly state: SerializedFoldState;
-  readonly total?: number;
-  readonly projected?: number;
-  readonly section?: ProjectionSection;
-  readonly sectionTotal?: number;
-  readonly nextCursor?: string;
-  readonly counts?: Readonly<Record<ProjectionSection, number>>;
-}
+export type SerializedFoldState = import("@_89/super-brain-client").SerializedFoldState;
+export type ProjectionResponse = import("@_89/super-brain-client").ProjectionResponse;
 
 export type ProjectionSection = "nodes" | "edges" | "values" | "redirects" | "diagnostics";
 
@@ -241,6 +157,7 @@ export interface BrainSnapshot {
   readonly eventTotal: number;
   readonly eventCursor?: string;
   readonly captureHealth?: CaptureHealth;
+  readonly processing?: ProcessingStatus;
   readonly loadedAt: number;
 }
 
@@ -369,6 +286,8 @@ export type MemoryScope =
   | { readonly kind: "space"; readonly spaceId: string };
 
 export interface MemoryDraft {
+  readonly applicability?: MemoryApplicability;
+  readonly expectedRevision?: number;
   readonly audience: "personal" | "workspace";
   readonly projectIds: readonly string[];
   readonly source: string;
@@ -387,6 +306,8 @@ export type TrajectoryStepRole =
   | "model_output";
 
 export interface TrajectoryStep {
+  readonly runtime?: TraceRuntimeObservation;
+  readonly context?: AttemptContext;
   readonly id: string;
   readonly stepNumber: number;
   readonly role: TrajectoryStepRole;
@@ -420,6 +341,7 @@ export interface SharedDecisionTree {
 }
 
 export interface ProjectionMethod {
+  readonly basis?: "structural" | "semantic";
   readonly kind: "manual" | "rule" | "model";
   readonly id: string;
   readonly confidence?: number;
@@ -440,6 +362,7 @@ export type ProjectionAssignment =
     };
 
 export interface TrajectoryInput {
+  readonly manifest?: TrajectoryManifest;
   readonly id: string;
   readonly taskId: string;
   readonly model: { readonly id: string; readonly version?: string };
@@ -523,47 +446,7 @@ export type TrajectoryDivergence =
       readonly stepId?: string;
     };
 
-export interface TrajectoryTaskReport {
-  readonly taskId: string;
-  readonly tree: SharedDecisionTree;
-  readonly records: readonly TrajectoryRunRecord[];
-  readonly projected: readonly ProjectedTrajectory[];
-  readonly analysis: {
-    readonly traceCount: number;
-    readonly routeEligibleTraceCount: number;
-    readonly incompleteTraceCount: number;
-    readonly coverage: {
-      readonly total: number;
-      readonly mapped: number;
-      readonly ambiguous: number;
-      readonly unmapped: number;
-      readonly mappedRatio: number;
-    };
-    readonly routes: readonly RouteOutcome[];
-    readonly mostSuccessfulPath: readonly string[];
-    readonly edgeOutcomes: readonly EdgeOutcome[];
-  };
-  readonly divergences: readonly {
-    readonly trajectoryId: string;
-    readonly divergence: TrajectoryDivergence;
-  }[];
-  readonly evaluations: readonly {
-    readonly trajectoryId: string;
-    readonly review: {
-      readonly confidence?: number;
-      readonly verdict?: "approve" | "revise" | "reject";
-      readonly detail: string;
-    };
-    readonly oracle: {
-      readonly confidence: number;
-      readonly combine: string;
-      readonly executions: readonly unknown[];
-      readonly detail?: string;
-    };
-  }[];
-  readonly runTotal?: number;
-  readonly runCursor?: string;
-}
+export type TrajectoryTaskReport = import("@_89/super-brain-client").SerializedTrajectoryTaskReport;
 
 export interface TrajectoryImportBundle {
   readonly spaceId?: string;
@@ -715,3 +598,10 @@ export interface ReasoningProviderStatus {
   readonly configured?: boolean;
   readonly isDefault?: boolean;
 }
+
+export type ProcessingCounts = Readonly<Record<"pending" | "waiting" | "retry" | "completed" | "excluded" | "exhausted", number>>;
+export type ProcessingStatus = { readonly available: false; readonly reason: string; readonly observedAt?: string } | {
+  readonly available: true; readonly version: 1; readonly observedAt: string; readonly status: "running";
+  readonly coverage: ProcessingCounts & { readonly oldestPendingAt?: number; readonly byKind: Readonly<Record<string, number>> };
+  readonly lagMs?: number;
+};

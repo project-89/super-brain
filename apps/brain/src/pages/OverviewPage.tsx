@@ -1,6 +1,9 @@
 import { Activity, ArrowRight, BookOpen, Bot, BrainCircuit, FolderGit2, RadioTower, Route, Wrench } from "lucide-react";
 import { useMemo } from "react";
 
+import type { FoldApiClient } from "../api";
+import type { BrowserTelemetryOutbox } from "../telemetry-outbox";
+import { ProcessingStatus } from "../components/ProcessingStatus";
 import { EmptyState, PageHeader } from "../components/Common";
 import { formatRelative } from "../format";
 import type { BrainPage, BrainSnapshot } from "../types";
@@ -24,9 +27,11 @@ function activitySeries(runs: BrainSnapshot["transcriptRuns"]) {
 
 export function OverviewPage({
   snapshot,
-  navigate,
+  navigate, api, outbox,
 }: {
   readonly snapshot: BrainSnapshot;
+  readonly api: FoldApiClient;
+  readonly outbox?: BrowserTelemetryOutbox;
   readonly navigate: (page: BrainPage) => void;
 }) {
   const turns = snapshot.transcriptRuns.reduce((sum, run) => sum + run.counts.turns, 0);
@@ -51,13 +56,15 @@ export function OverviewPage({
       </section>
 
       <section className="operations-band" aria-label="System operations">
-        <button type="button" onClick={() => navigate("fleet")}><RadioTower aria-hidden="true" /><span><strong>{snapshot.captureHealth === undefined ? "Offline" : "Online"}</strong><small>Capture daemon</small></span></button>
+        <button type="button" onClick={() => navigate("fleet")}><RadioTower aria-hidden="true" /><span><strong>{snapshot.captureHealth === undefined ? "Unavailable" : "Reachable"}</strong><small>Capture daemon</small></span></button>
         <button type="button" onClick={() => navigate("fleet")}><Activity aria-hidden="true" /><span><strong>{snapshot.captureHealth?.activeSessions ?? snapshot.fleet.fleet.sessions.filter(({ availability }) => availability === "available").length}</strong><small>Live sessions</small></span></button>
         <button type="button" onClick={() => navigate("memory")}><BrainCircuit aria-hidden="true" /><span><strong>{snapshot.memoryCandidateTotal}</strong><small>Memory proposals</small></span></button>
         <button type="button" onClick={() => navigate("trajectories")}><Route aria-hidden="true" /><span><strong>{snapshot.trajectoryTaskTotal}</strong><small>Decision trees</small></span></button>
         <button type="button" onClick={() => navigate("fleet")}><RadioTower aria-hidden="true" /><span><strong>{snapshot.fleet.fleet.recoveryActions.length}</strong><small>Recovery actions</small></span></button>
       </section>
 
+      <ProcessingStatus processing={snapshot.processing} api={api} outbox={outbox} />
+      <p className="evidence-note">Activity below covers {snapshot.transcriptRuns.length} loaded runs of {snapshot.transcriptRunTotal}; turns, actions and daily counts are a partial view.</p>
       <section className="overview-grid">
         <div className="panel panel--activity">
           <header className="panel__header">

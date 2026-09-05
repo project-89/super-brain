@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { hasConnectionCredentials } from "./connection";
 import { FoldApiClient, FoldApiError } from "./api";
 import type {
   BrainPage,
@@ -11,6 +12,7 @@ import type {
 } from "./types";
 
 interface SnapshotState {
+  readonly connection?: ConnectionSettings;
   readonly page?: BrainPage;
   readonly snapshot?: BrainSnapshot;
   readonly loading: boolean;
@@ -61,7 +63,7 @@ function emptySnapshot(): BrainSnapshot {
 async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSnapshot> {
   const snapshot = emptySnapshot();
   if (page === "overview") {
-    const [memoryPage, candidatePage, taskPage, transcriptProjects, runPage, fleet, captureHealth] = await Promise.all([
+    const [memoryPage, candidatePage, taskPage, transcriptProjects, runPage, fleet, captureHealth, processing] = await Promise.all([
       client.recallMemoryPage({ scope: { kind: "all" }, limit: 4 }),
       client.listMemoryCandidatePage({ status: "proposed", limit: 1 }),
       client.listTrajectoryTaskPage({ limit: 1 }),
@@ -69,6 +71,7 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
       client.listTranscriptRunPage({ limit: 100 }),
       client.fleet(),
       client.captureHealth().catch(() => undefined),
+      client.processingStatus().catch(() => ({ available: false as const, reason: "local-operator-unavailable" })),
     ]);
     return {
       ...snapshot,
@@ -82,14 +85,14 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
       transcriptRuns: runPage.items,
       transcriptRunTotal: runPage.total,
       fleet,
+      processing,
       ...(captureHealth === undefined ? {} : { captureHealth }),
     };
   }
   if (page === "memory") {
-    const [memoryPage, candidatePage, events] = await Promise.all([
-      client.recallMemoryPage({ scope: { kind: "all" }, limit: 100 }),
+    const [memoryPage, candidatePage] = await Promise.all([
+      client.recallMemoryPage({ scope: { kind: "all" }, includeNeedsReview: true, limit: 100 }),
       client.listMemoryCandidatePage({ status: "proposed", limit: 100 }),
-      client.listEvents({ kinds: ["memory.feedback-recorded"] }),
     ]);
     return {
       ...snapshot,
@@ -99,7 +102,6 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
       memoryCandidates: candidatePage.items,
       memoryCandidateTotal: candidatePage.total,
       ...(candidatePage.nextCursor === undefined ? {} : { memoryCandidateCursor: candidatePage.nextCursor }),
-      events,
     };
   }
   if (page === "history") {
@@ -147,28 +149,30 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
 export function useSnapshot(connection: ConnectionSettings, page: BrainPage) {
   const [state, setState] = useState<SnapshotState>({ loading: true, refreshing: false });
   const requestNumber = useRef(0);
+  const priorConnection = useRef<ConnectionSettings | undefined>(undefined);
   const abortController = useRef<AbortController | undefined>(undefined);
 
   const refresh = useCallback(
     async (background = false) => {
-      if (!connection.organizationId || !connection.workspaceId || !connection.token) {
-        setState({ page, loading: false, refreshing: false });
+      if (!connection.organizationId || !connection.workspaceId || !hasConnectionCredentials(connection)) {
+        setState({ connection, page, loading: false, refreshing: false });
         return;
       }
+      const connectionChanged = priorConnection.current !== connection; priorConnection.current = connection;
       const request = ++requestNumber.current;
       abortController.current?.abort();
       const controller = new AbortController();
       abortController.current = controller;
-      setState((current) => current.page === page ? {
+      setState((current) => !connectionChanged && current.page === page ? {
         ...current,
         loading: !background && current.snapshot === undefined,
         refreshing: background || current.snapshot !== undefined,
         error: undefined,
-      } : { page, loading: true, refreshing: false });
+      } : { connection, page, loading: true, refreshing: false });
       try {
         const snapshot = await loadPage(new FoldApiClient(connection, controller.signal), page);
         if (request !== requestNumber.current) return;
-        setState({ page, snapshot, loading: false, refreshing: false });
+        setState({ connection, page, snapshot, loading: false, refreshing: false });
       } catch (error) {
         if (request !== requestNumber.current || controller.signal.aborted) return;
         const apiError = error instanceof FoldApiError
@@ -182,7 +186,7 @@ export function useSnapshot(connection: ConnectionSettings, page: BrainPage) {
 
   useEffect(() => {
     void refresh();
-    const timer = page === "fleet" || page === "steering"
+    const timer = page === "fleet" || page === "steering" || page === "overview"
       ? window.setInterval(() => void refresh(true), 30_000)
       : undefined;
     return () => {
@@ -191,5 +195,5 @@ export function useSnapshot(connection: ConnectionSettings, page: BrainPage) {
     };
   }, [page, refresh]);
 
-  return { ...state, refresh };
+  return { ...(state.connection === connection ? state : { loading: true, refreshing: false }), refresh };
 }

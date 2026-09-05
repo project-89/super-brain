@@ -2,6 +2,11 @@ import { Check, Edit3, ListFilter, Plus, Search, Sparkles, ThumbsDown, ThumbsUp,
 import { useEffect, useMemo, useState } from "react";
 
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
+import { MemoryEvidence } from "../components/MemoryEvidence";
+import { MemoryFeedback } from "../components/MemoryFeedback";
+import { EvidenceReference } from "../components/EvidenceReference";
+import { applicabilityLabel, currentnessReasonLabel, hasCapability, mayEditMemory, mayReviewCandidate } from "../permissions";
+import type { AuthorizedIdentity, RecallProvenance } from "@_89/super-brain-client";
 import { LoadMore } from "../components/LoadMore";
 import type { FoldApiClient } from "../api";
 import { formatDateTime, memoryContent, uniqueSorted } from "../format";
@@ -10,35 +15,6 @@ import { useCursorList } from "../use-cursor-list";
 
 type RecallMode = "filter" | "ranked";
 
-interface FeedbackStats {
-  readonly recalled: number;
-  readonly helpful: number;
-  readonly unhelpful: number;
-  readonly superseded: number;
-  readonly latestAt?: number;
-}
-
-function feedbackByMemory(events: readonly FoldLogEntry[]): ReadonlyMap<string, FeedbackStats> {
-  const stats = new Map<string, FeedbackStats>();
-  for (const { event } of events) {
-    if (event.kind !== "memory.feedback-recorded") continue;
-    for (const change of event.changes) {
-      if (change.nodeKind !== "x.fold.memory-feedback" || change.after === null ||
-        typeof change.after !== "object" || Array.isArray(change.after)) continue;
-      const memoryId = typeof change.after.memoryId === "string" ? change.after.memoryId : undefined;
-      const signal = change.after.signal;
-      if (memoryId === undefined || !["recalled", "helpful", "unhelpful", "superseded"].includes(String(signal))) continue;
-      const current = stats.get(memoryId) ?? { recalled: 0, helpful: 0, unhelpful: 0, superseded: 0 };
-      stats.set(memoryId, {
-        ...current,
-        [signal as "recalled" | "helpful" | "unhelpful" | "superseded"]: current[signal as keyof FeedbackStats] as number + 1,
-        latestAt: Math.max(current.latestAt ?? 0, event.at.t),
-      });
-    }
-  }
-  return stats;
-}
-
 export function MemoryPage({
   memories: initialMemories,
   memoryTotal,
@@ -46,7 +22,7 @@ export function MemoryPage({
   candidates: initialCandidates,
   candidateTotal,
   candidateCursor,
-  feedbackEvents,
+  feedbackEvents: _feedbackEvents,
   api,
   onRank,
   onCreate,
@@ -75,17 +51,19 @@ export function MemoryPage({
   readonly onCreate: () => void;
   readonly onEdit: (memory: PersonalMemory) => void;
   readonly onForget: (memory: PersonalMemory) => void;
-  readonly onFeedback: (memory: PersonalMemory, signal: "helpful" | "unhelpful") => Promise<void>;
+  readonly onFeedback: (memory: PersonalMemory, signal: "helpful" | "unhelpful", presentation?: RecallProvenance) => Promise<void>;
   readonly onAcceptCandidate: (candidate: MemoryCandidate) => Promise<void>;
   readonly onRejectCandidate: (candidate: MemoryCandidate, reason: string) => Promise<void>;
   readonly mutationPending: boolean;
 }) {
+  const [access, setAccess] = useState<AuthorizedIdentity>();
+  useEffect(() => { let active = true; setAccess(undefined); void api.identity().then((identity) => { if (active) setAccess(identity); }, () => undefined); return () => { active = false; }; }, [api]);
   const memoryPage = useCursorList({
     initialItems: initialMemories,
     initialTotal: memoryTotal,
     initialCursor: memoryCursor,
     keyOf: ({ memory }) => memory.id,
-    loadPage: (cursor) => api.recallMemoryPage({ scope: { kind: "all" }, limit: 100, cursor }),
+    loadPage: (cursor) => api.recallMemoryPage({ scope: { kind: "all" }, includeNeedsReview: true, limit: 100, cursor }),
   });
   const candidatePage = useCursorList({
     initialItems: initialCandidates,
@@ -108,11 +86,6 @@ export function MemoryPage({
   const [rankingError, setRankingError] = useState<string>();
   const [rankedFingerprint, setRankedFingerprint] = useState<string>();
   const sources = useMemo(() => uniqueSorted(memories.map(({ memory }) => memory.source)), [memories]);
-  const feedback = useMemo(() => feedbackByMemory(feedbackEvents), [feedbackEvents]);
-  const validatedMemories = useMemo(() => memories.filter(({ memory }) => {
-    const item = feedback.get(memory.id);
-    return item !== undefined && item.helpful + item.unhelpful + item.superseded > 0;
-  }).length, [feedback, memories]);
   const fingerprint = JSON.stringify([query.trim(), source, scope, spaceId.trim()]);
   const localFiltered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -167,14 +140,15 @@ export function MemoryPage({
     else if (!filtered.some(({ memory }) => memory.id === selectedId)) setSelectedId(filtered[0]!.memory.id);
   }, [filtered, selectedId]);
 
-  const selected = filtered.find(({ memory }) => memory.id === selectedId)?.memory;
+  const selectedItem = filtered.find(({ memory }) => memory.id === selectedId);
+  const selected = selectedItem?.memory;
 
   return (
     <div className="page page--memory">
       <PageHeader
         eyebrow="Project-aware recall"
         title="Memory"
-        actions={<button className="button button--primary" type="button" onClick={onCreate} aria-label="New memory" title="New memory"><Plus aria-hidden="true" />New memory</button>}
+        actions={<button className="button button--primary" type="button" onClick={onCreate} disabled={!hasCapability(access, "memories:write")} aria-label="New memory" title="New memory"><Plus aria-hidden="true" />New memory</button>}
       />
       <div className="segmented-control memory-view" role="group" aria-label="Memory view">
         <button type="button" aria-pressed={view === "memories"} onClick={() => setView("memories")}>Memories</button>
@@ -192,7 +166,7 @@ export function MemoryPage({
         {scope === "space" && <label className="compact-field compact-field--space"><span>Space</span><input value={spaceId} onChange={(event) => setSpaceId(event.target.value)} /></label>}
         {mode === "ranked" && <button className="icon-button memory-search-button" type="submit" disabled={rankingPending || !query.trim() || (scope === "space" && !spaceId.trim())} aria-label="Run ranked search" title="Run ranked search"><Search aria-hidden="true" /></button>}
         <span className="result-count">{filtered.length} shown · {memoryPage.total} total</span>
-        <span className="ranking-status">{validatedMemories}/{memories.length} validated · {feedbackEvents.length} feedback signals</span>
+        <span className="ranking-status">{mode === "filter" ? "Inspection includes memories needing review" : "Ranked recall uses current, applicable memories"}</span>
         {mode === "ranked" && rankedFingerprint === fingerprint && ranked !== undefined && <span className={`ranking-status ranking-status--${ranked.ranking.kind}`}>{ranked.ranking.kind} / {ranked.ranking.id} / {ranked.ranking.corpusSize} scanned</span>}
         {rankingError !== undefined && <span className="filter-error" role="alert">{rankingError}</span>}
       </form>
@@ -202,10 +176,6 @@ export function MemoryPage({
           {filtered.length === 0 ? (
             <EmptyState title={mode === "ranked" && rankedFingerprint !== fingerprint ? "Run ranked search" : "No matching memories"} />
           ) : filtered.map(({ memory, score }) => {
-            const memoryFeedback = feedback.get(memory.id);
-            const validationCount = memoryFeedback === undefined
-              ? 0
-              : memoryFeedback.helpful + memoryFeedback.unhelpful + memoryFeedback.superseded;
             return (
             <button
               type="button"
@@ -215,7 +185,7 @@ export function MemoryPage({
             >
               <span className="memory-row__top"><strong>{memory.summary || "Untitled memory"}</strong><time>{formatDateTime(memory.updatedAt)}</time></span>
               <span className="memory-row__excerpt">{memoryContent(memory) || "No content"}</span>
-              <span className="memory-row__meta"><span>{memory.source}</span><span>{memory.spaceId ?? "workspace"}</span><span>r{memory.revision}</span><span>{memoryFeedback?.recalled ?? 0} recalls</span><span>{validationCount === 0 ? "unvalidated" : `${validationCount} judgments`}</span>{score !== undefined && <span>{Math.round(score * 100)}%</span>}</span>
+              <span className="memory-row__meta"><span>{memory.source}</span><span>{memory.spaceId ?? "workspace"}</span><span>r{memory.revision}</span><span>{memory.currentness?.status ?? "Currentness unknown"}</span><span>{applicabilityLabel(memory)}</span>{mode === "ranked" && score !== undefined && <span>Relevance {score.toFixed(3)}</span>}</span>
             </button>
             );
           })}
@@ -230,37 +200,39 @@ export function MemoryPage({
               <header className="detail-pane__header">
                 <div><span className="eyebrow">Revision {selected.revision}</span><h2>{selected.summary || "Untitled memory"}</h2></div>
                 <div className="detail-pane__actions">
-                  <button className="icon-button" type="button" disabled={mutationPending} title="Mark helpful" aria-label="Mark memory helpful" onClick={() => void onFeedback(selected, "helpful")}><ThumbsUp aria-hidden="true" /></button>
-                  <button className="icon-button" type="button" disabled={mutationPending} title="Mark unhelpful" aria-label="Mark memory unhelpful" onClick={() => void onFeedback(selected, "unhelpful")}><ThumbsDown aria-hidden="true" /></button>
-                  <button className="icon-button" type="button" title="Revise memory" aria-label="Revise memory" onClick={() => onEdit(selected)}><Edit3 aria-hidden="true" /></button>
-                  <button className="icon-button icon-button--danger" type="button" title="Forget memory" aria-label="Forget memory" onClick={() => onForget(selected)}><Trash2 aria-hidden="true" /></button>
+                  <button className="icon-button" type="button" disabled={mutationPending || !hasCapability(access, "feedback:write") || selectedItem?.presentation === undefined} title="Mark helpful" aria-label="Mark memory helpful" onClick={() => void onFeedback(selected, "helpful", selectedItem?.presentation)}><ThumbsUp aria-hidden="true" /></button>
+                  <button className="icon-button" type="button" disabled={mutationPending || !hasCapability(access, "feedback:write") || selectedItem?.presentation === undefined} title="Mark unhelpful" aria-label="Mark memory unhelpful" onClick={() => void onFeedback(selected, "unhelpful", selectedItem?.presentation)}><ThumbsDown aria-hidden="true" /></button>
+                  <button className="icon-button" type="button" disabled={mutationPending || !mayEditMemory(access, selected)} title="Revise memory" aria-label="Revise memory" onClick={() => onEdit(selected)}><Edit3 aria-hidden="true" /></button>
+                  <button className="icon-button icon-button--danger" type="button" disabled={mutationPending || !mayEditMemory(access, selected)} title="Forget memory" aria-label="Forget memory" onClick={() => onForget(selected)}><Trash2 aria-hidden="true" /></button>
                 </div>
               </header>
               <dl className="metadata-grid">
                 <div><dt>Source</dt><dd>{selected.source}</dd></div>
                 <div><dt>Scope</dt><dd>{selected.spaceId ?? "Workspace"}</dd></div>
                 <div><dt>Audience</dt><dd>{selected.audience === "workspace" ? "Workspace" : "Personal"}</dd></div>
-                <div><dt>Projects</dt><dd>{selected.projectIds.length > 0 ? selected.projectIds.join(", ") : "All projects"}</dd></div>
+                <div><dt>Projects</dt><dd>{applicabilityLabel(selected)}</dd></div>
                 <div><dt>Created</dt><dd>{formatDateTime(selected.createdAt)}</dd></div>
                 <div><dt>Updated</dt><dd>{formatDateTime(selected.updatedAt)}</dd></div>
-                <div><dt>Recall</dt><dd>{feedback.get(selected.id)?.recalled ?? 0}</dd></div>
-                <div><dt>Validation</dt><dd>{(() => { const item = feedback.get(selected.id); return item === undefined || item.helpful + item.unhelpful + item.superseded === 0 ? "Unvalidated" : `${item.helpful} helpful / ${item.unhelpful} unhelpful / ${item.superseded} superseded`; })()}</dd></div>
-                <div><dt>Last feedback</dt><dd>{feedback.get(selected.id)?.latestAt === undefined ? "Never" : formatDateTime(feedback.get(selected.id)!.latestAt!)}</dd></div>
+                <div><dt>Currentness</dt><dd>{selected.currentness?.status ?? "Unknown"}</dd></div>
+                <div><dt>Creator</dt><dd>{selected.creatorId}</dd></div>
               </dl>
+              {!mayEditMemory(access, selected) && <p className="evidence-note">Your current access permits inspection. Editing and review require the appropriate workspace or space permission.</p>}
+              {(selected.currentness?.reasons.length ?? 0) > 0 && <p className="evidence-note evidence-note--review">Review needed: {selected.currentness!.reasons.map(currentnessReasonLabel).join("; ")}</p>}
               {selected.tags.length > 0 && <div className="tag-list" aria-label="Tags">{selected.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
               <div className="memory-content"><pre>{memoryContent(selected) || "No content"}</pre></div>
               {selected.entities.length > 0 && (
                 <section className="detail-section"><h3>Entities</h3><ul className="entity-list">{selected.entities.map((entity) => <li key={`${entity.type}:${entity.id}`}><strong>{entity.name}</strong><span>{entity.type}</span><code>{entity.id}</code></li>)}</ul></section>
               )}
-              {(selected.evidence?.length ?? 0) > 0 && (
-                <section className="detail-section"><h3>Evidence</h3><ul className="candidate-evidence">{selected.evidence!.map((evidence) => <li key={`${evidence.eventId}:${evidence.turnId ?? ""}`}><code>{evidence.eventId}</code>{evidence.projectId !== undefined && <span>{evidence.projectId}</span>}{evidence.runId !== undefined && <span>{evidence.runId}</span>}{evidence.turnId !== undefined && <span>{evidence.turnId}</span>}</li>)}</ul></section>
-              )}
+              <MemoryFeedback key={`feedback:${selected.id}:${selected.revision}:${mutationPending}`} memoryId={selected.id} revision={selected.revision} api={api} />
+              <MemoryEvidence key={selected.id} memory={selected} api={api} />
             </>
           )}
         </article>
       </section>
       </> : (
         <CandidateReview
+          api={api}
+          access={access}
           candidates={candidates}
           pending={mutationPending}
           onAccept={onAcceptCandidate}
@@ -277,6 +249,7 @@ export function MemoryPage({
 }
 
 function CandidateReview({
+  api, access,
   candidates,
   pending,
   onAccept,
@@ -287,6 +260,8 @@ function CandidateReview({
   loadError,
   onLoadMore,
 }: {
+  readonly api: FoldApiClient;
+  readonly access?: AuthorizedIdentity;
   readonly candidates: readonly MemoryCandidateView[];
   readonly pending: boolean;
   readonly onAccept: (candidate: MemoryCandidate) => Promise<void>;
@@ -321,7 +296,7 @@ function CandidateReview({
             <button type="button" className={`memory-row${view.candidate.id === selectedId ? " memory-row--selected" : ""}`} key={view.candidate.id} onClick={() => setSelectedId(view.candidate.id)}>
               <span className="memory-row__top"><strong>{view.candidate.summary}</strong><time>{formatDateTime(view.candidate.proposedAt)}</time></span>
               <span className="memory-row__excerpt">{typeof view.candidate.content === "string" ? view.candidate.content : JSON.stringify(view.candidate.content)}</span>
-              <span className="memory-row__meta"><span>{view.status}</span><span>{view.candidate.audience}</span><span>{Math.round(view.candidate.confidence * 100)}% confidence</span></span>
+              <span className="memory-row__meta"><span>{view.status}</span><span>{view.candidate.audience}</span><span>{Math.round(view.candidate.confidence * 100)}% extractor estimate</span></span>
             </button>
           ))}
           <LoadMore loaded={filtered.length} total={total} hasMore={hasMore} loading={loadingMore} error={loadError} onLoadMore={onLoadMore} />
@@ -332,19 +307,20 @@ function CandidateReview({
               <header className="detail-pane__header"><div><span className="eyebrow">{selected.status} proposal</span><h2>{selected.candidate.summary}</h2></div></header>
               <dl className="metadata-grid">
                 <div><dt>Audience</dt><dd>{selected.candidate.audience}</dd></div>
-                <div><dt>Projects</dt><dd>{selected.candidate.projectIds.length > 0 ? selected.candidate.projectIds.join(", ") : "All projects"}</dd></div>
+                <div><dt>Projects</dt><dd>{applicabilityLabel(selected.candidate)}</dd></div>
                 <div><dt>Extractor</dt><dd>{selected.candidate.extractor.id} v{selected.candidate.extractor.version}</dd></div>
-                <div><dt>Confidence</dt><dd>{Math.round(selected.candidate.confidence * 100)}%</dd></div>
-                <div><dt>Salience</dt><dd>{Math.round(selected.candidate.salience * 100)}%</dd></div>
+                <div><dt>Extractor estimate</dt><dd>{Math.round(selected.candidate.confidence * 100)}%</dd></div>
+                <div><dt>Extractor salience</dt><dd>{Math.round(selected.candidate.salience * 100)}%</dd></div>
                 <div><dt>Proposer</dt><dd>{selected.candidate.proposerId}</dd></div>
               </dl>
               {selected.candidate.tags.length > 0 && <div className="tag-list" aria-label="Tags">{selected.candidate.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
               <div className="memory-content"><pre>{typeof selected.candidate.content === "string" ? selected.candidate.content : JSON.stringify(selected.candidate.content, null, 2)}</pre></div>
-              <section className="detail-section"><h3>Evidence</h3><ul className="candidate-evidence">{selected.candidate.evidence.map((evidence) => <li key={`${evidence.eventId}:${evidence.turnId ?? ""}`}><code>{evidence.eventId}</code>{evidence.runId !== undefined && <span>{evidence.runId}</span>}{evidence.turnId !== undefined && <span>{evidence.turnId}</span>}</li>)}</ul></section>
+              <section className="detail-section"><h3>Proposal evidence</h3><p className="evidence-note">Extractor estimates are self-reported. Review the source before accepting.</p><ul className="candidate-evidence">{selected.candidate.evidence.map((evidence, index) => <li key={`${evidence.eventId}:${index}`}><strong>{evidence.relation === "opposes" ? "Opposes" : "Supports"}</strong><EvidenceReference api={api} evidence={evidence} /></li>)}</ul></section>
+              {!mayReviewCandidate(access, selected.candidate) && <p className="evidence-note">Shared proposal acceptance requires an owner or administrator with write access. This proposal remains pending.</p>}
               {selected.status === "proposed" && (
                 <div className="candidate-actions">
                   <label className="field"><span>Rejection reason</span><input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Required to reject" maxLength={500} /></label>
-                  <div><button className="button button--danger" type="button" disabled={pending || !reason.trim()} onClick={() => void onReject(selected.candidate, reason.trim())}><X aria-hidden="true" />Reject</button><button className="button button--primary" type="button" disabled={pending} onClick={() => void onAccept(selected.candidate)}><Check aria-hidden="true" />Accept</button></div>
+                  <div><button className="button button--danger" type="button" disabled={pending || !reason.trim() || !mayReviewCandidate(access, selected.candidate)} onClick={() => void onReject(selected.candidate, reason.trim())}><X aria-hidden="true" />Reject</button><button className="button button--primary" type="button" disabled={pending || !mayReviewCandidate(access, selected.candidate)} onClick={() => void onAccept(selected.candidate)}><Check aria-hidden="true" />Accept</button></div>
                 </div>
               )}
             </>

@@ -11,8 +11,11 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
+import type { AuthorizedIdentity } from "@_89/super-brain-client";
+import { hasCapability } from "../permissions";
 import type { FoldApiClient } from "../api";
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
+import { AttemptEvidence, RuntimeEvidence, TaskEvidenceTimeline } from "../components/TaskEvidence";
 import { LoadMore } from "../components/LoadMore";
 import { formatRelative } from "../format";
 import type {
@@ -55,6 +58,8 @@ export function TrajectoriesPage({
   readonly api: FoldApiClient;
   readonly onImport: () => void;
 }) {
+  const [access, setAccess] = useState<AuthorizedIdentity>();
+  useEffect(() => { let active = true; setAccess(undefined); void api.identity().then((value) => { if (active) setAccess(value); }, () => undefined); return () => { active = false; }; }, [api]);
   const taskPage = useCursorList({
     initialItems: initialTasks,
     initialTotal: total,
@@ -150,13 +155,13 @@ export function TrajectoriesPage({
       <PageHeader
         eyebrow="Decision evidence"
         title="Trajectories"
-        actions={<button className="button button--primary" type="button" onClick={onImport}><Import aria-hidden="true" />Import</button>}
+        actions={<button className="button button--primary" type="button" onClick={onImport} disabled={!hasCapability(access, "trajectories:write")}><Import aria-hidden="true" />Import</button>}
       />
 
       {tasks.length === 0 ? (
         <section className="panel trajectory-empty">
           <EmptyState title="No trajectory tasks" />
-          <button className="button button--primary" type="button" onClick={onImport}><Import aria-hidden="true" />Import</button>
+          <button className="button button--primary" type="button" onClick={onImport} disabled={!hasCapability(access, "trajectories:write")}><Import aria-hidden="true" />Import</button>
         </section>
       ) : (
         <section className="trajectory-workspace">
@@ -195,21 +200,21 @@ export function TrajectoriesPage({
             ) : (
               <>
                 <header className="trajectory-report__header">
-                  <div><span className="eyebrow">Task</span><h2>{report.taskId}</h2></div>
-                  <span>{report.tree.nodes.length} nodes · {report.tree.edges.length} edges</span>
+                  <div><span className="eyebrow">Task</span><h2>{report.records.find((record) => record.trajectory.manifest?.task.goal)?.trajectory.manifest?.task.goal ?? report.taskId}</h2><code className="evidence-note">{report.taskId}</code></div>
+                  <span>{report.tree.nodes.length} nodes · {report.tree.edges.length} edges · {report.projectionBasis ?? "unspecified"} mapping · comparison {report.comparison?.status ?? "unspecified"}</span>
                 </header>
 
                 <div className="trajectory-metrics" aria-label="Trajectory analysis">
                   <div><CircleDot aria-hidden="true" /><span><strong>{report.analysis.traceCount}</strong><small>Runs</small></span></div>
                   <div><Check aria-hidden="true" /><span><strong>{percent(report.analysis.coverage.mappedRatio)}</strong><small>Mapped</small></span></div>
-                  <div><Route aria-hidden="true" /><span><strong>{classifiedRuns}</strong><small>Verified / {unknownRuns} unknown</small></span></div>
+                  <div><Route aria-hidden="true" /><span><strong>{classifiedRuns}</strong><small>Classified / {unknownRuns} unknown</small></span></div>
                   <div><GitBranch aria-hidden="true" /><span><strong>{report.analysis.routes.length}</strong><small>Observed routes</small></span></div>
                 </div>
 
                 <section className="trajectory-consensus">
                   <header><span><span className="eyebrow">Observed evidence</span><h3>Highest-success path</h3></span><small>{report.analysis.incompleteTraceCount} incomplete</small></header>
                   {report.analysis.mostSuccessfulPath.length === 0 ? (
-                    <EmptyState title={classifiedRuns === 0 ? "No verified outcome route" : "No complete route"} />
+                    <EmptyState title={classifiedRuns === 0 ? "No classified outcome route" : "No complete route"} />
                   ) : (
                     <div className="trajectory-path">
                       {report.analysis.mostSuccessfulPath.map((nodeId, index) => {
@@ -231,6 +236,8 @@ export function TrajectoriesPage({
                   <TrajectoryGraph tree={report.tree} successfulPath={report.analysis.mostSuccessfulPath} selectedRun={selectedRun} />
                 </Suspense>
 
+                <p className="evidence-note">Classified outcomes are recorded results. Structural mapping records sequence; it does not independently assess reasoning quality.</p>
+                <TaskEvidenceTimeline key={report.taskId} taskId={report.taskId} api={api} />
                 <section className="trajectory-run-layout">
                   <div className="trajectory-run-list">
                     <header><span className="eyebrow">Captured runs</span><strong>{report.records.length} records</strong></header>
@@ -257,14 +264,15 @@ export function TrajectoriesPage({
                           <dl>
                             <div><dt>Projection</dt><dd>{divergence?.kind ?? "indeterminate"}</dd></div>
                             <div><dt>Review</dt><dd>{evaluation?.review.verdict ?? "unmarked"}</dd></div>
-                            <div><dt>Confidence</dt><dd>{evaluation === undefined || evaluation.oracle.confidence === null ? "Unknown" : percent(evaluation.oracle.confidence)}</dd></div>
+                            <div><dt>Evaluation score</dt><dd>{evaluation === undefined || evaluation.oracle.confidence === null ? "Unknown" : percent(evaluation.oracle.confidence)}</dd></div>
                           </dl>
                         </header>
+                        <AttemptEvidence manifest={selectedRecord.trajectory.manifest} api={api} />
                         <ol className="trajectory-steps">
                           {selectedRun.steps.map((step) => (
                             <li key={step.raw.id}>
                               <span className="trajectory-step-number">{step.raw.stepNumber}</span>
-                              <div><span><b>{step.raw.role.replaceAll("_", " ")}</b><em className={`projection-badge projection-badge--${step.projection.kind}`}>{step.projection.kind}</em></span><p>{step.raw.content}</p><code>{projectionLabel(step)} · {step.projection.method.kind}:{step.projection.method.id}</code>{(step.raw.eventId !== undefined || step.raw.artifactId !== undefined || step.raw.turnId !== undefined || step.raw.durationMs !== undefined) && <small className="trajectory-step-evidence">{[step.raw.eventId === undefined ? undefined : `event ${step.raw.eventId}`, step.raw.artifactId === undefined ? undefined : `artifact ${step.raw.artifactId}`, step.raw.turnId === undefined ? undefined : `turn ${step.raw.turnId}`, step.raw.durationMs === undefined ? undefined : `${step.raw.durationMs} ms`].filter(Boolean).join(" · ")}</small>}</div>
+                              <div><span><b>{step.raw.role.replaceAll("_", " ")}</b><em className={`projection-badge projection-badge--${step.projection.kind}`}>{step.projection.kind}</em></span><p>{step.raw.content}</p><code>{projectionLabel(step)} · {step.projection.method.basis ?? "basis unknown"} · {step.projection.method.kind}:{step.projection.method.id}</code>{(step.raw.eventId !== undefined || step.raw.artifactId !== undefined || step.raw.turnId !== undefined || step.raw.durationMs !== undefined) && <small className="trajectory-step-evidence">{[step.raw.eventId === undefined ? undefined : `event ${step.raw.eventId}`, step.raw.artifactId === undefined ? undefined : `artifact ${step.raw.artifactId}`, step.raw.turnId === undefined ? undefined : `turn ${step.raw.turnId}`, step.raw.durationMs === undefined ? undefined : `${step.raw.durationMs} ms`].filter(Boolean).join(" · ")}</small>}{step.raw.runtime !== undefined && <RuntimeEvidence runtime={step.raw.runtime} />}</div>
                             </li>
                           ))}
                         </ol>

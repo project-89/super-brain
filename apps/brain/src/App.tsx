@@ -17,7 +17,8 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { FoldApiClient } from "./api";
-import { initialConnection, saveConnection } from "./connection";
+import { useBrowserTelemetry } from "./use-telemetry";
+import { initialConnection, saveConnection, hasConnectionCredentials } from "./connection";
 import { useSnapshot } from "./use-snapshot";
 import type { BrainPage, ConnectionSettings, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
 import { ConnectionDialog } from "./components/ConnectionDialog";
@@ -68,7 +69,7 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
   const [page, setPage] = useState<Page>(pageFromHash);
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [settingsOpen, setSettingsOpen] = useState(
-    connectionOverride === undefined && (!connection.workspaceId || !connection.token),
+    connectionOverride === undefined && (!connection.workspaceId || !hasConnectionCredentials(connection)),
   );
   const [memoryDialog, setMemoryDialog] = useState<{ readonly open: boolean; readonly memory?: PersonalMemory }>({ open: false });
   const [forgetMemory, setForgetMemory] = useState<PersonalMemory>();
@@ -77,8 +78,12 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
   const [mutationPending, setMutationPending] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [mutationError, setMutationError] = useState<string>();
-  const effectiveConnection = connectionOverride ?? connection;
+  const selectedConnection = connectionOverride ?? connection;
+  const outbox = useBrowserTelemetry(selectedConnection);
+  const effectiveConnection = useMemo(() => ({ ...selectedConnection, ...(outbox === undefined ? {} : { telemetryOutbox: outbox }) }), [selectedConnection, outbox]);
   const { snapshot, loading, refreshing, error, refresh } = useSnapshot(effectiveConnection, page);
+
+  useEffect(() => { setMemoryDialog({ open: false }); setForgetMemory(undefined); setTrajectoryImportOpen(false); setMutationError(undefined); }, [selectedConnection.organizationId, selectedConnection.workspaceId, selectedConnection.token, selectedConnection.tokenSupplier]);
 
   useEffect(() => {
     const onHashChange = () => setPage(pageFromHash());
@@ -172,17 +177,17 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
           feedbackEvents={snapshot.events}
           api={api}
           onRank={(options) => api.rankMemories(options)}
-          onCreate={() => setMemoryDialog({ open: true })}
-          onEdit={(memory) => setMemoryDialog({ open: true, memory })}
+          onCreate={() => { setMutationError(undefined); setMemoryDialog({ open: true }); }}
+          onEdit={(memory) => { setMutationError(undefined); setMemoryDialog({ open: true, memory }); }}
           onForget={(memory) => {
             setForgetMemory(memory);
             setForgetReason("no longer needed");
           }}
-          onFeedback={async (memory, signal) => {
+          onFeedback={async (memory, signal, presentation) => {
             setMutationPending(true);
             setMutationError(undefined);
             try {
-              await api.recordMemoryFeedback(memory.id, signal);
+              await api.recordMemoryFeedback(memory, signal, presentation);
               setNotice(signal === "helpful" ? "Memory marked helpful" : "Memory marked unhelpful");
             } catch (caught) {
               setMutationError(caught instanceof Error ? caught.message : "Memory feedback failed");
@@ -259,10 +264,10 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
         />
       );
     }
-    return <OverviewPage snapshot={snapshot} navigate={navigate} />;
+    return <OverviewPage snapshot={snapshot} navigate={navigate} api={api} outbox={outbox} />;
   };
 
-  const disconnected = !effectiveConnection.organizationId || !effectiveConnection.workspaceId || !effectiveConnection.token;
+  const disconnected = !effectiveConnection.organizationId || !effectiveConnection.workspaceId || !hasConnectionCredentials(effectiveConnection);
   const connectionLabel = disconnected ? "Not connected" : error ? "Connection error" : "Connected";
 
   return (
@@ -331,7 +336,7 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
       </nav>
 
       {connectionOverride === undefined && <ConnectionDialog connection={connection} open={settingsOpen} required={disconnected} onClose={() => setSettingsOpen(false)} onSave={saveSettings} />}
-      <MemoryDialog memory={memoryDialog.memory} open={memoryDialog.open} pending={mutationPending} onClose={() => setMemoryDialog({ open: false })} onSave={saveMemory} />
+      <MemoryDialog error={mutationError} onRefresh={memoryDialog.memory === undefined ? undefined : () => api.canonical.memoryById(memoryDialog.memory!.id)} memory={memoryDialog.memory} open={memoryDialog.open} pending={mutationPending} onClose={() => setMemoryDialog({ open: false })} onSave={saveMemory} />
       <TrajectoryImportDialog open={trajectoryImportOpen} pending={mutationPending} onClose={() => setTrajectoryImportOpen(false)} onImport={importTrajectories} />
       <Modal open={forgetMemory !== undefined} title="Forget memory" onClose={() => setForgetMemory(undefined)}>
         <div className="form-stack">

@@ -224,3 +224,10 @@ unverified. API principal/workspace fields stay server-owned, and worker promoti
 still requires the separate exact acceptance/checkpoint witnesses and the API's
 shared-review authorization. Rebasing old outbound jobs does not manufacture new
 attestation.
+
+
+### Local processing status
+
+Set `processingStatusFile` in the capture config, or `SUPER_BRAIN_WORKER_STATUS_FILE` in its process environment, to the memory worker's sanitized `processing-status.json` publication. The default is unconfigured. `GET /processing` requires the separate `x-super-brain-operator-token`; the hook token cannot inspect this endpoint. No request-supplied path is accepted.
+
+The bridge reads at most 64 KiB through a no-follow/nonblocking regular-file descriptor and checks owner-only permissions and current UID on that same descriptor. It validates version and tenant and emits only allowlisted aggregate counts, kind counts, observed time and measured pending lag. Stopped, missing, corrupt, changed, public, symlinked, future-dated and older-than-60-second publications return explicit unavailability rather than zero counts or healthy status. No job IDs, payloads, filesystem paths, credentials or worker principal are returned.

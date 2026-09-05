@@ -17,7 +17,13 @@
     "@xyflow/react": "^12.11.6",
     "lucide-react": "^1.33.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "@_89/super-brain-client": "workspace:*",
+    "@_89/fold-epistemic": "workspace:*",
+    "@_89/fold-trace": "workspace:*",
+    "@_89/fold-trajectory": "workspace:*",
+    "@_89/fold-transcript": "workspace:*",
+    "@_89/fold": "workspace:*"
   },
   "devDependencies": {
     "@types/dagre": "^0.7.54",
@@ -26,6 +32,7 @@
     "@types/react-dom": "^19.2.4",
     "typescript": "^5.9.0",
     "vite": "^8.2.1",
-    "vitest": "^3.2.0"
+    "vitest": "^3.2.0",
+    "fake-indexeddb": "^6.2.2"
   }
 }

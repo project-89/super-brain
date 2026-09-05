@@ -62,7 +62,7 @@ describe("Fold API client", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/events?include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200&order=desc",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/events?order=desc&include=canon%2Bdraft&kind=memory.recorded&kind=agent+status&limit=200",
     );
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret-token");
   });
@@ -159,7 +159,7 @@ describe("Fold API client", () => {
     await expect(client.importTrajectoryBundle(trajectoryBundle, [])).resolves.toBe(1);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/trajectory-tasks/task%2Fone",
+      "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/trajectory-tasks/task%2Fone?",
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "/api/v1/organizations/organization%2Fone/workspaces/workspace%2Fone/trajectory-tasks",
@@ -229,7 +229,7 @@ describe("Fold API client", () => {
     const steering = { actors: [], steeringEnabled: true };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(steering))
-      .mockResolvedValue(jsonResponse({}, 201));
+      .mockImplementation(async () => jsonResponse({}, 201));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(client.steering()).resolves.toEqual(steering);
@@ -305,4 +305,45 @@ describe("Fold API client", () => {
       code: "network_error",
     });
   });
+});
+
+describe("canonical adapter guarantees", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const settings = { baseUrl: "/api", organizationId: "local", workspaceId: "workspace", token: "stale-token", captureBaseUrl: "/capture", captureOperatorToken: "operator-private" };
+  it("obtains the current session token for every request and never attaches operator credentials", async () => {
+    let token: string | undefined = "fresh-one";
+    const api = new FoldApiClient({ ...settings, tokenSupplier: async () => token });
+    const fetchMock = vi.fn(async () => jsonResponse({ memories: [], total: 0 })); vi.stubGlobal("fetch", fetchMock);
+    await api.recallMemoryPage({ includeNeedsReview: true }); token = "fresh-two"; await api.recallMemoryPage();
+    expect(fetchMock.mock.calls.map((call) => new Headers((call as unknown as [string, RequestInit])[1].headers).get("authorization"))).toEqual(["Bearer fresh-one", "Bearer fresh-two"]);
+    expect(fetchMock.mock.calls.every((call) => new Headers((call as unknown as [string, RequestInit])[1].headers).get("x-super-brain-operator-token") === null)).toBe(true);
+    token = undefined; await expect(api.recallMemoryPage()).rejects.toMatchObject({ code: "token_unavailable" }); expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("cancels during response body consumption without converting abort into invalid JSON", async () => {
+    const abort = new AbortController(); const api = new FoldApiClient(settings, abort.signal);
+    const stream = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{"items":')); } });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream)));
+    const request = api.listEventsPage(); await Promise.resolve(); abort.abort();
+    await expect(request).rejects.toMatchObject({ code: "aborted" });
+  });
+  it("retains the command stamp, UUID and displayed revision across a lost mutation acknowledgement", async () => {
+    const api = new FoldApiClient(settings); const bodies: unknown[] = []; let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => { bodies.push(JSON.parse(String(init.body))); if (attempts++ === 0) throw new TypeError("lost acknowledgement"); return jsonResponse({ memory: { id: "memory" } }); }));
+    const draft = { audience: "workspace" as const, projectIds: [], source: "review", summary: "Correction", content: "new fact", tags: [], applicability: { kind: "global" as const }, expectedRevision: 0 };
+    await expect(api.reviseMemory("memory", draft)).rejects.toMatchObject({ code: "network_error" }); await api.reviseMemory("memory", draft);
+    expect(bodies[1]).toEqual(bodies[0]); expect(bodies[0]).toMatchObject({ expectedRevision: 0, patch: { content: "new fact", applicability: { kind: "global" } } });
+    attempts = 0; bodies.length = 0; await expect(api.createMemory(draft)).rejects.toMatchObject({ code: "network_error" }); await api.createMemory(draft); expect(bodies[1]).toEqual(bodies[0]); expect(bodies[0]).toMatchObject({ input: { id: expect.stringMatching(/^[0-9a-f-]{36}$/) } });
+  });
+  it("records judgment against the exact presented revision and ranking identity", async () => {
+    const api = new FoldApiClient(settings);
+    const provenance = { version: 1, recallId: "recall-stable", subject: { organizationId: "local", workspaceId: "workspace", principalId: "person" }, observedAt: new Date().toISOString(), operation: "search", ranking: { id: "lexical", kind: "lexical" }, items: [{ memoryId: "memory", memoryRevision: 0, rank: 1 }] };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ memories: [], ranking: { id: "lexical", kind: "lexical", corpusSize: 1 }, provenance })).mockResolvedValueOnce(jsonResponse({})); vi.stubGlobal("fetch", fetchMock);
+    const read = await api.rankMemories({ query: "test" }); await api.recordMemoryFeedback({ id: "memory", revision: 0 }, "helpful", read.provenance);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1].body))).toMatchObject({ expectedSubject: provenance.subject, items: [{ memoryId: "memory", input: { version: 2, memoryRevision: 0, recallId: "recall-stable", signal: "judged", judgment: "helpful", rank: 1 } }] });
+  });
+});
+
+it("can open connection settings before credentials exist without creating a transport with a stale token", async () => {
+  const api = new FoldApiClient({ baseUrl: "/api", organizationId: "local", workspaceId: "workspace", token: "", captureBaseUrl: "/capture", captureOperatorToken: "" });
+  await expect(api.identity()).rejects.toMatchObject({ code: "token_unavailable" });
 });

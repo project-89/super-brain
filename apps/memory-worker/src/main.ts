@@ -2,6 +2,8 @@
 import { SuperBrainClient } from "@_89/super-brain-client";
 import { readVaultKey } from "@_89/super-brain-importer";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { createCapturedEventVerifier } from "./authority.js";
 import { createCapturedTrajectoryVerifier } from "@_89/super-brain-capture-daemon";
 
@@ -90,6 +92,7 @@ async function main(): Promise<void> {
     continuousCognition: (command === "watch" || command === "retry") && !args.includes("--no-continuous-cognition"),
     cognitionEveryEvents,
     ...(stateRoot === undefined ? {} : { stateRoot }),
+    statusFile: process.env.SUPER_BRAIN_WORKER_STATUS_FILE ?? join(stateRoot ?? join(homedir(), ".local", "state", "super-brain", "memory-worker", "jobs"), "processing-status.json"),
     ...(spaceId === undefined ? {} : { spaceId }),
     ...(verifyCapturedEvent === undefined ? {} : { verifyCapturedEvent }),
     ...(verifyCapturedTrajectory === undefined ? {} : { verifyCapturedTrajectory }),

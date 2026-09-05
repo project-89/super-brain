@@ -33,6 +33,7 @@ export interface CaptureConfig {
   readonly stateRoot: string;
   readonly vaultRoot: string;
   readonly vaultKeyPath?: string;
+  readonly processingStatusFile?: string;
   readonly reasoningPolicy: ReasoningPolicy;
   readonly retainEncryptedReasoning: boolean;
   readonly reasoningTreePolicy: ReasoningTreePolicy;

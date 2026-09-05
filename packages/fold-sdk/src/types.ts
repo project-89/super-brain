@@ -224,6 +224,7 @@ export type RankedMemoryRecallRequest = Omit<RecallRequest, "candidates"> & {
 };
 
 export interface RankedMemoryRecallResult {
+  readonly feedback?: { readonly basis: "requester-latest-judgment-tiebreak-v1"; readonly items: readonly { readonly memoryId: string; readonly memoryRevision: number; readonly preference: number }[] };
   readonly memories: readonly RecalledMemory[];
   readonly ranking: MemoryRankerDescriptor & {
     readonly corpusSize: number;

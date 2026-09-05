@@ -191,6 +191,9 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await this.setTenant(client, tenant);
       const result = await client.query<R>(text, [...values]);
       await client.query("COMMIT");
@@ -233,6 +236,9 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await this.setTenant(client, tenant);
       for (const [index, item] of missing.entries()) {
         const vector = vectorLiteral(vectors[index]!, this.provider.descriptor.dimensions);

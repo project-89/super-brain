@@ -10,12 +10,14 @@ import { DurableWorkerJobs, jobDigest, type ProcessingCoverage, type WorkerJob, 
 import type { ExtractedCandidate, RunExtraction, VaultMessage } from "./types.js";
 import { readVaultEvidence } from "./vault.js";
 import { verifiedTaskAcceptance } from "./authority.js";
+import { publishWorkerProcessingStatus, type WorkerProcessingStatus } from "./status.js";
 
 export interface WorkerOptions {
   readonly client: SuperBrainClient;
   readonly vaultRoot: string;
   readonly vaultEncryptionKey?: Uint8Array;
   readonly stateRoot?: string;
+  readonly statusFile?: string;
   /** Per-kind dispatch budget, never a source extraction limit. */
   readonly maxCandidatesPerRun?: number;
   readonly audience?: "personal" | "workspace";
@@ -92,6 +94,8 @@ export class TranscriptMemoryWorker {
   private store: DurableWorkerJobs | undefined;
   private opening: Promise<DurableWorkerJobs> | undefined;
   private principalId: string | undefined;
+  private statusSubject: WorkerProcessingStatus["subject"] | undefined;
+  private statusPublishing: Promise<void> = Promise.resolve();
   private draining: Promise<{ proposed: number; promoted: number }> | undefined;
   private modelDraining: Promise<void> | undefined;
   private readonly modelRequests = new Set<AbortController>();
@@ -114,10 +118,11 @@ export class TranscriptMemoryWorker {
       const identity = await this.options.client.identity();
       if (this.closing) throw new Error("Worker is closing");
       this.principalId = identity.principalId;
+      this.statusSubject = { ...identity, organizationId: identity.organizationId ?? "local" };
       const namespace = JSON.stringify([identity.organizationId ?? "local", identity.workspaceId, identity.principalId,
         RULE_EXTRACTOR, this.options.audience ?? "workspace", this.options.spaceId ?? ""]);
       const store = new DurableWorkerJobs(this.options.stateRoot ?? join(homedir(), ".local", "state", "super-brain", "memory-worker", "jobs"), namespace);
-      await store.open(); this.store = store; return store;
+      await store.open(); this.store = store; await this.publishStatus("running"); return store;
     })().catch((error) => { this.opening = undefined; throw error; });
     return this.opening;
   }
@@ -126,7 +131,15 @@ export class TranscriptMemoryWorker {
     this.watchController?.abort();
     for (const controller of this.modelRequests) controller.abort(new Error("worker-closed"));
     await Promise.allSettled([...this.background, this.draining, this.modelDraining, this.opening]);
+    await this.publishStatus("stopped");
     await this.store?.close(); this.store = undefined; this.opening = undefined;
+  }
+  private publishStatus(status: WorkerProcessingStatus["status"]): Promise<void> {
+    return this.statusPublishing = this.statusPublishing.then(async () => {
+      if (this.options.statusFile === undefined || this.store === undefined || this.statusSubject === undefined) return;
+      try { await publishWorkerProcessingStatus(this.options.statusFile, { version: 1, observedAt: new Date(this.now()).toISOString(), status: this.closing ? "stopped" : status, subject: this.statusSubject, coverage: await this.store.coverage() }); }
+      catch { this.options.reportWarning?.("Processing status publication is unavailable"); }
+    });
   }
   configureProjectRoots(runs: readonly TranscriptRun[]): void {
     this.projectRoots = runs.flatMap((run) => run.segments.flatMap((segment) =>
@@ -524,11 +537,12 @@ export class TranscriptMemoryWorker {
       try { await this.options.reportCoverage(await jobs.coverage()); }
       catch { this.options.reportWarning?.("Coverage reporting failed; local durable state is retained"); }
     }
+    await this.publishStatus(this.closing ? "stopped" : "running");
     return { proposed, promoted };
   }
   /** A separately scheduled, single-owner lane keeps slow providers away from extraction. */
   drainModelJobs(): Promise<void> {
-    if (this.modelDraining === undefined) this.modelDraining = this.drainModels().finally(() => { this.modelDraining = undefined; });
+    if (this.modelDraining === undefined) this.modelDraining = this.drainModels().finally(async () => { await this.publishStatus(this.closing ? "stopped" : "running"); this.modelDraining = undefined; });
     return this.modelDraining;
   }
   private async drainModels(): Promise<void> {

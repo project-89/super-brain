@@ -137,6 +137,7 @@ describe("SDK personal memory API", () => {
     expect(result).toEqual({
       memories: [{ memory: expect.objectContaining({ id: MEMORY_A }), score: 0.75 }],
       ranking: { id: "test-ranker", kind: "semantic", corpusSize: 1 },
+      feedback: { basis: "requester-latest-judgment-tiebreak-v1", items: [] },
     });
   });
 

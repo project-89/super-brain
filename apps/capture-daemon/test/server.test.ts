@@ -44,6 +44,9 @@ describe("capture operator settings", () => {
     const url = `http://${address.host}:${address.port}/settings`;
     try {
       expect((await fetch(url)).status).toBe(401);
+      const processingUrl = `http://${address.host}:${address.port}/processing`;
+      expect((await fetch(processingUrl, { headers: { "x-super-brain-token": "hook-token" } })).status).toBe(401);
+      expect((await fetch(processingUrl, { headers: { "x-super-brain-operator-token": "operator-token" } })).status).toBe(200);
       const headers = { "x-super-brain-operator-token": "operator-token" };
       const initial = await fetch(url, { headers });
       await expect(initial.json()).resolves.toMatchObject({

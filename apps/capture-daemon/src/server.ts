@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
+import { readProcessingStatus } from "./processing-status.js";
 import { normalizeHookEvidence } from "./evidence.js";
 import { CaptureReceiptQueue, receiptEncryptionKey } from "./receipts.js";
 import { CaptureEngine } from "./capture.js";
@@ -151,6 +152,12 @@ export class CaptureHttpServer {
             treeSnapshotEveryEvents: this.config.treeSnapshotEveryEvents,
           },
         });
+        return;
+      }
+      if (url.pathname === "/processing") {
+        if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) { send(response, 401, { error: "unauthorized" }); return; }
+        if (request.method !== "GET") { send(response, 405, { error: "method_not_allowed" }); return; }
+        send(response, 200, await readProcessingStatus(this.config));
         return;
       }
       if (url.pathname === "/settings") {

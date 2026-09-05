@@ -765,13 +765,13 @@ describe("Fold HTTP API", () => {
           token: "token-a",
           body: {
             stamp: { id: "event-feedback", t: 115, worldDate: "2026-08-17" },
-            input: { signal: "helpful", query: "Which memory helped?", taskId: "task-a" },
+            input: { version: 2, memoryRevision: 1, recallId: "recall-a", signal: "judged", judgment: "helpful" },
           },
         },
       );
       expect(feedback).toMatchObject({
         status: 201,
-        body: { feedback: { memoryId: MEMORY_A, signal: "helpful", actorId: "user-a", taskId: "task-a" } },
+        body: { feedback: { memoryId: MEMORY_A, signal: "judged", judgment: "helpful", actorId: "user-a" } },
       });
 
       const forgotten = await apiRequest(

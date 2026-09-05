@@ -323,6 +323,9 @@ export class PostgresTenantAdministration {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await client.query("SELECT set_config('app.organization_id', $1, true)", [organizationId]);
       const result = await operation(client);
       await client.query("COMMIT");
@@ -419,6 +422,9 @@ export class PostgresTenantAdministration {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await client.query(`DELETE FROM ${this.table("fold_external_organization_bindings")}
         WHERE provider = $1`, [provider]);
       await client.query(`DELETE FROM ${this.table("fold_external_principal_bindings")}
@@ -488,6 +494,9 @@ export class PostgresTenantAdministration {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await client.query("SELECT set_config('app.organization_id', $1, true)", [organizationId]);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`identity:${provider}:${externalOrganizationId}`]);
       const occurredAt = input.occurredAt ?? (input.type.startsWith("credential.") ? Date.now() : 0);

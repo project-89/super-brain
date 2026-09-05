@@ -56,3 +56,8 @@ export function saveConnection(settings: ConnectionSettings): ConnectionSettings
   sessionStorage.setItem(CAPTURE_TOKEN_KEY, normalized.captureOperatorToken);
   return normalized;
 }
+
+/** Suppliers are live session state; never serialize them or cache their last returned token. */
+export function hasConnectionCredentials(settings: ConnectionSettings): boolean {
+  return settings.tokenSupplier !== undefined || settings.token.trim().length > 0;
+}

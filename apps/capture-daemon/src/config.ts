@@ -119,6 +119,7 @@ export function parseCaptureConfig(value: unknown): CaptureConfig {
     stateRoot: expandedPath(input.stateRoot, "stateRoot"),
     vaultRoot: expandedPath(input.vaultRoot, "vaultRoot"),
     ...(input.vaultKeyPath === undefined ? {} : { vaultKeyPath: expandedPath(input.vaultKeyPath, "vaultKeyPath") }),
+    ...(input.processingStatusFile === undefined ? {} : { processingStatusFile: expandedPath(input.processingStatusFile, "processingStatusFile") }),
     reasoningPolicy,
     retainEncryptedReasoning: input.retainEncryptedReasoning === true,
     reasoningTreePolicy,
@@ -134,7 +135,8 @@ export async function readCaptureConfig(path = defaultConfigPath()): Promise<Cap
   if ((metadata.mode & 0o077) !== 0) {
     throw new Error(`capture configuration must not be accessible by group or others: ${path}`);
   }
-  return parseCaptureConfig(JSON.parse(await readFile(path, "utf8")) as unknown);
+  const input = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  return parseCaptureConfig({ ...input, ...(process.env.SUPER_BRAIN_WORKER_STATUS_FILE === undefined ? {} : { processingStatusFile: process.env.SUPER_BRAIN_WORKER_STATUS_FILE }) });
 }
 
 async function writePrivateJson(path: string, value: unknown): Promise<void> {

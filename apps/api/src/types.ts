@@ -34,6 +34,7 @@ export const API_CAPABILITIES = [
   "events:write",
   "memories:read",
   "memories:write",
+  "feedback:write",
   "trajectories:read",
   "trajectories:write",
   "task-outcomes:write",

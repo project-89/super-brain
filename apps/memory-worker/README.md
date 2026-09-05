@@ -40,3 +40,15 @@ Only an exact extracted project-scoped human decision with successful, tenant-bo
 On macOS, `install-service` writes an owner-readable launchd configuration. It carries the state, provider, space, vault, and trusted-capture settings above. `--replay-all` replays delivery while reusing durable job identity. SIGINT/SIGTERM abort owned requests, settle processing, and release the lease.
 
 The process-level lease regression imports the built worker output. Run the workspace build before the worker test suite, as in CI.
+
+The CLI publishes a sanitized, owner-only processing status file beside its job
+state (`processing-status.json`), or at `SUPER_BRAIN_WORKER_STATUS_FILE`. It
+contains the authenticated subject, observation time, aggregate job state/kind
+counts and oldest-work lag. It contains no job payloads, model output, token,
+source text or vault paths. Publication failure logs a generic warning and does
+not interrupt processing. Shutdown publishes `stopped` after settling owned work.
+Configure capture's `SUPER_BRAIN_WORKER_STATUS_FILE` to that same explicit file
+for its operator-only `/processing` bridge. The bridge rejects a different
+workspace, stale status, unsafe files or a stopped worker, and returns only
+aggregate coverage to the browser. An absent bridge means status is unavailable;
+it does not imply that processing is idle or complete.

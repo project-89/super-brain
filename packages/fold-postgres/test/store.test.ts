@@ -58,6 +58,36 @@ integrationDescribe("Postgres Fold store", () => {
     await pool.end();
   });
 
+  it("gates bootstrap writes before table locks while another process initializes the schema", async () => {
+    const applicationName = `bootstrap-${randomUUID()}`;
+    const bootstrap = new PostgresTenantAdministration({ connectionString: connectionString!, schema, pool: { application_name: applicationName } });
+    const record = { organizationId: "schema-gate-org", workspaceId: "schema-gate-workspace", principalId: "schema-gate-owner", organizationRole: "owner" as const, workspaceRole: "owner" as const, spaceRoles: {} };
+    await bootstrap.replaceStaticMemberships([record]);
+    const pool = new Pool({ connectionString: connectionString! }); const blocker = await pool.connect();
+    let seed: Promise<void> | undefined; let concurrent: PostgresTenantAdministration | undefined;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtext('fold-schema-v1'))");
+      seed = bootstrap.replaceStaticMemberships([record]);
+      void seed.catch(() => undefined);
+      concurrent = new PostgresTenantAdministration({ connectionString: connectionString!, schema });
+      let waiting: { query: string; wait_event: string } | undefined;
+      for (let check = 0; check < 100; check++) {
+        const result = await pool.query<{ query: string; wait_event: string }>("SELECT query, wait_event FROM pg_stat_activity WHERE application_name=$1 AND wait_event='advisory'", [applicationName]);
+        waiting = result.rows[0]; if (waiting !== undefined) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting?.query).toContain("pg_advisory_xact_lock_shared");
+      const locks = await pool.query("SELECT l.mode FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.application_name=$1 AND l.locktype='relation' AND l.mode IN ('RowExclusiveLock','AccessExclusiveLock')", [applicationName]);
+      expect(locks.rows).toEqual([]);
+      await blocker.query("COMMIT");
+      await seed; await concurrent.replaceStaticMemberships([record]);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined); blocker.release();
+      await seed?.catch(() => undefined); await concurrent?.close(); await bootstrap.close(); await pool.end();
+    }
+  }, 15_000);
+
   it("atomically appends and reads canonical-order entries", async () => {
     const store = database.store(workspaceId);
     const second = entry("event-b", 2, "draft");

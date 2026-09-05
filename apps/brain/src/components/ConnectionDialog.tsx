@@ -2,6 +2,7 @@ import { Eye, EyeOff, PlugZap, RefreshCw, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 
 import type { CapturePolicySettings, ConnectionSettings } from "../types";
+import { localCaptureRequest } from "../local-capture";
 import { Modal } from "./Modal";
 
 interface ConnectionDialogProps {
@@ -30,18 +31,8 @@ export function ConnectionDialog({ connection, open, required, onClose, onSave }
     if (!draft.captureBaseUrl.trim() || !draft.captureOperatorToken.trim()) {
       throw new Error("Capture URL and operator token are required");
     }
-    const response = await fetch(`${draft.captureBaseUrl.replace(/\/$/, "")}/settings`, {
-      method,
-      headers: {
-        "x-super-brain-operator-token": draft.captureOperatorToken.trim(),
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    const result = await response.json().catch(() => ({})) as { readonly policy?: CapturePolicySettings; readonly error?: string };
-    if (!response.ok || result.policy === undefined) {
-      throw new Error(result.error ?? `Capture settings failed (${response.status})`);
-    }
+    const result = await localCaptureRequest<{ readonly policy?: CapturePolicySettings }>(draft, "/settings", { method, ...(body === undefined ? {} : { body }) });
+    if (result.policy === undefined) throw new Error("Capture settings are unavailable");
     return result.policy;
   };
 

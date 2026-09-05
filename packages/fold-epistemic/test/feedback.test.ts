@@ -9,7 +9,7 @@ describe("memory feedback", () => {
       context(),
       stamp("feedback-event", 200),
       memory(),
-      { signal: "helpful", query: "Which database is canonical?", taskId: "task-a" },
+      { version: 2, memoryRevision: 0, recallId: "recall-a", signal: "judged", judgment: "helpful", taskId: "task-a" },
     );
     expect(event).toMatchObject({
       kind: "memory.feedback-recorded",
@@ -17,17 +17,18 @@ describe("memory feedback", () => {
     });
     expect(memoryFeedbackRecordsFromEvent(event)).toEqual([expect.objectContaining({
       memoryId: memory().id,
-      signal: "helpful",
-      query: "Which database is canonical?",
+      signal: "judged",
+      memoryRevision: 0,
+      judgment: "helpful",
       taskId: "task-a",
       actorId: "user-a",
     })]);
   });
 
   it("rejects mismatched memory scope and empty details", () => {
-    expect(() => makeMemoryFeedbackEvent(context(), stamp("feedback-event", 200), memory({ workspaceId: "other" }), { signal: "recalled" }))
-      .toThrow(/workspace/);
-    expect(() => makeMemoryFeedbackEvent(context(), stamp("feedback-event", 200), memory(), { signal: "unhelpful", detail: " " }))
+    expect(() => makeMemoryFeedbackEvent(context(), stamp("feedback-event", 200), memory({ workspaceId: "other" }), { version: 2, memoryRevision: 0, recallId: "recall-a", signal: "offered" }))
+      .toThrow(/unavailable/);
+    expect(() => makeMemoryFeedbackEvent(context(), stamp("feedback-event", 200), memory(), { version: 2, memoryRevision: 0, recallId: "recall-a", signal: "judged", judgment: "unhelpful", detail: " " }))
       .toThrow(/detail/);
   });
 });

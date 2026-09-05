@@ -99,10 +99,11 @@ export async function atomicPrivateText(path: string, value: string): Promise<vo
 }
 
 /** Bounded reads for evidence reached from canonical references. Never follow a final symlink. */
-export async function readBoundedPrivateText(path: string, maxBytes: number): Promise<string> {
+export async function readBoundedPrivateText(path: string, maxBytes: number, options: { readonly requireOwnerOnly?: boolean } = {}): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await file.stat();
+    if (options.requireOwnerOnly && ((before.mode & 0o077) !== 0 || (process.getuid !== undefined && before.uid !== process.getuid()))) throw new Error("private evidence must be owned by this user and owner-only");
     if (!before.isFile() || before.size > maxBytes) throw new Error("private evidence is not a bounded regular file");
     const bytes = Buffer.alloc(before.size); let offset = 0;
     while (offset < bytes.length) { const chunk = await file.read(bytes, offset, bytes.length - offset, offset); if (chunk.bytesRead === 0) break; offset += chunk.bytesRead; }

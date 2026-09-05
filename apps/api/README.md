@@ -346,3 +346,5 @@ and stamp. Integration reporters cannot assert human acceptance/intervention.
 Static human operator credentials explicitly configure
 `taskEvidenceAuthority: {"kind":"human"}`. Verified Clerk session tokens derive
 human authority from the resolved user; Clerk machine/API-key tokens do not.
+
+The Phase 4 [feedback and transport contract](../../docs/PHASE4_FEEDBACK_TRANSPORT.md) documents exact revision feedback, the narrow `feedback:write` capability, atomic `/memory-feedback-batches`, inventory/recall provenance, account-bound delivery, and optimistic correction revisions. Existing stored unversioned feedback remains readable; new writes use version 2.

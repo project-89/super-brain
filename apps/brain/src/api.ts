@@ -1,545 +1,99 @@
-import { nextEventStamp, uuidV7 } from "./ids";
-import type {
-  ConnectionSettings,
-  CaptureHealth,
-  CursorPage,
-  FoldLogEntry,
-  FleetResponse,
-  HookArtifact,
-  HookSource,
-  MemoryDraft,
-  MemoryCandidateView,
-  MemoryScope,
-  PersonalMemory,
-  ProjectionResponse,
-  ProjectionSection,
-  RecalledMemory,
-  RankedMemoryRecallResult,
-  ReasoningResponse,
-  ReasoningProviderStatus,
-  SharedDecisionTree,
-  SteeringCandidateDraft,
-  SteeringIntentionEnd,
-  SteeringResponse,
-  TrajectoryImportBundle,
-  TrajectoryInput,
-  TrajectoryTaskReport,
-  TrajectoryTaskSummary,
-  TranscriptProjectSummary,
-  TranscriptArtifactRecord,
-  TranscriptRun,
-  TranscriptRunDetail,
-  TranscriptSource,
-} from "./types";
+import { SuperBrainClient, SuperBrainApiError, nextEventStamp, uuidV7, type EventStamp, type EventPageOptions, type RecallProvenance } from "@_89/super-brain-client";
+import type { RecallRequest } from "@_89/fold-epistemic";
+import { localCaptureRequest } from "./local-capture";
+import type { ConnectionSettings, CaptureHealth, CursorPage, HookArtifact, HookSource, MemoryDraft, MemoryCandidateView, PersonalMemory, ProjectionSection, SharedDecisionTree, SteeringCandidateDraft, SteeringIntentionEnd, TrajectoryImportBundle, TrajectoryInput, TrajectoryTaskSummary, TranscriptArtifactRecord, TranscriptSource, ProcessingStatus } from "./types";
 
-interface ApiErrorBody {
-  readonly error?: {
-    readonly code?: string;
-    readonly message?: string;
-    readonly details?: unknown;
-  };
-}
+// Preserve the existing UI error import while sharing the canonical transport classification.
+export { SuperBrainApiError as FoldApiError } from "@_89/super-brain-client";
+type RecallOptions = Omit<RecallRequest, "candidates"> & { readonly cursor?: string };
 
-export class FoldApiError extends Error {
-  override readonly name = "FoldApiError";
-
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-    readonly details?: unknown,
-  ) {
-    super(message);
-  }
-}
-
-function appendRepeated(params: URLSearchParams, key: string, values?: readonly string[]): void {
-  values?.forEach((value) => {
-    if (value.trim()) params.append(key, value.trim());
-  });
-}
-
+/** Connection and local-private adapter. Every canonical operation delegates to the shared client. */
 export class FoldApiClient {
-  constructor(
-    private readonly settings: ConnectionSettings,
-    private readonly signal?: AbortSignal,
-  ) {}
-
-  private workspacePath(resource: string): string {
-    return `/v1/organizations/${encodeURIComponent(this.settings.organizationId)}/workspaces/${encodeURIComponent(this.settings.workspaceId)}/${resource}`;
+  readonly canonical: SuperBrainClient;
+  private readonly pendingCommands = new Map<string, readonly EventStamp[]>();
+  private readonly entityIds = new Map<string, string>();
+  private readonly producer = `brain-${crypto.randomUUID()}`;
+  private entityId(stamp: EventStamp): string { let id = this.entityIds.get(stamp.id); if (id === undefined) { id = uuidV7(stamp.t); this.entityIds.set(stamp.id, id); } return id; }
+  private readonly judgments = new Map<string, { readonly subject: RecallProvenance["subject"]; readonly stamp: EventStamp; readonly item: import("@_89/super-brain-client").MemoryFeedbackBatchItem }>();
+  constructor(private readonly settings: ConnectionSettings, private readonly signal?: AbortSignal) {
+    this.canonical = new SuperBrainClient({ baseUrl: settings.baseUrl, organizationId: settings.organizationId, workspaceId: settings.workspaceId, token: settings.tokenSupplier ?? (() => settings.token), signal, telemetryOutbox: settings.telemetryOutbox, fetch: (...args) => fetch(...args) });
   }
-
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const headers = new Headers(init.headers);
-    headers.set("authorization", `Bearer ${this.settings.token}`);
-    if (init.body !== undefined) headers.set("content-type", "application/json");
-    let response: Response;
-    try {
-      response = await fetch(`${this.settings.baseUrl}${path}`, {
-        ...init,
-        headers,
-        signal: init.signal ?? this.signal,
-      });
-    } catch (error) {
-      throw new FoldApiError(0, "network_error", error instanceof Error ? error.message : "API request failed");
+  private async command<T>(operation: string, input: unknown, action: (stamps: readonly EventStamp[]) => Promise<T>, stampCount = 1): Promise<T> {
+    const key = `${operation}:${JSON.stringify(input)}`;
+    let stamps = this.pendingCommands.get(key);
+    if (stamps === undefined) {
+      if (this.pendingCommands.size >= 256) throw new SuperBrainApiError(0, "pending_commands_full", "Too many unfinished commands; reconnect before continuing");
+      stamps = Array.from({ length: stampCount }, () => nextEventStamp(Date.now(), this.producer)); this.pendingCommands.set(key, stamps);
     }
-    const body = (await response.json().catch(() => ({}))) as ApiErrorBody;
-    if (!response.ok) {
-      throw new FoldApiError(
-        response.status,
-        body.error?.code ?? "request_failed",
-        body.error?.message ?? `API request failed (${response.status})`,
-        body.error?.details,
-      );
-    }
-    return body as T;
+    const result = await action(stamps); this.pendingCommands.delete(key); for (const stamp of stamps) this.entityIds.delete(stamp.id); return result;
   }
-
-  async captureHealth(): Promise<CaptureHealth> {
-    let response: Response;
-    try {
-      response = await fetch(`${this.settings.captureBaseUrl}/health`, { signal: this.signal });
-    } catch (error) {
-      throw new FoldApiError(0, "capture_unavailable", error instanceof Error ? error.message : "Capture daemon unavailable");
-    }
-    const body = await response.json().catch(() => ({})) as CaptureHealth & ApiErrorBody;
-    if (!response.ok) {
-      throw new FoldApiError(response.status, body.error?.code ?? "capture_unavailable", body.error?.message ?? "Capture daemon unavailable");
-    }
-    return body;
+  identity() { return this.canonical.identity(); }
+  telemetryStatus() { return this.canonical.telemetryStatus(); }
+  captureHealth(): Promise<CaptureHealth> { return localCaptureRequest(this.settings, "/health", { operator: false, signal: this.signal }); }
+  processingStatus(): Promise<ProcessingStatus> { return localCaptureRequest(this.settings, "/processing", { signal: this.signal }); }
+  async transcriptArtifactPage(options: { readonly source: TranscriptSource; readonly sha256: string; readonly limit?: number; readonly cursor?: string }): Promise<CursorPage<TranscriptArtifactRecord>> {
+    const query = new URLSearchParams(); if (options.limit !== undefined) query.set("limit", String(options.limit)); if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    const result = await localCaptureRequest<{ records: readonly TranscriptArtifactRecord[]; total: number; nextCursor?: string }>(this.settings, `/artifacts/${encodeURIComponent(options.source)}/${encodeURIComponent(options.sha256)}?${query}`, { signal: this.signal });
+    return { items: result.records, total: result.total, ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }) };
   }
-
-  async transcriptArtifactPage(options: {
-    readonly source: TranscriptSource;
-    readonly sha256: string;
-    readonly limit?: number;
-    readonly cursor?: string;
-  }): Promise<CursorPage<TranscriptArtifactRecord>> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor !== undefined) params.set("cursor", options.cursor);
-    let response: Response;
-    try {
-      response = await fetch(
-        `${this.settings.captureBaseUrl}/artifacts/${encodeURIComponent(options.source)}/${encodeURIComponent(options.sha256)}${params.size === 0 ? "" : `?${params}`}`,
-        {
-          headers: { "x-super-brain-operator-token": this.settings.captureOperatorToken },
-          signal: this.signal,
-        },
-      );
-    } catch (error) {
-      throw new FoldApiError(0, "artifact_unavailable", error instanceof Error ? error.message : "Transcript artifact unavailable");
-    }
-    const body = await response.json().catch(() => ({})) as {
-      readonly records?: readonly TranscriptArtifactRecord[];
-      readonly total?: number;
-      readonly nextCursor?: string;
-      readonly error?: string;
-    };
-    if (!response.ok || body.records === undefined || body.total === undefined) {
-      throw new FoldApiError(response.status, "artifact_unavailable", body.error ?? "Transcript artifact unavailable");
-    }
-    return { items: body.records, total: body.total, ...(body.nextCursor === undefined ? {} : { nextCursor: body.nextCursor }) };
-  }
-
-  async hookArtifact(source: HookSource, artifactId: string): Promise<HookArtifact> {
-    let response: Response;
-    try {
-      response = await fetch(
-        `${this.settings.captureBaseUrl}/hook-artifacts/${encodeURIComponent(source)}/${encodeURIComponent(artifactId)}`,
-        {
-          headers: { "x-super-brain-operator-token": this.settings.captureOperatorToken },
-          signal: this.signal,
-        },
-      );
-    } catch (error) {
-      throw new FoldApiError(0, "artifact_unavailable", error instanceof Error ? error.message : "Hook artifact unavailable");
-    }
-    const body = await response.json().catch(() => ({})) as { readonly artifact?: HookArtifact; readonly error?: string };
-    if (!response.ok || body.artifact === undefined) {
-      throw new FoldApiError(response.status, "artifact_unavailable", body.error ?? "Hook artifact unavailable");
-    }
-    return body.artifact;
-  }
-
-  async listEvents(options: {
-    readonly includeDrafts?: boolean;
-    readonly kinds?: readonly string[];
-    readonly limit?: number;
-  } = {}) {
-    return (await this.listEventsPage(options)).items;
-  }
-
-  async listEventsPage(options: {
-    readonly includeDrafts?: boolean;
-    readonly kinds?: readonly string[];
-    readonly limit?: number;
-    readonly cursor?: string;
-    readonly sessionId?: string;
-    readonly runId?: string;
-    readonly projectId?: string;
-    readonly actorId?: string;
-  } = {}): Promise<CursorPage<FoldLogEntry>> {
-    const params = new URLSearchParams();
-    if (options.includeDrafts) params.set("include", "canon+draft");
-    appendRepeated(params, "kind", options.kinds);
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    params.set("order", "desc");
-    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
-    if (options.sessionId !== undefined) params.set("sessionId", options.sessionId);
-    if (options.runId !== undefined) params.set("runId", options.runId);
-    if (options.projectId !== undefined) params.set("projectId", options.projectId);
-    if (options.actorId !== undefined) params.set("actorId", options.actorId);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    const response = await this.request<{ readonly entries: readonly FoldLogEntry[]; readonly total: number; readonly nextCursor?: string }>(
-      `${this.workspacePath("events")}${query}`,
-    );
-    return {
-      items: response.entries,
-      total: response.total,
-      ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }),
-    };
-  }
-
-  async projection(
-    includeDrafts = false,
-    section: ProjectionSection = "nodes",
-    options: { readonly cursor?: string; readonly query?: string } = {},
-  ): Promise<ProjectionResponse> {
-    const params = new URLSearchParams({ compact: "true", section, limit: "100" });
-    if (includeDrafts) params.set("include", "canon+draft");
-    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
-    if (options.query?.trim()) params.set("query", options.query.trim());
-    return this.request<ProjectionResponse>(`${this.workspacePath("projection")}?${params}`);
-  }
-
-  async listTrajectoryTasks(): Promise<readonly TrajectoryTaskSummary[]> {
-    return (await this.listTrajectoryTaskPage()).items;
-  }
-
-  async listTrajectoryTaskPage(options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<CursorPage<TrajectoryTaskSummary>> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
-    const response = await this.request<{ readonly tasks: readonly TrajectoryTaskSummary[]; readonly total: number; readonly nextCursor?: string }>(
-      `${this.workspacePath("trajectory-tasks")}${params.size === 0 ? "" : `?${params}`}`,
-    );
-    return { items: response.tasks, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
-  }
-
-  async trajectoryReport(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<TrajectoryTaskReport> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
-    const response = await this.request<{ readonly report: TrajectoryTaskReport }>(
-      `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}${params.size === 0 ? "" : `?${params}`}`,
-    );
-    return response.report;
-  }
-
-  async fleet(): Promise<FleetResponse> {
-    return this.request<FleetResponse>(this.workspacePath("fleet"));
-  }
-
-  async listTranscriptProjects(): Promise<readonly TranscriptProjectSummary[]> {
-    const response = await this.request<{ readonly projects: readonly TranscriptProjectSummary[] }>(
-      this.workspacePath("transcript-projects"),
-    );
-    return response.projects;
-  }
-
-  async listTranscriptRuns(options: {
-    readonly projectId?: string;
-    readonly source?: TranscriptSource;
-  } = {}): Promise<readonly TranscriptRun[]> {
-    return (await this.listTranscriptRunPage(options)).items;
-  }
-
-  async listTranscriptRunPage(options: {
-    readonly projectId?: string;
-    readonly source?: TranscriptSource;
-    readonly limit?: number;
-    readonly cursor?: string;
-  } = {}): Promise<CursorPage<TranscriptRun>> {
-    const params = new URLSearchParams();
-    if (options.projectId !== undefined) params.set("projectId", options.projectId);
-    if (options.source !== undefined) params.set("source", options.source);
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
-    const query = params.size === 0 ? "" : `?${params.toString()}`;
-    const response = await this.request<{ readonly runs: readonly TranscriptRun[]; readonly total: number; readonly nextCursor?: string }>(
-      `${this.workspacePath("transcript-runs")}${query}`,
-    );
-    return { items: response.runs, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
-  }
-
-  async transcriptRun(runId: string): Promise<TranscriptRunDetail> {
-    return this.request<TranscriptRunDetail>(
-      `${this.workspacePath("transcript-runs")}/${encodeURIComponent(runId)}`,
-    );
-  }
-
-  async steering(): Promise<SteeringResponse> {
-    return this.request<SteeringResponse>(this.workspacePath("steering"));
-  }
-
-  private async steer(actorId: string, body: Readonly<Record<string, unknown>>): Promise<void> {
-    await this.request(`${this.workspacePath("steering")}/${encodeURIComponent(actorId)}`, {
-      method: "POST",
-      body: JSON.stringify({ ...body, stamp: nextEventStamp() }),
-    });
-  }
-
-  async surfaceSteeringCandidate(draft: SteeringCandidateDraft): Promise<void> {
-    const now = Date.now();
-    await this.steer(draft.actorId, {
-      action: "surface",
-      candidate: {
-        id: `candidate-${uuidV7(now)}`,
-        sourceDriveId: draft.sourceDriveId,
-        satisfier: { kind: draft.satisfierKind, ref: draft.satisfierRef },
-        aim: draft.aim,
-        trigger: draft.trigger,
-      },
-    });
-  }
-
-  async commitSteeringCandidate(actorId: string, candidateId: string): Promise<void> {
-    await this.steer(actorId, {
-      action: "commit",
-      candidateId,
-      intentionId: `intention-${uuidV7()}`,
-    });
-  }
-
-  async declineSteeringCandidate(actorId: string, candidateId: string, reason: string): Promise<void> {
-    await this.steer(actorId, { action: "decline", candidateId, reason });
-  }
-
-  async recordSteeringAction(actorId: string, intentionId: string): Promise<void> {
-    await this.steer(actorId, { action: "acted", intentionId });
-  }
-
-  async endSteeringIntention(
-    actorId: string,
-    intentionId: string,
-    end: SteeringIntentionEnd,
-  ): Promise<void> {
-    await this.steer(actorId, { action: "end", intentionId, end });
-  }
-
-  async reasoningProviders(): Promise<readonly ReasoningProviderStatus[]> {
-    const response = await this.request<{ readonly providers: readonly ReasoningProviderStatus[] }>(
-      this.workspacePath("reasoning/providers"),
-    );
-    return response.providers;
-  }
-
-  async askReasoning(question: string, actorId?: string, providerId?: string): Promise<ReasoningResponse> {
-    return this.request<ReasoningResponse>(this.workspacePath("reasoning/ask"), {
-      method: "POST",
-      body: JSON.stringify({
-        question,
-        ...(actorId === undefined ? {} : { actorId }),
-        ...(providerId === undefined ? {} : { providerId }),
-        limit: 5,
-      }),
-    });
-  }
-
-  async recordTrajectoryTree(tree: SharedDecisionTree, spaceId?: string): Promise<void> {
-    await this.request(this.workspacePath("trajectory-tasks"), {
-      method: "POST",
-      body: JSON.stringify({
-        stamp: nextEventStamp(),
-        ...(spaceId === undefined ? {} : { spaceId }),
-        tree,
-      }),
-    });
-  }
-
-  async recordTrajectory(input: TrajectoryInput, spaceId?: string): Promise<void> {
-    await this.request(this.workspacePath("trajectories"), {
-      method: "POST",
-      body: JSON.stringify({
-        stamp: nextEventStamp(),
-        ...(spaceId === undefined ? {} : { spaceId }),
-        input,
-      }),
-    });
-  }
-
-  async importTrajectoryBundle(
-    bundle: TrajectoryImportBundle,
-    existingTasks: readonly TrajectoryTaskSummary[],
-  ): Promise<number> {
+  async hookArtifact(source: HookSource, artifactId: string): Promise<HookArtifact> { return (await localCaptureRequest<{ artifact: HookArtifact }>(this.settings, `/hook-artifacts/${encodeURIComponent(source)}/${encodeURIComponent(artifactId)}`, { signal: this.signal })).artifact; }
+  listEventsPage(options: EventPageOptions = {}) { return this.canonical.listEventsPage(options); }
+  async listEvents(options: EventPageOptions = {}) { return (await this.listEventsPage(options)).items; }
+  eventsById(eventIds: readonly string[]) { return this.canonical.listEvents({ eventIds }); }
+  projection(includeDrafts = false, section: ProjectionSection = "nodes", options: { readonly cursor?: string; readonly query?: string } = {}) { return this.canonical.projection(includeDrafts, section, options); }
+  listTrajectoryTaskPage(options: { readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.listTrajectoryTaskPage(options); }
+  async listTrajectoryTasks() { return (await this.listTrajectoryTaskPage()).items; }
+  trajectoryReport(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.trajectoryReport(taskId, options); }
+  taskEvidencePage(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.taskEvidence(taskId, options); }
+  fleet() { return this.canonical.fleet(); }
+  listTranscriptProjects() { return this.canonical.listTranscriptProjects(); }
+  listTranscriptRunPage(options: { readonly projectId?: string; readonly source?: TranscriptSource; readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.listTranscriptRunPage(options); }
+  async listTranscriptRuns(options: Parameters<FoldApiClient["listTranscriptRunPage"]>[0] = {}) { return (await this.listTranscriptRunPage(options)).items; }
+  async transcriptRun(runId: string) { const detail = await this.canonical.transcriptRun(runId); if (detail === undefined) throw new SuperBrainApiError(404, "transcript_run_not_found", "Transcript run is unavailable"); return detail; }
+  steering() { return this.canonical.steering(); }
+  async surfaceSteeringCandidate(draft: SteeringCandidateDraft): Promise<void> { await this.command("steering.surface", draft, async ([stamp]) => this.canonical.steer(draft.actorId, { action: "surface", candidate: { id: `candidate-${this.entityId(stamp!)}`, sourceDriveId: draft.sourceDriveId, satisfier: { kind: draft.satisfierKind, ref: draft.satisfierRef }, aim: draft.aim, trigger: draft.trigger } }, { stamp })); }
+  async commitSteeringCandidate(actorId: string, candidateId: string): Promise<void> { await this.command("steering.commit", { actorId, candidateId }, async ([stamp]) => this.canonical.steer(actorId, { action: "commit", candidateId, intentionId: `intention-${this.entityId(stamp!)}` }, { stamp })); }
+  async declineSteeringCandidate(actorId: string, candidateId: string, reason: string): Promise<void> { await this.command("steering.decline", { actorId, candidateId, reason }, async ([stamp]) => this.canonical.steer(actorId, { action: "decline", candidateId, reason }, { stamp })); }
+  async recordSteeringAction(actorId: string, intentionId: string): Promise<void> { await this.command("steering.acted", { actorId, intentionId }, async ([stamp]) => this.canonical.steer(actorId, { action: "acted", intentionId }, { stamp })); }
+  async endSteeringIntention(actorId: string, intentionId: string, end: SteeringIntentionEnd): Promise<void> { await this.command("steering.end", { actorId, intentionId, end }, async ([stamp]) => this.canonical.steer(actorId, { action: "end", intentionId, end }, { stamp })); }
+  async reasoningProviders() { return (await this.canonical.reasoningProviders()).providers; }
+  askReasoning(question: string, actorId?: string, providerId?: string) { return this.canonical.askReasoning({ question, ...(actorId === undefined ? {} : { actorId }), ...(providerId === undefined ? {} : { providerId }), limit: 5 }); }
+  async recordTrajectoryTree(tree: SharedDecisionTree, spaceId?: string): Promise<void> { await this.command("trajectory.tree", { tree, spaceId }, ([stamp]) => this.canonical.recordTrajectoryTree(stamp!, tree, { spaceId })); }
+  async recordTrajectory(input: TrajectoryInput, spaceId?: string): Promise<void> { await this.command("trajectory.run", { input, spaceId }, ([stamp]) => this.canonical.recordTrajectory(stamp!, input, { spaceId })); }
+  async importTrajectoryBundle(bundle: TrajectoryImportBundle, existingTasks: readonly TrajectoryTaskSummary[]): Promise<number> {
     const existing = existingTasks.find(({ taskId }) => taskId === bundle.tree.taskId);
-    if (existing !== undefined && JSON.stringify(existing.tree) !== JSON.stringify(bundle.tree)) {
-      throw new FoldApiError(409, "trajectory_tree_mismatch", `Task ${bundle.tree.taskId} already has a different shared tree`);
-    }
-    if (existing === undefined) {
-      await this.recordTrajectoryTree(bundle.tree, bundle.spaceId);
-    }
-    for (const trajectory of bundle.trajectories) {
-      await this.recordTrajectory(trajectory, bundle.spaceId);
-    }
+    if (existing !== undefined && JSON.stringify(existing.tree) !== JSON.stringify(bundle.tree)) throw new SuperBrainApiError(409, "trajectory_tree_mismatch", `Task ${bundle.tree.taskId} already has a different shared tree`);
+    if (existing === undefined) await this.recordTrajectoryTree(bundle.tree, bundle.spaceId);
+    for (const trajectory of bundle.trajectories) await this.recordTrajectory(trajectory, bundle.spaceId);
     return bundle.trajectories.length;
   }
-
-  async recallMemories(options: {
-    readonly scope?: MemoryScope;
-    readonly tags?: readonly string[];
-    readonly sources?: readonly string[];
-    readonly projectIds?: readonly string[];
-    readonly from?: number;
-    readonly to?: number;
-    readonly limit?: number;
-  } = {}): Promise<readonly RecalledMemory[]> {
-    return (await this.recallMemoryPage(options)).items;
+  async recallMemoryPage(options: RecallOptions = {}) { const page = await this.canonical.recallMemoryPage(options); return { ...page, items: page.items.map((item) => ({ ...item, ...(page.provenance === undefined ? {} : { presentation: page.provenance }) })) }; }
+  async recallMemories(options: RecallOptions = {}) { return (await this.recallMemoryPage(options)).items; }
+  async rankMemories(options: Omit<RecallRequest, "candidates"> & { readonly query: string }) {
+    const result = await this.canonical.rankMemories(options);
+    return { ...result, memories: result.memories.map((item) => ({ ...item, ...(result.provenance === undefined ? {} : { presentation: result.provenance }) })) };
   }
-
-  async recallMemoryPage(options: {
-    readonly scope?: MemoryScope;
-    readonly tags?: readonly string[];
-    readonly sources?: readonly string[];
-    readonly projectIds?: readonly string[];
-    readonly from?: number;
-    readonly to?: number;
-    readonly limit?: number;
-    readonly cursor?: string;
-  } = {}): Promise<CursorPage<RecalledMemory>> {
-    const params = new URLSearchParams();
-    if (options.scope !== undefined) {
-      params.set("scope", options.scope.kind);
-      if (options.scope.kind === "space") params.set("spaceId", options.scope.spaceId);
+  async createMemory(draft: MemoryDraft): Promise<PersonalMemory> { return this.command("memory.create", draft, async ([stamp]) => (await this.canonical.recordMemory({ id: this.entityId(stamp!), source: draft.source, audience: draft.audience, projectIds: draft.projectIds, summary: draft.summary, content: draft.content, tags: draft.tags, applicability: draft.applicability, ...(draft.spaceId === undefined ? {} : { spaceId: draft.spaceId }) }, undefined, { stamp })).memory); }
+  listMemoryCandidatePage(options: { readonly status?: MemoryCandidateView["status"]; readonly offset?: number; readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.listMemoryCandidatePage(options); }
+  async listMemoryCandidates(options: Parameters<FoldApiClient["listMemoryCandidatePage"]>[0] = {}) { return (await this.listMemoryCandidatePage(options)).items; }
+  async acceptMemoryCandidate(candidateId: string): Promise<PersonalMemory> { return this.command("memory.accept", candidateId, async ([stamp, memoryStamp]) => (await this.canonical.acceptMemoryCandidate(candidateId, { stamp, memoryStamp, memoryId: this.entityId(memoryStamp!) })).memory, 2); }
+  async rejectMemoryCandidate(candidateId: string, reason: string): Promise<void> { await this.command("memory.reject", { candidateId, reason }, ([stamp]) => this.canonical.rejectMemoryCandidate(candidateId, reason, { stamp })); }
+  async reviseMemory(memoryId: string, draft: MemoryDraft): Promise<PersonalMemory> { return this.command("memory.revise", { memoryId, draft }, async ([stamp]) => (await this.canonical.reviseMemory(memoryId, { summary: draft.summary, content: draft.content, tags: draft.tags, applicability: draft.applicability }, undefined, { stamp, expectedRevision: draft.expectedRevision })).memory); }
+  async forgetMemory(memoryId: string, reason: string): Promise<void> { await this.command("memory.forget", { memoryId, reason }, ([stamp]) => this.canonical.forgetMemory(memoryId, reason, undefined, { stamp })); }
+  memoryEvidencePage(memoryId: string, options: { readonly revision?: number; readonly offset?: number; readonly contributionOffset?: number; readonly limit?: number } = {}) { return this.canonical.memoryEvidencePage(memoryId, options); }
+  memoryFeedbackSummary(memoryId: string, revision: number) { return this.canonical.memoryFeedbackSummary(memoryId, revision); }
+  async recordMemoryFeedback(memory: Pick<PersonalMemory, "id" | "revision">, judgment: "helpful" | "unhelpful", provenance?: RecallProvenance): Promise<void> {
+    const key = JSON.stringify([memory.id, memory.revision, judgment]);
+    let command = this.judgments.get(key);
+    if (command === undefined) {
+      const presented = provenance?.items.find((item) => item.memoryId === memory.id && item.memoryRevision === memory.revision);
+      if (provenance === undefined || presented === undefined) throw new SuperBrainApiError(0, "feedback_context_unavailable", "Refresh this memory view before recording a judgment");
+      if (this.judgments.size >= 256) throw new SuperBrainApiError(0, "pending_commands_full", "Too many unfinished judgments; reconnect before continuing");
+      const itemStamp = nextEventStamp(Date.now(), this.producer);
+      command = { subject: structuredClone(provenance.subject), stamp: nextEventStamp(Date.now(), this.producer), item: { stamp: itemStamp, memoryId: memory.id, input: { version: 2, memoryRevision: memory.revision, recallId: provenance.recallId, signal: "judged", judgment, rank: presented.rank, ranking: structuredClone(provenance.ranking), ...(provenance.provider === undefined ? {} : { provider: structuredClone(provenance.provider) }) } } };
+      this.judgments.set(key, command);
     }
-    appendRepeated(params, "tag", options.tags);
-    appendRepeated(params, "source", options.sources);
-    appendRepeated(params, "projectId", options.projectIds);
-    if (options.from !== undefined) params.set("from", options.from.toString());
-    if (options.to !== undefined) params.set("to", options.to.toString());
-    if (options.limit !== undefined) params.set("limit", options.limit.toString());
-    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    const response = await this.request<{ readonly memories: readonly RecalledMemory[]; readonly total: number; readonly nextCursor?: string }>(
-      `${this.workspacePath("memories")}${query}`,
-    );
-    return { items: response.memories, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
-  }
-
-  async rankMemories(options: {
-    readonly query: string;
-    readonly scope?: MemoryScope;
-    readonly sources?: readonly string[];
-    readonly projectIds?: readonly string[];
-    readonly limit?: number;
-  }): Promise<RankedMemoryRecallResult> {
-    return this.request<RankedMemoryRecallResult>(this.workspacePath("memories/search"), {
-      method: "POST",
-      body: JSON.stringify(options),
-    });
-  }
-
-  async createMemory(draft: MemoryDraft): Promise<PersonalMemory> {
-    const stamp = nextEventStamp();
-    const response = await this.request<{ readonly memory: PersonalMemory }>(
-      this.workspacePath("memories"),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          stamp,
-          input: {
-            id: uuidV7(stamp.t),
-            audience: draft.audience,
-            projectIds: draft.projectIds,
-            source: draft.source,
-            summary: draft.summary,
-            content: draft.content,
-            tags: draft.tags,
-            ...(draft.spaceId === undefined ? {} : { spaceId: draft.spaceId }),
-          },
-        }),
-      },
-    );
-    return response.memory;
-  }
-
-  async listMemoryCandidates(options: {
-    readonly status?: MemoryCandidateView["status"];
-    readonly offset?: number;
-    readonly limit?: number;
-  } = {}): Promise<readonly MemoryCandidateView[]> {
-    return (await this.listMemoryCandidatePage(options)).items;
-  }
-
-  async listMemoryCandidatePage(options: {
-    readonly status?: MemoryCandidateView["status"];
-    readonly offset?: number;
-    readonly limit?: number;
-    readonly cursor?: string;
-  } = {}): Promise<CursorPage<MemoryCandidateView>> {
-    const query = new URLSearchParams();
-    if (options.status !== undefined) query.set("status", options.status);
-    if (options.offset !== undefined) query.set("offset", options.offset.toString());
-    if (options.limit !== undefined) query.set("limit", options.limit.toString());
-    if (options.cursor !== undefined) query.set("pageCursor", options.cursor);
-    const response = await this.request<{ readonly candidates: readonly MemoryCandidateView[]; readonly total: number; readonly nextCursor?: string }>(
-      `${this.workspacePath("memory-candidates")}${query.size === 0 ? "" : `?${query}`}`,
-    );
-    return { items: response.candidates, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
-  }
-
-  async acceptMemoryCandidate(candidateId: string): Promise<PersonalMemory> {
-    const stamp = nextEventStamp();
-    const memoryStamp = nextEventStamp(stamp.t + 1);
-    const response = await this.request<{ readonly memory: PersonalMemory }>(
-      `${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/accept`,
-      {
-        method: "POST",
-        body: JSON.stringify({ stamp, memoryStamp, memoryId: uuidV7(memoryStamp.t) }),
-      },
-    );
-    return response.memory;
-  }
-
-  async rejectMemoryCandidate(candidateId: string, reason: string): Promise<void> {
-    await this.request(
-      `${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/reject`,
-      { method: "POST", body: JSON.stringify({ stamp: nextEventStamp(), reason }) },
-    );
-  }
-
-  async reviseMemory(memoryId: string, draft: MemoryDraft): Promise<PersonalMemory> {
-    const response = await this.request<{ readonly memory: PersonalMemory }>(
-      `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`,
-      {
-        method: "PATCH",
-        body: JSON.stringify({
-          stamp: nextEventStamp(),
-          patch: { summary: draft.summary, content: draft.content, tags: draft.tags },
-        }),
-      },
-    );
-    return response.memory;
-  }
-
-  async forgetMemory(memoryId: string, reason: string): Promise<void> {
-    await this.request(
-      `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`,
-      {
-        method: "DELETE",
-        body: JSON.stringify({ stamp: nextEventStamp(), reason }),
-      },
-    );
-  }
-
-  async recordMemoryFeedback(memoryId: string, signal: "helpful" | "unhelpful"): Promise<void> {
-    await this.request(
-      `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/feedback`,
-      {
-        method: "POST",
-        body: JSON.stringify({ stamp: nextEventStamp(), input: { signal } }),
-      },
-    );
+    await this.canonical.recordMemoryFeedbackBatch([command.item], { stamp: command.stamp, expectedSubject: command.subject });
+    this.judgments.delete(key);
   }
 }

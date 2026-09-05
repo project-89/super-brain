@@ -28,6 +28,8 @@ import type {
   RecallRequest,
 } from "@_89/fold-epistemic";
 import {
+  normalizeMemoryFeedbackInputV2,
+  MemoryFeedbackError,
   MEMORY_CANDIDATE_DECISION_NODE_KIND,
   MEMORY_CANDIDATE_NODE_KIND,
 } from "@_89/fold-epistemic";
@@ -79,6 +81,7 @@ import type {
   AuthenticatedSubject,
   TenantKey,
 } from "./types.js";
+import { API_CAPABILITIES } from "./types.js";
 import { LocalLexicalMemoryRanker } from "./recall.js";
 import {
   LocalEvidenceReasoner,
@@ -250,7 +253,7 @@ const memoryRecordSchema = z
   .strict();
 
 const memoryRevisionSchema = z
-  .object({ stamp: stampSchema, patch: memoryPatchSchema, ...causedByField })
+  .object({ stamp: stampSchema, patch: memoryPatchSchema, expectedRevision: z.number().int().nonnegative().safe().optional(), ...causedByField })
   .strict();
 
 const memoryForgetSchema = z
@@ -261,17 +264,13 @@ const memoryForgetSchema = z
   })
   .strict();
 
-const memoryFeedbackSchema = z.object({
-  stamp: stampSchema,
-  input: z.object({
-    signal: z.enum(["recalled", "helpful", "unhelpful", "superseded"]),
-    query: z.string().trim().min(1).max(2_000).optional(),
-    taskId: z.string().trim().min(1).max(500).optional(),
-    sessionId: z.string().trim().min(1).max(500).optional(),
-    detail: z.string().trim().min(1).max(2_000).optional(),
-  }).strict(),
-  ...causedByField,
-}).strict();
+const memoryFeedbackInputSchema = z.unknown().transform((input, context) => {
+  try { return normalizeMemoryFeedbackInputV2(input); }
+  catch (error) { context.addIssue({ code: z.ZodIssueCode.custom, message: error instanceof Error ? error.message : "Invalid feedback" }); return z.NEVER; }
+});
+const memoryFeedbackSchema = z.object({ stamp: stampSchema, input: memoryFeedbackInputSchema, ...causedByField }).strict();
+const feedbackSubjectSchema = z.object({ organizationId: z.string().min(1).max(500), workspaceId: z.string().min(1).max(500), principalId: z.string().min(1).max(500) }).strict();
+const memoryFeedbackBatchSchema = z.object({ stamp: stampSchema, expectedSubject: feedbackSubjectSchema, items: z.array(z.object({ stamp: stampSchema, memoryId: z.string().uuid(), input: memoryFeedbackInputSchema }).strict()).min(1).max(100) }).strict();
 
 const memoryCandidateProposalSchema = z.object({
   stamp: stampSchema,
@@ -674,7 +673,8 @@ function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof Error && error.name === "ClerkWebhookVerificationError") {
     return new ApiHttpError(401, "webhook_verification_failed", "Webhook signature verification failed");
   }
-  if (error instanceof ZodError) {
+  if (error instanceof MemoryFeedbackError) return new ApiHttpError(400, "invalid_feedback", error.message);
+    if (error instanceof ZodError) {
     return new ApiHttpError(
       400,
       "invalid_request",
@@ -1271,6 +1271,7 @@ function routeCapability(resource: string | undefined, resourceId: string | unde
   if (resource === "transcript-imports") return "transcripts:write";
   if (resource === "steering") return method === "GET" ? "steering:read" : "steering:write";
   if (resource === "reasoning") return "reasoning:read";
+  if (resource === "memory-feedback-batches" || (resource === "memories" && subresource === "feedback" && method === "POST")) return "feedback:write";
   if (resource === "memories" && (resourceId === "recall" || resourceId === "search")) return "memories:read";
   if (resource === "memories" || resource?.startsWith("memory-candidate") === true) {
     return method === "GET" ? "memories:read" : "memories:write";
@@ -1445,9 +1446,10 @@ async function handleRequest(
     throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
   }
   if (resource === "identity" && resourceSegments.length === 1 && method === "GET") {
-    sendJson(response, 200, { principalId: subject.principalId, organizationId: access.organizationId, workspaceId: access.workspaceId });
+    sendJson(response, 200, { principalId: subject.principalId, organizationId: access.organizationId, workspaceId: access.workspaceId, workspaceRole: access.workspaceRole, spaceRoles: access.spaceRoles, capabilities: subject.capabilities ?? API_CAPABILITIES, ...(subject.taskEvidenceAuthority === undefined ? {} : { taskEvidenceAuthority: subject.taskEvidenceAuthority }), ...(access.platformDataAccess === true ? { platformDataAccess: true } : {}) });
     return;
   }
+  const provenance = (operation: "recall" | "search" | "reasoning", memories: readonly { readonly memory: { readonly id: string; readonly revision: number } }[], ranking: { readonly id: string; readonly kind: "lexical" | "semantic" | "explicit" }, provider?: { readonly id: string; readonly configRevision?: string }) => ({ version: 1 as const, recallId: randomUUID(), subject: { principalId: subject.principalId, organizationId: access.organizationId, workspaceId: access.workspaceId }, observedAt: new Date().toISOString(), operation, ranking, ...(provider === undefined ? {} : { provider }), items: memories.map(({ memory }, index) => ({ memoryId: memory.id, memoryRevision: memory.revision, rank: index + 1 })) });
   const tenant = { organizationId: access.organizationId, workspaceId };
   const sdk = await dependencies.sdks.sdkFor(tenant);
   if (access.platformDataAccess !== true) {
@@ -2030,8 +2032,10 @@ async function handleRequest(
     await sdk.memoryRevisions(freshAccess, evidence.map(({ memoryId, revision }) => ({ memoryId, revision })), body.includeNeedsReview === true);
     sendJson(response, 200, {
       ...result,
+      provenance: provenance("reasoning", ranked.memories, ranked.ranking, reasoner.descriptor),
       citationRefs: result.citations.map((memoryId) => ({ memoryId, revision: evidence.find((item) => item.memoryId === memoryId)!.revision })),
       provider: reasoner.descriptor,
+      ...("feedback" in ranked ? { feedback: ranked.feedback } : {}),
       ranking: ranked.ranking,
       evidence: evidence.map(({ memoryId, revision, source, summary, score }) => ({
         memoryId,
@@ -2231,7 +2235,8 @@ async function handleRequest(
   if (resource === "memories" && resourceId === "recall") {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const recall = parsedRecallRequest(await readJsonBody(request, maxBodyBytes));
-    sendJson(response, 200, { memories: await sdk.recallMemories(access, recall) });
+    const memories = await sdk.recallMemories(access, recall);
+    sendJson(response, 200, { memories, provenance: provenance("recall", memories, { id: "chronological-current-v1", kind: "explicit" }) });
     return;
   }
 
@@ -2239,7 +2244,11 @@ async function handleRequest(
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const recall = parsedRankedRecallRequest(await readJsonBody(request, maxBodyBytes));
     const ranker = dependencies.memoryRanker ?? new LocalLexicalMemoryRanker();
-    sendJson(response, 200, await sdk.rankMemories(access, recall, ranker));
+    const result = await sdk.rankMemories(access, recall, ranker);
+    const freshAccess = organizationId === undefined ? await dependencies.memberships.resolveLegacyAccess(subject, workspaceId) : await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
+    if (freshAccess === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+    await sdk.memoryRevisions(freshAccess, result.memories.map(({ memory }) => ({ memoryId: memory.id, revision: memory.revision })), recall.includeNeedsReview === true);
+    sendJson(response, 200, { ...result, provenance: provenance("search", result.memories, result.ranking) });
     return;
   }
 
@@ -2262,6 +2271,7 @@ async function handleRequest(
       });
       sendJson(response, 200, {
         memories: page.memories,
+        provenance: provenance("recall", page.memories, { id: "memory-inventory-v1", kind: "explicit" }),
         total: page.total,
         ...(page.nextCursor === undefined ? {} : {
           nextCursor: encodePageCursor({
@@ -2288,12 +2298,20 @@ async function handleRequest(
     throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
   }
 
+  if (resource === "memory-feedback-batches" && resourceSegments.length === 1) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = memoryFeedbackBatchSchema.parse(await readJsonBody(request, maxBodyBytes));
+    if (body.expectedSubject.organizationId !== access.organizationId || body.expectedSubject.workspaceId !== access.workspaceId || body.expectedSubject.principalId !== subject.principalId) throw new ApiHttpError(409, "feedback_subject_changed", "Queued feedback belongs to a different authenticated account");
+    sendJson(response, 201, await sdk.recordMemoryFeedbackBatch(memoryContext(subject, access, undefined), body.stamp, body.items, body.expectedSubject));
+    return;
+  }
+
   if (resource === "memories" && resourceId !== undefined && resourceSegments.length === 3) {
     const action = decodeSegment(resourceSegments[2]!, "memory action");
     if (action === "evidence") {
       if (method === "GET") {
-        const options = z.object({ revision: z.coerce.number().int().nonnegative().safe().optional(), offset: z.coerce.number().int().nonnegative().safe().optional(), limit: z.coerce.number().int().min(1).max(100).optional() }).strict().parse(Object.fromEntries(url.searchParams));
-        sendJson(response, 200, await sdk.memoryEvidencePage(access, resourceId, { ...(options.revision === undefined ? {} : { revision: options.revision }), ...(options.offset === undefined ? {} : { offset: options.offset }), ...(options.limit === undefined ? {} : { limit: options.limit }) }));
+        const options = z.object({ revision: z.coerce.number().int().nonnegative().safe().optional(), contributionOffset: z.coerce.number().int().nonnegative().safe().optional(), offset: z.coerce.number().int().nonnegative().safe().optional(), limit: z.coerce.number().int().min(1).max(100).optional() }).strict().parse(Object.fromEntries(url.searchParams));
+        sendJson(response, 200, await sdk.memoryEvidencePage(access, resourceId, { ...(options.contributionOffset === undefined ? {} : { contributionOffset: options.contributionOffset }), ...(options.revision === undefined ? {} : { revision: options.revision }), ...(options.offset === undefined ? {} : { offset: options.offset }), ...(options.limit === undefined ? {} : { limit: options.limit }) }));
         return;
       }
       if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
@@ -2302,6 +2320,10 @@ async function handleRequest(
       const body = memoryContributionSchema.parse(await readJsonBody(request, maxBodyBytes));
       sendJson(response, 201, await sdk.contributeMemoryEvidence(memoryContext(subject, access, scope.spaceId, scope.audience), body.stamp, resourceId, { evidence: body.input.evidence.map(parsedMemoryEvidence), ...(body.input.expectedRevision === undefined ? {} : { expectedRevision: body.input.expectedRevision }) }));
       return;
+    }
+    if (action === "feedback" && method === "GET") {
+      const revision = z.coerce.number().int().nonnegative().safe().optional().parse(url.searchParams.get("revision") ?? undefined);
+      sendJson(response, 200, { summary: await sdk.memoryFeedbackSummary(access, resourceId, revision) }); return;
     }
     if (action !== "feedback") throw new ApiHttpError(404, "not_found", "Route not found");
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
@@ -2342,6 +2364,7 @@ async function handleRequest(
           resourceId,
           parsedMemoryPatch(body.patch),
           body.causedBy,
+          body.expectedRevision,
         ),
       );
       return;

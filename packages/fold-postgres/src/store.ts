@@ -286,6 +286,9 @@ export class PostgresFoldDatabase {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await this.setTenant(client, tenant);
       const result = await client.query<R>(text, [...values]);
       await client.query("COMMIT");
@@ -420,6 +423,9 @@ export class PostgresFoldDatabase {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await this.setTenant(client, tenant);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${tenantCacheKey(tenant)}`]);
       const prior = await client.query<{ request: unknown; result: unknown; entries: FoldLogEntry[]; revision: string }>(`
@@ -500,6 +506,9 @@ export class PostgresFoldDatabase {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await this.setTenant(client, tenant);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${tenantCacheKey(tenant)}`]);
       for (const entry of entries) await this.insertEntry(client, tenant, entry);
@@ -520,6 +529,9 @@ export class PostgresFoldDatabase {
     let imported = 0;
     try {
       await client.query("BEGIN");
+      // Runtime transactions share the schema gate before taking table/tenant locks.
+      // Initializers hold it exclusively, preventing DDL/bootstrap lock inversions.
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
       await this.setTenant(client, tenant);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${tenantCacheKey(tenant)}`]);
       for (const entry of entries) {

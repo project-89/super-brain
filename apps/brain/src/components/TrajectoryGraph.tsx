@@ -89,7 +89,7 @@ export function TrajectoryGraph({ tree, successfulPath, selectedRun }: {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable
-        proOptions={{ hideAttribution: true }}
+
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
         <MiniMap pannable zoomable nodeStrokeWidth={2} />

@@ -64,13 +64,17 @@ Verification: full `pnpm verify` passed under Node **24.20.0**, using the dispos
 
 The synthetic repository reconstruction drill preserves separate index/worktree edits, binary bytes, modes, deletions, renames and consented untracked paths, then verifies the restored fingerprint. Missing base commits remain an explicit dependency. Partial/redacted snapshots refuse original reconstruction. Unsupported checkout semantics (including hidden tracked-file flags and unsupported index modes) make fingerprints unavailable and cannot preserve earlier acceptance authority. Review also resolved symlinked destination/private-root exclusions, bounded encrypted witness reads, usage duplication, cross-space task identity collisions, stale authority, and exact human acceptance source joins. Missing oracle evidence now has unavailable/null confidence; legacy review text remains self-reported. See `PHASE3_ATTEMPT_CONTRACTS.md` and `PHASE3_CAPTURE_HANDOFF.md`. The full verification log is `/tmp/super-brain-phase3-verify-node24.log`.
 
-## Phase 4 — shared client, feedback, context and operator product
+## Phase 4 — shared client, feedback, context and operator product (verified)
 
 Extend the existing canonical client with cancellation/deadlines, token delivery, pagination, typed errors/retry hints, relevant operations and stable stamps. Brain delegates canonical calls while retaining local operator artifact access. Give feedback narrow permission, stable recall/batch identities, exact memory revision/rank/provider/task/attempt/session joins and offered/injected/used/judged/outcome states. Persist/retry optional telemetry independently of successful reads; share transport error policy while preserving distinct import/spool/subscriber state machines.
 
 Provide bounded project/task context through MCP and an explicit completion/correction flow. Distinguish steering delivery from adoption. Add a task evidence page using Phase 3 records, permission-aware memory evidence links and correction controls, and operator processing/value coverage with lag/failure/retry/exclusion. Replace misleading validated/100%-confidence labels with accurate judgment/relevance terms. Apply current project/revision validity and feedback to review/retrieval without treating votes as truth.
 
 Patterns: existing Brain pages/components, `SuperBrainClient`, MCP tool registration, feedback Fold events. Verification: read-only MCP works when feedback is forbidden; failed telemetry does not fail recall; retries dedup; exact revision joins; token refresh and browser abort; operator token never reaches hosted API; task context bounded and current; UI task/evidence/processing/correction flows inspected in browser. No unrelated UI redesign or new agent framework.
+
+Execution ownership and concrete shared ports are in `PHASE4_PRODUCT_CONTRACTS.md`: platform owns canonical transport/domain/API, product owns Brain and the operator status bridge, processing owns MCP/Node outbox/worker status. Recall provenance contains the actual request's authenticated subject; durable batch delivery validates `expectedSubject` again inside its own request, closing account-change races. Explicit adoption/judgment remains attributable reporting and cannot manufacture an outcome or private witness.
+
+Verification: full `pnpm verify` passed under Node **24.20.0** with the disposable restricted PostgreSQL role: **637 tests across 104 files and 21 packages**, no skipped tests, all workspace typechecks and both builds passed. Independent cross-review resolved browser fetch binding, generated-stamp collisions, SQLite packaged-runtime imports and cross-process claims, durable delivery repair/cancellation, stale account and revision responses, and read-provenance binding for explicit feedback. Actual browser checks verified historical evidence pagination, two-tab correction conflicts with retained drafts, exact-revision judgment, queued delivery, reader controls, task runtime details and later outcomes. Async search rechecks access/current revisions, and a deterministic schema-lock regression fixes a reproduced two-process startup deadlock. See `PHASE4_VALIDATION.md` and `PHASE4_FEEDBACK_TRANSPORT.md`. The original checkout and installed services remain unchanged.
 
 ## Phase 5 — empirical evaluation and selected export
 
@@ -100,8 +104,10 @@ After implementation, delegate verification, anti-pattern checks and code-qualit
 - Phase 1 independent review resolved exact-retry API prechecks, concurrent schema initialization, overly broad command-request normalization, repeated memory identity validation, trajectory ordering, receipt publication durability, retry ordering, restart timestamps, and stale acceptance fingerprints. The full Node 24/PostgreSQL gate passed after these changes.
 - Phase 1 is committed and pushed as `0a9fd0b38aeb2e06e570ade2410412c3ef4bf7c8` on `codex/address-architectural-findings`. Phase 2 proceeds from that reviewed baseline; no merge or deployed-service change has occurred.
 - Phase 2 is committed and pushed as `e429af0d3bff6a57a23717b9f59cc0130073cc59`, after the full 534-test Node 24/PostgreSQL gate. Phase 3 begins from that verified baseline using `PHASE3_ATTEMPT_CONTRACTS.md`; the original checkout and live services remain untouched.
+- Phase 3 is committed and pushed as `b5352ce5f496980a108a4d7799bdce9d06a51e07`, after the full 566-test Node 24/PostgreSQL gate. Phase 4 starts from that verified baseline. Preparatory Phase 4/5 documents were kept out of the Phase 3 commit.
 - Parser/normalizer version changes must include migration coverage for previously imported immutable artifacts and canonical turn citations. Receipt occurrence identity, artifact content identity, parser interpretation identity, canonical event order, and ingestion delivery order are separate concepts.
 - Phase 6 measurement must include the new memory-validity graph: index event IDs and incoming supersession/contradiction relations rather than repeatedly scanning all events and memories for every result. Compare optimized output with complete canonical replay, including late arrivals and evidence-only revisions.
+- Recovery must pair canonical consumer progress with private receipts, worker jobs and their key versions. A database snapshot taken before a later acknowledged local-state snapshot is not automatically a consistent recovery point. Use an explicit quiescent boundary (or a verified replay barrier) and exercise it in the disposable drill. Include the Phase 4 Node telemetry database/key through a consistent SQLite backup or a closed database, rather than copying an active database without its WAL. Browser-local optional telemetry has a separately declared recovery boundary.
 - Real model experiments must run on synthetic frozen tasks with integrations and capture hooks isolated from the live installation. Retain observed provider/model identity and original output; disable unrelated MCP connections and automatic hook delivery for the experiment. Do not reuse a private working corpus as evaluation input.
 - Phase 5 runtime discovery (read-only; no empirical model run yet): the bundled `/Applications/ChatGPT.app/Contents/Resources/codex` is version `0.153.3` and its local help supports `exec --ignore-user-config --ephemeral --json`; the older Homebrew Codex binary exited 137 even for help. Claude Code `2.1.246` supports `--safe-mode`, `--no-session-persistence`, strict empty MCP configuration and explicit tool selection. Use the bundled working runtime rather than modifying the installed Homebrew binary. Official [non-interactive guidance](https://learn.chatgpt.com/docs/non-interactive-mode) and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) confirm ephemeral sessions and the explicit hooks/memory feature controls; verify effective isolation before an actual run. Authentication and real model availability remain untested.
 
@@ -114,7 +120,7 @@ After implementation, delegate verification, anti-pattern checks and code-qualit
 | E3 semantic mapping proof | Phases 3 and 5 independent annotations/experiment | Phase 3 honest mapping/oracle labels verified; empirical Phase 5 pending |
 | E4 task/model/context/usage provenance | Phase 3 attempt manifest | verified Phase 3 |
 | E5 replayable repository state | Phase 3 private patch/artifact capture | verified Phase 3; original base commit remains explicit dependency |
-| E6 human authority/interventions | Phases 1, 3, 4 | Phases 1 and 3 verified; Phase 4 UI pending |
+| E6 human authority/interventions | Phases 1, 3, 4 | verified Phases 1, 3 and 4 |
 | E7 lifecycle silence | Phase 1 explicit unknown policy | verified Phase 1 |
 | E8 selected consent-aware evaluation export | Phase 5 | pending |
 | P1 late-event cursor loss | Phase 1 ingestion positions and migration | verified Phase 1 |
@@ -129,9 +135,9 @@ After implementation, delegate verification, anti-pattern checks and code-qualit
 | Dedup support loss/scope collisions | Phase 2 | verified Phase 2 |
 | Shared correction/creator replay mismatch | Phase 2 | verified Phase 2 |
 | Forgotten/revised sources, derivative invalidation | Phase 2 | verified Phase 2 |
-| Feedback permission/failure/revision/meaning | Phase 4 | pending |
-| Browser/client/retry duplication | Phase 4 | pending |
-| Context adoption and practical task evidence UI | Phase 4 | pending |
+| Feedback permission/failure/revision/meaning | Phase 4 | verified Phase 4 |
+| Browser/client/retry duplication | Phase 4 | verified Phase 4 |
+| Context adoption and practical task evidence UI | Phase 4 | verified Phase 4 |
 | Outcome-bearing PR/CI/merge/revert integration | Phase 3 authenticated outcome boundary | verified Phase 3; real provider enrollment remains operated configuration |
 | Provider deadlines/background current embeddings | Phase 6 | pending |
 | Useful retrieval/real two-model evidence | Phase 5 | pending |

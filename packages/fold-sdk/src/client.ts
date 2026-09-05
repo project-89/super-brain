@@ -21,6 +21,10 @@ import {
   type MemoryValidityInput,
   type MemoryEvidenceContributionInput,
   makeMemoryFeedbackEvent,
+  normalizeMemoryFeedbackInputV2,
+  summarizeMemoryFeedback,
+  type MemoryFeedbackInputV2,
+  type MemoryFeedbackRecord,
   makeMemoryCandidateAcceptedEvent,
   makeMemoryCandidateProposedEvent,
   makeMemoryCandidateRejectedEvent,
@@ -331,6 +335,10 @@ export class FoldSdk {
           }
           for (const { event } of existing.entries) {
             assertCanAppendEvent(event, access);
+            for (const feedback of memoryFeedbackRecordsFromEvent(event)) {
+              if (!("version" in feedback)) throw new FoldSdkAccessError("legacy feedback cannot be replayed as a new command");
+              this.feedbackMemory((await this.memoryProjection(access)).projection, access, feedback.memoryId, feedback.memoryRevision);
+            }
             for (const record of taskEvidenceRecordsFromEvent(event)) assertCanWritePersonalMemory({ workspaceId: record.workspaceId, ...(record.spaceId === undefined ? {} : { spaceId: record.spaceId }), audience: "workspace", creatorId: record.actorId }, access);
             for (const record of memoryLogRecordsFromEvent(event)) assertCanWritePersonalMemory({ workspaceId: record.workspaceId, ...(record.spaceId === undefined ? {} : { spaceId: record.spaceId }), audience: record.audience, creatorId: record.actorId }, access);
             for (const contribution of memoryEvidenceContributionsFromEvent(event)) assertCanWritePersonalMemory({ ...contribution, creatorId: contribution.actorId }, access);
@@ -425,6 +433,7 @@ export class FoldSdk {
       validateStatus(entry.status);
       const event = parseEvent(entry.event);
       validateMemoryEnvelope(event);
+      memoryFeedbackRecordsFromEvent(event);
       validateMemoryCandidateEnvelope(event);
       validateTrajectoryEnvelope(event);
       validateActivityEventEnvelope(event);
@@ -451,6 +460,8 @@ export class FoldSdk {
       validateStatus(status);
       const candidate = parseEvent(event);
       validateMemoryEnvelope(candidate);
+      memoryFeedbackRecordsFromEvent(candidate);
+      if (candidate.kind === "memory.feedback-recorded" && !["recordMemoryFeedback", "recordMemoryFeedbackBatch"].includes(this.commandState?.method ?? "")) throw new FoldSdkAccessError("feedback must use the validated feedback command");
       validateMemoryCandidateEnvelope(candidate);
       validateTrajectoryEnvelope(candidate);
       validateActivityEventEnvelope(candidate);
@@ -482,7 +493,7 @@ export class FoldSdk {
       }
     }
     // Raw append and domain commands share the same invariant checks before any durable write.
-    if (added.some(({ event, status }) => status === "canon" && MEMORY_EVENT_KINDS.has(event.kind))) rebuildMemories(canonicalEvents);
+    if (added.some(({ event, status }) => status === "canon" && (MEMORY_EVENT_KINDS.has(event.kind) || event.kind === "memory.feedback-recorded"))) rebuildMemories(canonicalEvents);
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("memory.candidate-"))) rebuildMemoryCandidates(canonicalEvents);
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("trajectory."))) rebuildTrajectories(canonicalEvents);
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("transcript."))) rebuildTranscriptCatalog(canonicalEvents);
@@ -1416,11 +1427,13 @@ export class FoldSdk {
     memoryId: string,
     patch: MemoryRevisionPatch,
     causedBy?: readonly string[],
+    expectedRevision?: number,
   ): Promise<MemoryMutationResult> {
-    return this.command(context.access, "reviseMemory", stamp.id, { context, stamp, memoryId, patch, causedBy }, async () => {
+    return this.command(context.access, "reviseMemory", stamp.id, { context, stamp, memoryId, patch, causedBy, expectedRevision }, async () => {
       const current = await this.memoryProjection(context.access);
       const memory = recallProjectedMemoryById(current.projection, context.access, memoryId);
       if (memory === undefined) throw new PersonalMemoryUnavailableError(memoryId);
+      if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || memory.revision !== expectedRevision)) throw new FoldSdkConflictError("memory expected revision changed");
       const event = makeMemoryRevisedEvent(context, stamp, memory, patch, causedBy);
       await this.appendInternal(context.access, event, "canon");
       const next = rebuildMemories([...current.events, event]);
@@ -1465,9 +1478,9 @@ export class FoldSdk {
     });
   }
 
-  memoryEvidencePage(access: FoldSdkAccessContext, memoryId: string, options: { revision?: number; offset?: number; limit?: number } = {}) {
+  memoryEvidencePage(access: FoldSdkAccessContext, memoryId: string, options: { revision?: number; offset?: number; limit?: number; contributionOffset?: number } = {}) {
     return this.enqueue(async () => {
-      const { projection } = await this.memoryProjection(access);
+      const { projection, events } = await this.memoryProjection(access);
       const active = recallProjectedMemoryById(projection, access, memoryId);
       if (active === undefined) throw new PersonalMemoryUnavailableError(memoryId);
       const revision = options.revision ?? active.revision;
@@ -1475,27 +1488,77 @@ export class FoldSdk {
       if (memory === undefined) throw new FoldSdkConflictError("memory evidence revision is unavailable");
       const offset = options.offset ?? 0, limit = options.limit ?? 100;
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new FoldSdkError("invalid evidence page bounds");
+      const contributionOffset = options.contributionOffset ?? 0;
+      if (!Number.isSafeInteger(contributionOffset) || contributionOffset < 0) throw new FoldSdkError("invalid contribution page offset");
       const evidence = memory.evidence ?? [];
-      return { memoryId, revision, evidence: evidence.slice(offset, offset + limit), total: evidence.length, ...(offset + limit < evidence.length ? { nextOffset: offset + limit } : {}) };
+      const contributions = events.flatMap(memoryEvidenceContributionsFromEvent).filter((record) => (record.target === "memory" && record.targetId === memoryId && record.baseRevision < revision) || (record.target === "candidate" && record.targetId === memory.sourceCandidate?.candidateId && record.baseRevision < memory.sourceCandidate.revision)).map((record) => ({ eventId: record.eventId, contributorId: record.actorId, contributedAt: record.atMs, evidenceCount: record.evidence.filter((ref) => evidence.some((item) => canonicalJson(ref) === canonicalJson(item))).length })).filter((record) => record.evidenceCount > 0);
+      return { memoryId, revision, contributions: contributions.slice(contributionOffset, contributionOffset + limit), contributionTotal: contributions.length, ...(contributionOffset + limit < contributions.length ? { nextContributionOffset: contributionOffset + limit } : {}), evidence: evidence.slice(offset, offset + limit), total: evidence.length, ...(offset + limit < evidence.length ? { nextOffset: offset + limit } : {}) };
     });
   }
 
-  recordMemoryFeedback(
-    context: EpistemicEventContext,
-    stamp: EpistemicEventStamp,
-    memoryId: string,
-    input: MemoryFeedbackInput,
-    causedBy?: readonly string[],
-  ): Promise<MemoryFeedbackResult> {
+  private feedbackMemory(projection: MemoryProjection, access: FoldSdkAccessContext, memoryId: string, revision: number): PersonalMemory {
+    // An exact historical claim can be judged after correction, but current access and deletion still govern disclosure.
+    const active = recallProjectedMemoryById(projection, access, memoryId);
+    if (active === undefined) throw new PersonalMemoryUnavailableError(memoryId);
+    const memory = revision === active.revision ? active : projection.revisions?.get(memoryId)?.get(revision);
+    if (memory === undefined) throw new FoldSdkConflictError("feedback memory revision is unavailable");
+    return memory;
+  }
+
+  private feedbackContext(context: EpistemicEventContext, memory: PersonalMemory): EpistemicEventContext {
+    return { ...context, capture: { ...context.capture, scope: { workspace: memory.workspaceId, ...(memory.spaceId === undefined ? {} : { space: memory.spaceId }), ...(memory.audience === "personal" ? { creator: memory.creatorId } : {}) } } };
+  }
+
+  private validateFeedbackOutcome(access: FoldSdkAccessContext, input: MemoryFeedbackInputV2, memory: PersonalMemory, events: readonly FoldEvent[]): void {
+    const contained = events.filter((source) => authorizeEventAccess(source, access).allowed && (source.capture.scope.creator === undefined || (memory.audience === "personal" && source.capture.scope.creator === memory.creatorId)) && (source.capture.scope.space === undefined || source.capture.scope.space === memory.spaceId));
+    if (input.taskId !== undefined || input.attemptId !== undefined) {
+      const state = rebuildTaskEvidence(contained);
+      if (input.taskId !== undefined && ![...state.tasks.values()].some((task) => task.taskId === input.taskId)) throw new FoldSdkAccessError("feedback task is unavailable in memory scope");
+      const attempt = input.attemptId === undefined ? undefined : state.attempts.get(input.attemptId);
+      if (input.attemptId !== undefined && (attempt === undefined || attempt.taskId !== input.taskId)) throw new FoldSdkAccessError("feedback attempt does not match the task in memory scope");
+    }
+    if (input.outcomeEventId === undefined) return;
+    const source = contained.find((event) => event.id === input.outcomeEventId);
+    if (!source || !authorizeEventAccess(source, access).allowed || (source.capture.scope.creator !== undefined && (memory.audience !== "personal" || source.capture.scope.creator !== memory.creatorId)) || (source.capture.scope.space !== undefined && source.capture.scope.space !== memory.spaceId)) throw new FoldSdkAccessError("feedback outcome is unavailable in memory scope");
+    const outcomes = taskEvidenceRecordsFromEvent(source).filter((record) => record.recordType === "outcome");
+    if (!outcomes.some((record) => record.recordType === "outcome" && (input.taskId === undefined || record.input.taskId === input.taskId) && (input.attemptId === undefined || record.input.attemptId === input.attemptId))) throw new FoldSdkAccessError("feedback outcome must reference a matching canonical task outcome");
+  }
+
+  recordMemoryFeedback(context: EpistemicEventContext, stamp: EpistemicEventStamp, memoryId: string, input: MemoryFeedbackInput, causedBy?: readonly string[]): Promise<MemoryFeedbackResult> {
     return this.command(context.access, "recordMemoryFeedback", stamp.id, { context, stamp, memoryId, input, causedBy }, async () => {
+      const normalized = normalizeMemoryFeedbackInputV2(input);
       const current = await this.memoryProjection(context.access);
-      const memory = recallProjectedMemoryById(current.projection, context.access, memoryId);
-      if (memory === undefined) throw new PersonalMemoryUnavailableError(memoryId);
-      const event = makeMemoryFeedbackEvent(context, stamp, memory, input, causedBy);
+      const memory = this.feedbackMemory(current.projection, context.access, memoryId, normalized.memoryRevision);
+      this.validateFeedbackOutcome(context.access, normalized, memory, current.events);
+      const event = makeMemoryFeedbackEvent(this.feedbackContext(context, memory), stamp, memory, normalized, causedBy);
       await this.appendInternal(context.access, event, "canon");
-      const feedback = memoryFeedbackRecordsFromEvent(event)[0];
-      if (feedback === undefined) throw new FoldSdkError(`memory feedback event ${event.id} was empty`);
-      return { event, feedback };
+      return { event, feedback: memoryFeedbackRecordsFromEvent(event)[0]! };
+    });
+  }
+
+  recordMemoryFeedbackBatch(context: EpistemicEventContext, stamp: EpistemicEventStamp, items: readonly { readonly stamp: EpistemicEventStamp; readonly memoryId: string; readonly input: MemoryFeedbackInputV2 }[], expectedSubject: { readonly principalId: string; readonly organizationId: string; readonly workspaceId: string }): Promise<{ readonly events: readonly FoldEvent[]; readonly feedback: readonly MemoryFeedbackRecord[] }> {
+    if (expectedSubject.principalId !== context.access.principalId || expectedSubject.organizationId !== context.access.organizationId || expectedSubject.workspaceId !== context.access.workspaceId) throw new FoldSdkAccessError("feedback subject changed");
+    return this.command(context.access, "recordMemoryFeedbackBatch", stamp.id, { context, stamp, items, expectedSubject }, async () => {
+      if (items.length < 1 || items.length > 100 || new Set(items.map((item) => item.stamp.id)).size !== items.length) throw new FoldSdkError("feedback batch requires 1 to 100 distinct event IDs");
+      const current = await this.memoryProjection(context.access);
+      const events = items.map((item) => {
+        const input = normalizeMemoryFeedbackInputV2(item.input);
+        const memory = this.feedbackMemory(current.projection, context.access, item.memoryId, input.memoryRevision);
+        this.validateFeedbackOutcome(context.access, input, memory, current.events);
+        return makeMemoryFeedbackEvent(this.feedbackContext(context, memory), item.stamp, memory, input);
+      });
+      await this.commitEntryBatch(context.access, events.map((event) => ({ event, status: "canon" })));
+      return { events, feedback: events.flatMap(memoryFeedbackRecordsFromEvent) };
+    });
+  }
+
+  memoryFeedbackSummary(access: FoldSdkAccessContext, memoryId: string, revision?: number) {
+    return this.enqueue(async () => {
+      const current = await this.memoryProjection(access);
+      const active = recallProjectedMemoryById(current.projection, access, memoryId);
+      if (!active) throw new PersonalMemoryUnavailableError(memoryId);
+      const memory = this.feedbackMemory(current.projection, access, memoryId, revision ?? active.revision);
+      return summarizeMemoryFeedback(current.events.flatMap(memoryFeedbackRecordsFromEvent), memoryId, memory.revision);
     });
   }
 
@@ -1610,9 +1673,20 @@ export class FoldSdk {
         ...(limit === undefined ? {} : { limit }),
         candidates,
       });
+      // Ranking may await a remote embedder while another process changes or forgets a claim.
+      const fresh = await this.memoryProjection(access);
+      for (const { memory } of memories) {
+        const current = recallProjectedMemoryById(fresh.projection, access, memory.id);
+        if (current === undefined || current.revision !== memory.revision || (request.includeNeedsReview !== true && current.currentness?.status !== "current")) throw new FoldSdkConflictError("memory changed while ranking; repeat the search");
+      }
+      const judgments = new Map<string, MemoryFeedbackInputV2>();
+      for (const record of (await this.entriesForAccess(access, { include: "canon" })).flatMap(({ event }) => memoryFeedbackRecordsFromEvent(event))) if ("version" in record && record.signal === "judged" && record.actorId === access.principalId) judgments.set(`${record.memoryId}:${record.memoryRevision}`, record);
+      const preference = (memory: PersonalMemory) => { const judgment = judgments.get(`${memory.id}:${memory.revision}`)?.judgment; return judgment === "helpful" ? 1 : judgment === "unhelpful" || judgment === "superseded" ? -1 : 0; };
+      const ordered = memories.map((row, index) => ({ row, index })).sort((a, b) => (b.row.score ?? 0) - (a.row.score ?? 0) || preference(b.row.memory) - preference(a.row.memory) || a.index - b.index).map(({ row }) => row);
       return {
-        memories,
+        memories: ordered,
         ranking: { ...ranker.descriptor, corpusSize: corpus.length },
+        feedback: { basis: "requester-latest-judgment-tiebreak-v1", items: ordered.filter(({ memory }) => preference(memory) !== 0).map(({ memory }) => ({ memoryId: memory.id, memoryRevision: memory.revision, preference: preference(memory) })) },
       };
     });
   }

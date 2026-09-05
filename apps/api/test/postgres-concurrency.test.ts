@@ -373,4 +373,25 @@ integrationDescribe("two-process PostgreSQL API correctness", () => {
     expect(duplicate.status).toBe(409);
     expect((await request(first, "/memories")).status).toBe(200);
   }, 20_000);
+  it("commits feedback batches once across processes and keeps exact receipts after restart and correction", async () => {
+    const id = memoryId(100);
+    expect((await request(first, "/memories", { stamp: stamp("feedback-memory", 8000), input: { id, audience: "workspace", applicability: { kind: "global" }, source: "integration-fixture", summary: "Exact feedback" } })).status).toBe(201);
+    const expectedSubject = { organizationId: "integration-org", workspaceId: "integration-workspace", principalId: "integration-owner" };
+    const item = { stamp: stamp("feedback-item", 8100), memoryId: id, input: { version: 2, memoryRevision: 0, recallId: "integration-recall", signal: "judged", judgment: "helpful" } };
+    const body = { stamp: stamp("feedback-batch", 8100), expectedSubject, items: [item] };
+    const invalid = await request(first, "/memory-feedback-batches", { ...body, items: [item, { ...item, stamp: stamp("feedback-invalid", 8101), input: { ...item.input, memoryRevision: 999 } }] });
+    expect(invalid.status).toBe(409);
+    expect((await request(second, `/memories/${id}/feedback`)).body.summary.helpful).toBe(0);
+    const results = await Promise.all([request(first, "/memory-feedback-batches", body), request(second, "/memory-feedback-batches", body)]);
+    expect(results.map(({ status }) => status)).toEqual([201, 201]); expect(results[0]!.body).toEqual(results[1]!.body);
+    expect((await request(second, `/memories/${id}`, { stamp: stamp("feedback-correction", 8200), expectedRevision: 0, patch: { summary: "Corrected claim" } }, "PATCH")).status).toBe(200);
+    await first.stop(); first = await startProcess(schema, false); processes.push(first);
+    expect((await request(first, "/memory-feedback-batches", body)).body).toEqual(results[0]!.body);
+    const entries = (await request(first, "/events")).body.entries;
+    expect(entries.filter(({ event }: any) => event.id === "feedback-item")).toHaveLength(1);
+    expect(entries.some(({ event }: any) => event.id === "feedback-invalid")).toBe(false);
+    expect((await request(first, `/memories/${id}/feedback?revision=0`)).body.summary.helpful).toBe(1);
+    expect((await request(first, `/memories/${id}/feedback`)).body.summary.helpful).toBe(0);
+  }, 25_000);
+
 });

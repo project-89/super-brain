@@ -46,7 +46,7 @@ describe("SuperBrainClient", () => {
     const slow: typeof fetch = async (_url, init) => new Promise((_resolve, reject) => {
       init!.signal!.addEventListener("abort", () => { aborted = true; reject(init!.signal!.reason); }, { once: true });
     });
-    await expect(client(slow).askReasoning({ question: "Slow question" }, { timeoutMs: 10 })).rejects.toMatchObject({ name: "TimeoutError" });
+    await expect(client(slow).askReasoning({ question: "Slow question" }, { timeoutMs: 10 })).rejects.toMatchObject({ code: "timeout" });
     expect(aborted).toBe(true);
   });
 
@@ -83,46 +83,27 @@ describe("SuperBrainClient", () => {
   it("records auditable memory feedback through the dedicated route", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ event: {}, feedback: { signal: "helpful" } })) as unknown as typeof fetch;
     await client(fetchMock).recordMemoryFeedback("memory/a", {
-      signal: "helpful",
-      query: "Which store is canonical?",
+      version: 2, memoryRevision: 0, recallId: "recall-a", signal: "judged", judgment: "helpful",
       taskId: "task-a",
     });
     const [url, init] = (fetchMock as any).mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://brain.example/v1/workspaces/workspace%2Fone/memories/memory%2Fa/feedback");
     expect(JSON.parse(String(init.body))).toMatchObject({
-      input: { signal: "helpful", query: "Which store is canonical?", taskId: "task-a" },
+      input: { version: 2, memoryRevision: 0, recallId: "recall-a", signal: "judged", judgment: "helpful", taskId: "task-a" },
     });
   });
 
-  it("records recalled telemetry for every ranked memory when harness context is configured", async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({
-        memories: [{ memory: { id: "memory-a" }, score: 0.9 }, { memory: { id: "memory-b" }, score: 0.8 }],
-        ranking: { id: "lexical", kind: "lexical", corpusSize: 2 },
-      }))
-      .mockResolvedValue(jsonResponse({ event: {}, feedback: { signal: "recalled" } })) as unknown as typeof fetch;
-    const api = new SuperBrainClient({
-      baseUrl: "https://brain.example",
-      workspaceId: "workspace/one",
-      token: "secret",
-      fetch: fetchMock,
-      recallTelemetry: { sessionId: "session-a", taskId: "task-a", detail: "test-harness" },
-    });
-    await api.rankMemories({ query: "Which store is canonical?" });
-    expect((fetchMock as any).mock.calls).toHaveLength(3);
-    expect((fetchMock as any).mock.calls.slice(1).map(([url]: [string]) => url)).toEqual([
-      expect.stringContaining("/memories/memory-a/feedback"),
-      expect.stringContaining("/memories/memory-b/feedback"),
-    ]);
-    expect(JSON.parse(String(((fetchMock as any).mock.calls[1][1] as RequestInit).body))).toMatchObject({
-      input: {
-        signal: "recalled",
-        query: "Which store is canonical?",
-        sessionId: "session-a",
-        taskId: "task-a",
-        detail: "test-harness",
-      },
-    });
+  it("queues exact offered revisions without awaiting durable storage or retaining queries", async () => {
+    const subject = { principalId: "user-a", organizationId: "org-a", workspaceId: "workspace/one" };
+    const provenance = { version: 1, recallId: "recall-a", subject, observedAt: "2026-09-04", operation: "search", ranking: { id: "lexical", kind: "lexical" }, items: [{ memoryId: "memory-a", memoryRevision: 0, rank: 1 }] };
+    const enqueue = vi.fn(() => new Promise<void>(() => {}));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ memories: [], provenance, ranking: { id: "lexical", kind: "lexical", corpusSize: 0 } })) as unknown as typeof fetch;
+    const api = new SuperBrainClient({ baseUrl: "https://brain.example", workspaceId: "workspace/one", token: "secret", fetch: fetchMock, telemetryOutbox: { enqueue, status: async () => ({ pending: 0, retry: 0, denied: 0, exhausted: 0, observedAt: "now" }) } });
+    await api.rankMemories({ query: "secret query must never enter telemetry" });
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]).toEqual([expect.objectContaining({ subject, items: [expect.objectContaining({ memoryId: "memory-a", input: expect.objectContaining({ version: 2, signal: "offered", memoryRevision: 0, recallId: "recall-a" }) })] })]);
+    expect(JSON.stringify(enqueue.mock.calls)).not.toContain("secret query");
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("parses resumable SSE frames split across chunks", async () => {
