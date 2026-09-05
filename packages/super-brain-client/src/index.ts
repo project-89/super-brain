@@ -11,7 +11,7 @@ import type {
   RecallRequest,
   RecalledMemory,
 } from "@_89/fold-epistemic";
-import type { FoldSdkCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
+import type { FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
 import type { TranscriptRun } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
@@ -41,11 +41,11 @@ export interface EventStamp {
 
 export interface StreamedFoldEvent {
   readonly entry: FoldLogEntry;
-  readonly cursor: FoldSdkCursor;
+  readonly cursor: FoldDeliveryCursor;
 }
 
 export interface EventStreamOptions {
-  readonly after?: FoldSdkCursor;
+  readonly after?: FoldConsumerCursor;
   readonly replay?: "tail" | "all";
   readonly include?: "canon" | "canon+draft";
   readonly kinds?: readonly string[];
@@ -502,14 +502,14 @@ export class SuperBrainClient {
     });
   }
 
-  async consumerCursor(consumerId: string): Promise<FoldSdkCursor | undefined> {
-    const response = await this.request<{ readonly cursor?: FoldSdkCursor | null }>(
+  async consumerCursor(consumerId: string): Promise<FoldConsumerCursor | undefined> {
+    const response = await this.request<{ readonly cursor?: FoldConsumerCursor | null }>(
       `${this.workspacePath("consumers")}/${encodeURIComponent(consumerId)}`,
     );
     return response.cursor ?? undefined;
   }
 
-  commitConsumerCursor(consumerId: string, cursor: FoldSdkCursor): Promise<unknown> {
+  commitConsumerCursor(consumerId: string, cursor: FoldConsumerCursor): Promise<unknown> {
     return this.request(`${this.workspacePath("consumers")}/${encodeURIComponent(consumerId)}`, {
       method: "POST",
       body: JSON.stringify({ cursor }),
@@ -519,8 +519,11 @@ export class SuperBrainClient {
   async *eventStream(options: EventStreamOptions = {}): AsyncGenerator<StreamedFoldEvent> {
     const params = new URLSearchParams();
     if (options.after !== undefined) {
-      params.set("afterT", options.after.t.toString());
-      params.set("afterEventId", options.after.eventId);
+      if ("version" in options.after) params.set("afterSequence", options.after.sequence);
+      else {
+        params.set("afterT", options.after.t.toString());
+        params.set("afterEventId", options.after.eventId);
+      }
     }
     if (options.replay !== undefined) params.set("replay", options.replay);
     if (options.include !== undefined) params.set("include", options.include);
@@ -550,6 +553,7 @@ export class SuperBrainClient {
       while (true) {
         const { value, done } = await reader.read();
         buffer += value ?? "";
+        if (buffer.length > 4 * 1024 * 1024) throw new SuperBrainApiError(502, "stream_frame_too_large", "Event stream frame exceeded its limit");
         let boundary: number;
         while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
           const frame = buffer.slice(0, boundary);
@@ -557,13 +561,18 @@ export class SuperBrainClient {
           buffer = buffer.slice(boundary + separator.length);
           const lines = frame.split(/\r?\n/);
           const eventName = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
-          if (eventName !== "fold-event") continue;
+          if (eventName !== "fold-event" && eventName !== "stream-error") continue;
           const data = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+          if (data.length > 0 && eventName === "stream-error") {
+            const failure = JSON.parse(data) as { status?: number; code?: string; message?: string };
+            throw new SuperBrainApiError(failure.status ?? 503, failure.code ?? "stream_failed", failure.message ?? "Event stream failed");
+          }
           if (data.length > 0) yield JSON.parse(data) as StreamedFoldEvent;
         }
         if (done) break;
       }
     } finally {
+      await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
   }

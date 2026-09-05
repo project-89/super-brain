@@ -60,6 +60,8 @@ export interface ExternalPrincipalBinding {
 }
 
 export interface ExternalIdentityProvisioningEvent {
+  /** Source occurrence time, never a delivery/retry timestamp. Missing legacy times are conservative zero. */
+  readonly occurredAt?: number;
   readonly eventId: string;
   readonly provider: string;
   readonly type: "organization.upsert" | "organization.delete" | "membership.upsert" | "membership.delete" | "credential.upsert" | "credential.delete";
@@ -163,7 +165,7 @@ export class PostgresTenantAdministration {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-tenancy-schema-v1'))");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-schema-v1'))");
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
       if (this.requireRlsEnforcement) {
         const role = await client.query<{ readonly rolsuper: boolean; readonly rolbypassrls: boolean }>(`
@@ -261,7 +263,26 @@ export class PostgresTenantAdministration {
         external_principal_id text,
         applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
       )`);
+      await client.query(`CREATE TABLE IF NOT EXISTS ${this.table("fold_identity_versions")} (
+        organization_id text NOT NULL, provider text NOT NULL, external_organization_id text NOT NULL,
+        entity_key text NOT NULL, occurred_at bigint NOT NULL, deleted boolean NOT NULL,
+        PRIMARY KEY (organization_id, provider, external_organization_id, entity_key)
+      )`);
+      // Existing organizations are identity metadata, not protected content. Migrate each RLS scope explicitly.
+      const legacyOrganizations = await client.query<{ id: string }>(`SELECT id FROM ${this.table("fold_organizations")}`);
+      for (const organization of legacyOrganizations.rows) {
+        await client.query("SELECT set_config('app.organization_id', $1, true)", [organization.id]);
+        await client.query(`INSERT INTO ${this.table("fold_identity_versions")}
+          (organization_id, provider, external_organization_id, entity_key, occurred_at, deleted)
+          SELECT DISTINCT ON (organization_id, provider, external_organization_id, CASE WHEN event_type LIKE 'organization.%' THEN 'organization' ELSE split_part(event_type, '.', 1) || ':' || external_principal_id END)
+            organization_id, provider, external_organization_id, CASE WHEN event_type LIKE 'organization.%' THEN 'organization' ELSE split_part(event_type, '.', 1) || ':' || external_principal_id END,
+            floor(extract(epoch FROM applied_at) * 1000)::bigint, event_type LIKE '%.delete'
+          FROM ${this.table("fold_identity_provisioning_audit")} WHERE organization_id = $1
+          ORDER BY organization_id, provider, external_organization_id, CASE WHEN event_type LIKE 'organization.%' THEN 'organization' ELSE split_part(event_type, '.', 1) || ':' || external_principal_id END, applied_at DESC
+          ON CONFLICT DO NOTHING`, [organization.id]);
+      }
       for (const tableName of [
+        "fold_identity_versions",
         "fold_workspaces",
         "fold_organization_memberships",
         "fold_workspace_memberships",
@@ -469,6 +490,22 @@ export class PostgresTenantAdministration {
       await client.query("BEGIN");
       await client.query("SELECT set_config('app.organization_id', $1, true)", [organizationId]);
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`identity:${provider}:${externalOrganizationId}`]);
+      const occurredAt = input.occurredAt ?? (input.type.startsWith("credential.") ? Date.now() : 0);
+      if (!Number.isSafeInteger(occurredAt) || occurredAt < 0) throw new TypeError("provisioning occurrence time must be a nonnegative safe integer");
+      const entityKey = input.type.startsWith("organization.") ? "organization" : `${input.type.split(".")[0]}:${required(input.externalPrincipalId ?? "", "external principal id")}`;
+      const deleted = input.type.endsWith(".delete");
+      const versions = await client.query<{ entity_key: string; occurred_at: string; deleted: boolean }>(`
+        SELECT entity_key, occurred_at, deleted FROM ${this.table("fold_identity_versions")}
+        WHERE organization_id = $1 AND provider = $2 AND external_organization_id = $3
+          AND entity_key = ANY($4::text[])`, [organizationId, provider, externalOrganizationId, [entityKey, "organization"]]);
+      const current = versions.rows.find((row) => row.entity_key === entityKey);
+      const organization = versions.rows.find((row) => row.entity_key === "organization");
+      if ((entityKey !== "organization" && organization?.deleted === true) ||
+          (current !== undefined && (BigInt(occurredAt) < BigInt(current.occurred_at) ||
+           (BigInt(occurredAt) === BigInt(current.occurred_at) && (!deleted || current.deleted))))) {
+        await client.query("COMMIT");
+        return false;
+      }
       const audit = await client.query(`INSERT INTO ${this.table("fold_identity_provisioning_audit")}
         (event_id, organization_id, provider, event_type, external_organization_id, external_principal_id)
         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (event_id) DO NOTHING RETURNING event_id`, [
@@ -483,6 +520,13 @@ export class PostgresTenantAdministration {
         await client.query("COMMIT");
         return false;
       }
+
+      await client.query(`INSERT INTO ${this.table("fold_identity_versions")}
+        (organization_id, provider, external_organization_id, entity_key, occurred_at, deleted)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (organization_id, provider, external_organization_id, entity_key)
+        DO UPDATE SET occurred_at = EXCLUDED.occurred_at, deleted = EXCLUDED.deleted`,
+        [organizationId, provider, externalOrganizationId, entityKey, occurredAt, deleted]);
 
       if (input.type === "organization.delete") {
         await client.query(`DELETE FROM ${this.table("fold_workspace_memberships")}

@@ -93,7 +93,7 @@ export class PostgresVectorMemoryRanker implements MemoryRanker {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-memory-embeddings-v1'))");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-schema-v1'))");
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
       if (this.requireRlsEnforcement) {
         const role = await client.query<{ readonly rolsuper: boolean; readonly rolbypassrls: boolean }>(`

@@ -1,6 +1,6 @@
-import { createHash, createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, mkdir, open, readFile, stat } from "node:fs/promises";
+import { chmod, link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -34,19 +34,34 @@ export async function readVaultKey(pathInput: string): Promise<Uint8Array> {
 
 export async function ensureVaultKey(pathInput: string): Promise<{ readonly path: string; readonly key: Uint8Array }> {
   const path = resolve(pathInput);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const created = await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);
-  try {
-    const file = await open(path, "wx", 0o600);
-    try {
-      await file.writeFile(`${randomBytes(32).toString("base64")}\n`, "utf8");
-      await file.sync();
-    } finally {
-      await file.close();
+  if (created !== undefined) {
+    const boundary = dirname(resolve(created));
+    let current = dirname(path);
+    while (true) {
+      const directory = await open(current, "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+      if (current === boundary || current === dirname(current)) break;
+      current = dirname(current);
     }
-    await chmod(path, 0o600);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const file = await open(temporary, "wx", 0o600);
+  try {
+    await file.writeFile(`${randomBytes(32).toString("base64")}\n`, "utf8");
+    await file.sync();
+    await file.close();
+    try {
+      await link(temporary, path);
+      const directory = await open(dirname(path), "r");
+      try { await directory.sync(); } finally { await directory.close(); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } finally {
+    await file.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
   }
   return { path, key: await readVaultKey(path) };
 }

@@ -13,6 +13,15 @@ import { access, apiEvent } from "./helpers.js";
 
 describe("workspace SDK registry", () => {
   const local = (workspaceId: string) => ({ organizationId: "local", workspaceId });
+  it("shares one SDK during simultaneous first access", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fold-api-registry-concurrent-"));
+    const registry = new JournalSdkRegistry(directory);
+    try {
+      const sdks = await Promise.all(Array.from({ length: 20 }, () => registry.sdkFor(local("same"))));
+      expect(new Set(sdks).size).toBe(1);
+    } finally { await registry.close(); }
+  });
+
   it("maps arbitrary workspace IDs to opaque journal filenames", () => {
     const filename = workspaceJournalFilename("../../sensitive/workspace");
     expect(filename).toMatch(/^[a-f0-9]{64}\.jsonl$/);

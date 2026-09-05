@@ -554,7 +554,7 @@ describe("Fold HTTP API", () => {
         body: { event: apiEvent({ id: "event-a", t: 1, kind: "alpha" }) },
       });
       const response = await fetch(
-        `${api.baseUrl}/v1/workspaces/workspace-1/event-stream?afterT=1&afterEventId=event-a&kind=alpha`,
+        `${api.baseUrl}/v1/workspaces/workspace-1/event-stream?afterSequence=1&kind=alpha`,
         {
           headers: { authorization: "Bearer token-a" },
           signal: controller.signal,
@@ -571,13 +571,13 @@ describe("Fold HTTP API", () => {
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let received = "";
-      while (!received.includes('"eventId":"event-b"')) {
+      while (!received.includes('"id":"event-b"')) {
         const chunk = await reader.read();
         if (chunk.done) break;
         received += decoder.decode(chunk.value, { stream: true });
       }
-      expect(received).not.toContain('"eventId":"event-a"');
-      expect(received).toContain('"eventId":"event-b"');
+      expect(received).not.toContain('"id":"event-a"');
+      expect(received).toContain('"id":"event-b"');
       expect(received).toContain('"id":"event-b"');
     } finally {
       controller.abort();
@@ -593,17 +593,17 @@ describe("Fold HTTP API", () => {
       const committed = await apiRequest(api.baseUrl, path, {
         method: "POST",
         token: "token-a",
-        body: { cursor: { t: 12, eventId: "event-12" } },
+        body: { cursor: { version: 2, sequence: "12" } },
       });
-      expect(committed.body.cursor).toEqual({ t: 12, eventId: "event-12" });
+      expect(committed.body.cursor).toEqual({ version: 2, sequence: "12" });
       expect((await apiRequest(api.baseUrl, path, { token: "token-a" })).body.cursor)
-        .toEqual({ t: 12, eventId: "event-12" });
+        .toEqual({ version: 2, sequence: "12" });
       expect((await apiRequest(api.baseUrl, path, { token: "token-b" })).body.cursor).toBeNull();
 
       const backward = await apiRequest(api.baseUrl, path, {
         method: "POST",
         token: "token-a",
-        body: { cursor: { t: 11, eventId: "event-11" } },
+        body: { cursor: { version: 2, sequence: "11" } },
       });
       expect(backward).toMatchObject({ status: 409, body: { error: { code: "fold_conflict" } } });
     } finally {
@@ -1508,7 +1508,7 @@ describe("Fold HTTP API", () => {
       expect((await apiRequest(api.baseUrl, path("org-b", "events"), { token: "secret" })).body.entries)
         .toEqual([]);
 
-      const cursorBody = { cursor: { t: 1, eventId: "org-a-event" } };
+      const cursorBody = { cursor: { version: 2, sequence: "1" } };
       expect((await apiRequest(api.baseUrl, path("org-a", "consumers/worker"), {
         method: "POST", token: "secret", body: cursorBody,
       })).status).toBe(200);

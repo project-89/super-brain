@@ -1,6 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
+import { normalizeHookEvidence } from "./evidence.js";
+import { CaptureReceiptQueue, receiptEncryptionKey } from "./receipts.js";
 import { CaptureEngine } from "./capture.js";
 import { DurableSpool, readHookVaultArtifact, readRelayFailureSummary } from "./storage.js";
 import { readTranscriptArtifactPage, type TranscriptVaultSource } from "./transcript-vault.js";
@@ -64,25 +66,27 @@ async function jsonBody(request: IncomingMessage, limit = 2 * 1024 * 1024): Prom
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     length += buffer.length;
-    if (length > limit) throw new Error("request body exceeds 2 MiB");
+    if (length > limit) throw new TypeError("request body exceeds 2 MiB");
     chunks.push(buffer);
   }
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as unknown;
   } catch {
-    throw new Error("request body must be valid JSON");
+    throw new TypeError("request body must be valid JSON");
   }
 }
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("request body must be a JSON object");
+    throw new TypeError("request body must be a JSON object");
   }
   return value as Record<string, unknown>;
 }
 
 export class CaptureHttpServer {
   private server: Server | undefined;
+  private receipts?: CaptureReceiptQueue;
+  private receiptTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly config: CaptureConfig,
@@ -94,6 +98,10 @@ export class CaptureHttpServer {
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
     if (this.server !== undefined) throw new Error("capture server is already running");
+    this.receipts = new CaptureReceiptQueue(this.engine, await receiptEncryptionKey(this.config));
+    await this.receipts.initialize();
+    this.receipts.start();
+    this.receiptTimer = setInterval(() => this.receipts?.start(), 1_000);
     this.server = createServer((request, response) => void this.handle(request, response));
     await new Promise<void>((resolve, reject) => {
       this.server!.once("error", reject);
@@ -110,6 +118,8 @@ export class CaptureHttpServer {
   }
 
   async close(): Promise<void> {
+    if (this.receiptTimer !== undefined) clearInterval(this.receiptTimer);
+    await this.receipts?.idle();
     const server = this.server;
     this.server = undefined;
     if (server === undefined) return;
@@ -120,15 +130,17 @@ export class CaptureHttpServer {
     try {
       const url = new URL(request.url ?? "/", "http://capture.local");
       if (request.method === "GET" && url.pathname === "/health") {
-        const [spool, relayFailures] = await Promise.all([
+        const [spool, relayFailures, receipts] = await Promise.all([
           this.spool.snapshot(),
           readRelayFailureSummary(this.config.stateRoot),
+          this.receipts!.snapshot(),
         ]);
         send(response, 200, {
           status: "ok",
           ...this.engine.snapshot(),
           ...spool,
           relayFailures,
+          receipts,
           policy: {
             reasoning: this.config.reasoningPolicy,
             encryptedReasoning: this.config.retainEncryptedReasoning ? "retain" : "exclude",
@@ -206,23 +218,36 @@ export class CaptureHttpServer {
         send(response, 404, { error: "not_found" });
         return;
       }
-      if (!authorized(request, this.config.hookToken, "x-super-brain-hook-token")) {
+      const hasHookCredential = authorized(request, this.config.hookToken, "x-super-brain-hook-token");
+      const hasOperatorAuthority = this.config.operatorToken !== this.config.hookToken &&
+        authorized(request, this.config.operatorToken, "x-super-brain-operator-token");
+      if (!hasHookCredential && !hasOperatorAuthority) {
         send(response, 401, { error: "unauthorized" });
         return;
       }
       const body = object(await jsonBody(request));
-      const eventName = url.pathname === "/checkpoint"
-        ? "ReasoningCheckpoint"
-        : url.pathname === "/decision"
-          ? "HumanDecision"
-          : undefined;
-      const result = await this.engine.ingest(
-        hookSource(request.headers["x-agent-source"] as string | undefined, body.source),
-        eventName === undefined ? body : { ...body, hook_event_name: eventName },
-      );
-      send(response, 202, { accepted: true, artifactId: result.artifactId });
+      const eventName = url.pathname === "/checkpoint" ? "ReasoningCheckpoint" : url.pathname === "/decision" ? "HumanDecision" : undefined;
+      const payload = eventName === undefined ? body : { ...body, hook_event_name: eventName };
+      const human = normalizeHookEvidence(payload).name === "HumanDecision";
+      if (human ? !hasOperatorAuthority : !authorized(request, this.config.hookToken, "x-super-brain-hook-token")) {
+        send(response, 401, { error: human ? "operator_authority_required" : "unauthorized" });
+        return;
+      }
+      const authority = human ? { kind: "local-operator" as const, principalId: `operator:${this.config.sensorId}`, authenticatedAt: new Date().toISOString() } : undefined;
+      const receiptHeader = request.headers["x-super-brain-receipt-id"];
+      const occurredHeader = request.headers["x-super-brain-occurred-at"];
+      const occurredAt = typeof occurredHeader === "string" && Number.isFinite(Date.parse(occurredHeader)) ? new Date(occurredHeader).toISOString() : new Date().toISOString();
+      const result = await this.receipts!.accept({
+        version: 1, id: typeof receiptHeader === "string" ? receiptHeader : randomUUID(), occurredAt,
+        source: hookSource(request.headers["x-agent-source"] as string | undefined, body.source),
+        endpoint: url.pathname as "/hook" | "/checkpoint" | "/decision", payload,
+      }, authority);
+      send(response, 202, result);
+      this.receipts!.start();
     } catch (error) {
-      send(response, 400, { error: error instanceof Error ? error.message : "invalid_request" });
+      const invalid = error instanceof TypeError;
+      if (!invalid) response.setHeader("retry-after", "1");
+      send(response, invalid ? 400 : 503, { error: invalid ? error.message : "capture_temporarily_unavailable" });
     }
   }
 }

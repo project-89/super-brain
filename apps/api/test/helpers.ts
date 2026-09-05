@@ -6,6 +6,9 @@ import {
   FoldSdkConflictError,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type FoldConsumerCursor,
+  type FoldDeliveryCursor,
+  authorizeEventAccess,
   type FoldSdkStore,
 } from "@_89/fold-sdk";
 
@@ -20,7 +23,7 @@ import {
 export const MEMORY_A = "01890f47-7c00-7000-8000-000000000001";
 
 class MemoryStore implements FoldSdkStore {
-  private readonly entries: FoldLogEntry[] = [];
+  readonly entries: FoldLogEntry[] = [];
 
   async read() {
     return { entries: [...this.entries] };
@@ -33,28 +36,48 @@ class MemoryStore implements FoldSdkStore {
 
 export class MemorySdkRegistry implements FoldSdkRegistry {
   private readonly sdks = new Map<string, FoldSdk>();
-  private readonly cursors = new Map<string, FoldSdkCursor>();
+  private readonly stores = new Map<string, MemoryStore>();
+  private readonly cursors = new Map<string, FoldConsumerCursor>();
 
   async sdkFor(tenant: TenantKey): Promise<FoldSdk> {
     const key = JSON.stringify([tenant.organizationId, tenant.workspaceId]);
     let sdk = this.sdks.get(key);
     if (sdk === undefined) {
-      sdk = new FoldSdk(new MemoryStore());
+      const store = new MemoryStore();
+      this.stores.set(key, store);
+      sdk = new FoldSdk(store);
       this.sdks.set(key, sdk);
     }
     return sdk;
+  }
+
+  async streamEntries(tenant: TenantKey, access: FoldSdkAccessContext, options: { after?: FoldConsumerCursor; includeDrafts?: boolean; kinds?: readonly string[]; limit: number }) {
+    await this.sdkFor(tenant);
+    const store = this.stores.get(JSON.stringify([tenant.organizationId, tenant.workspaceId]))!;
+    const sequence = options.after !== undefined && "version" in options.after ? BigInt(options.after.sequence) : 0n;
+    const page = store.entries.map((entry, index) => ({ entry, cursor: { version: 2 as const, sequence: String(index + 1) } }))
+      .filter(({ cursor }) => BigInt(cursor.sequence) > sequence).slice(0, options.limit);
+    const visible = page.filter(({ entry }) => (options.includeDrafts || entry.status === "canon") &&
+      (options.kinds === undefined || options.kinds.includes(entry.event.kind)) && authorizeEventAccess(entry.event, access).allowed);
+    return { entries: visible.map(({ entry }) => entry), cursors: visible.map(({ cursor }) => cursor),
+      ...(page.at(-1) === undefined ? {} : { scannedThrough: page.at(-1)!.cursor }) };
+  }
+
+  async latestEventCursor(tenant: TenantKey): Promise<FoldDeliveryCursor> {
+    await this.sdkFor(tenant);
+    return { version: 2, sequence: String(this.stores.get(JSON.stringify([tenant.organizationId, tenant.workspaceId]))!.entries.length) };
   }
 
   async consumerCursor(tenant: TenantKey, consumerId: string) {
     return this.cursors.get(JSON.stringify([tenant.organizationId, tenant.workspaceId, consumerId]));
   }
 
-  async commitConsumerCursor(tenant: TenantKey, consumerId: string, cursor: FoldSdkCursor) {
+  async commitConsumerCursor(tenant: TenantKey, consumerId: string, cursor: FoldConsumerCursor) {
     const key = JSON.stringify([tenant.organizationId, tenant.workspaceId, consumerId]);
     const current = this.cursors.get(key);
     if (
       current !== undefined &&
-      (cursor.t < current.t || (cursor.t === current.t && cursor.eventId < current.eventId))
+      "version" in current && "version" in cursor && BigInt(cursor.sequence) < BigInt(current.sequence)
     ) {
       throw new FoldSdkConflictError("consumer cursor cannot move backward");
     }

@@ -105,6 +105,7 @@ import type {
   FoldSdkProjection,
   FoldSdkReadOptions,
   FoldSdkStore,
+  FoldCommandReceipt,
   ActivityMutationResult,
   FleetReadModel,
   MemoryForgetResult,
@@ -255,6 +256,15 @@ function transcriptCatalogCacheKey(access: FoldSdkAccessContext): string {
   ]);
 }
 
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+      return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+    }
+    return item;
+  });
+}
+
 export class FoldSdk {
   private queue: Promise<void> = Promise.resolve();
   private storedEntries: FoldLogEntry[] | undefined;
@@ -263,7 +273,72 @@ export class FoldSdk {
   private readonly memoryProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }>();
   private readonly candidateProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryCandidateProjection }>();
 
+  private commandState: { entries?: FoldLogEntry[]; revision?: string; staged: FoldLogEntry[] } | undefined;
+  private readonly localReceipts = new Map<string, FoldCommandReceipt>();
+
   constructor(private readonly store: FoldSdkStore) {}
+
+  private command<T>(access: FoldSdkAccessContext, method: string, identity: unknown,
+    request: unknown, operation: () => Promise<T>): Promise<T> {
+    return this.enqueue(async () => {
+      validateAccessContext(access);
+      if (this.store.requireDurableCommands === true && this.store.commit === undefined &&
+          !["append", "recordMemory", "recordActivitySignal"].includes(method)) {
+        throw new FoldSdkError("This command requires durable atomic retry receipts; configure the PostgreSQL store");
+      }
+      const commandId = JSON.stringify([access.principalId, method, identity]);
+      // Authorization is checked now; transient role snapshots are not command input.
+      const envelope = request as { readonly context?: { readonly access?: FoldSdkAccessContext } };
+      const scope = envelope?.context?.access;
+      const normalized = JSON.parse(JSON.stringify(scope === undefined ? request : {
+        ...envelope,
+        context: { ...envelope.context, access: {
+          principalId: scope.principalId, organizationId: scope.organizationId, workspaceId: scope.workspaceId,
+        } },
+      })) as unknown;
+      for (let attempt = 0; ; attempt += 1) {
+        const existing = this.store.commandReceipt === undefined
+          ? this.localReceipts.get(commandId) : await this.store.commandReceipt(commandId);
+        if (existing !== undefined) {
+          if (canonicalJson(existing.request) !== canonicalJson(normalized)) {
+            throw new FoldSdkConflictError(`${method === "append" ? "event id" : "command identity"} is already used: ${commandId}`);
+          }
+          for (const entry of existing.entries) assertCanAppendEvent(entry.event, access);
+          return existing.result as T;
+        }
+        const state: NonNullable<FoldSdk["commandState"]> = { staged: [] };
+        this.commandState = state;
+        let committed = false;
+        try {
+          // Pin exactly the snapshot used for every domain precondition in this command.
+          await this.readStoredEntries();
+          const result = await operation();
+          const command = { commandId, request: normalized, result };
+          if (this.store.commit !== undefined) {
+            if (state.revision === undefined) throw new FoldSdkError("atomic store must return snapshot revisions");
+            const receipt = await this.store.commit(state.staged, { expectedRevision: state.revision, command });
+            return receipt.result as T;
+          }
+          // Compatibility stores are single-writer; distributed CAS requires commit().
+          if (state.staged.length > 1 && this.store.appendMany !== undefined) await this.store.appendMany(state.staged);
+          else for (const entry of state.staged) await this.store.append(entry);
+          committed = true;
+          this.localReceipts.set(commandId, { ...command, entries: state.staged, revision: "local" });
+          return result;
+        } catch (error) {
+          if (attempt < 3 && error instanceof Error && "code" in error && error.code === "revision_conflict") continue;
+          throw error;
+        } finally {
+          this.commandState = undefined;
+          this.storedEntries = committed && this.store.stableReads === true ? state.entries : undefined;
+          this.storedRevision = undefined;
+          this.transcriptCatalogs.clear();
+          this.memoryProjections.clear();
+          this.candidateProjections.clear();
+        }
+      }
+    });
+  }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.queue.then(operation, operation);
@@ -286,7 +361,13 @@ export class FoldSdk {
   }
 
   private async readStoredEntries(): Promise<FoldLogEntry[]> {
+    if (this.commandState?.entries !== undefined) return this.commandState.entries;
     if (this.store.stableReads === true && this.storedEntries !== undefined) {
+      if (this.commandState !== undefined) {
+        this.commandState.entries = [...this.storedEntries];
+        if (this.storedRevision !== undefined) this.commandState.revision = this.storedRevision;
+        return this.commandState.entries;
+      }
       return this.storedEntries;
     }
     const read = await this.store.read({ missing: "empty" });
@@ -295,6 +376,11 @@ export class FoldSdk {
       this.storedEntries !== undefined &&
       read.revision === this.storedRevision
     ) {
+      if (this.commandState !== undefined) {
+        this.commandState.entries = [...this.storedEntries];
+        if (this.storedRevision !== undefined) this.commandState.revision = this.storedRevision;
+        return this.commandState.entries;
+      }
       return this.storedEntries;
     }
     const entries = read.entries.map((entry) => {
@@ -311,45 +397,20 @@ export class FoldSdk {
     validateProducerOrder(entries.map((entry) => entry.event));
     if (this.store.stableReads === true || read.revision !== undefined) this.storedEntries = entries;
     this.storedRevision = read.revision;
+    if (this.commandState !== undefined) {
+      this.commandState.entries = [...entries];
+      if (read.revision !== undefined) this.commandState.revision = read.revision;
+      return this.commandState.entries;
+    }
     return entries;
   }
 
-  private async appendInternal(
+  private async commitEntryBatch(
     access: FoldSdkAccessContext,
-    event: FoldEvent,
-    status: FoldLogEntry["status"],
-  ): Promise<FoldLogEntry> {
-    validateStatus(status);
-    const parsed = parseEvent(event);
-    validateMemoryEnvelope(parsed);
-    validateMemoryCandidateEnvelope(parsed);
-    validateTrajectoryEnvelope(parsed);
-    validateActivityEventEnvelope(parsed);
-    validateIntentionEventEnvelope(parsed);
-    validateTranscriptEventEnvelope(parsed);
-    assertCanAppendEvent(parsed, access);
-    const entries = await this.readStoredEntries();
-    const existing = entries.find((entry) => entry.event.id === parsed.id);
-    if (existing !== undefined) {
-      if (existing.status === status && JSON.stringify(existing.event) === JSON.stringify(parsed)) {
-        return existing;
-      }
-      throw new FoldSdkConflictError(`event id is already used: ${parsed.id}`);
-    }
-    validateProducerOrder([...entries.map((entry) => entry.event), parsed]);
-    const entry = { event: parsed, status } as const;
-    await this.store.append(entry);
-    this.storedEntries?.push(entry);
-    if (this.store.revision !== undefined) this.storedRevision = await this.store.revision();
-    this.clearProjectionCachesFor(parsed);
-    return entry;
-  }
-
-  private async appendSequenceInternal(
-    access: FoldSdkAccessContext,
-    events: readonly FoldEvent[],
-  ): Promise<readonly FoldEvent[]> {
-    const parsed = events.map((event) => {
+    input: readonly FoldLogEntry[],
+  ): Promise<readonly FoldLogEntry[]> {
+    const parsed = input.map(({ event, status }) => {
+      validateStatus(status);
       const candidate = parseEvent(event);
       validateMemoryEnvelope(candidate);
       validateMemoryCandidateEnvelope(candidate);
@@ -358,23 +419,38 @@ export class FoldSdk {
       validateIntentionEventEnvelope(candidate);
       validateTranscriptEventEnvelope(candidate);
       assertCanAppendEvent(candidate, access);
-      return candidate;
+      return { event: candidate, status };
     });
-    if (parsed.length === 0) return parsed;
     const entries = await this.readStoredEntries();
-    validateProducerOrder([...entries.map((entry) => entry.event), ...parsed]);
-    const appended = parsed.map((event) => ({ event, status: "canon" as const }));
-    if (this.store.appendMany === undefined) {
-      for (const entry of appended) await this.store.append(entry);
-    } else {
-      await this.store.appendMany(appended);
+    const added: FoldLogEntry[] = [];
+    for (const entry of parsed) {
+      const existing = [...entries, ...added].find(({ event }) => event.id === entry.event.id);
+      if (existing !== undefined) {
+        if (canonicalJson(existing) !== canonicalJson(entry)) {
+          throw new FoldSdkConflictError(`event id is already used: ${entry.event.id}`);
+        }
+      } else added.push(entry);
     }
-    for (const entry of appended) {
-      this.storedEntries?.push(entry);
-      this.clearProjectionCachesFor(entry.event);
-    }
-    if (this.store.revision !== undefined) this.storedRevision = await this.store.revision();
+    validateProducerOrder([...entries, ...added].map(({ event }) => event));
+    const canonicalEvents = sortLog([...entries, ...added]).filter(({ status }) => status === "canon").map(({ event }) => event);
+    // Raw append and domain commands share the same invariant checks before any durable write.
+    if (added.some(({ event, status }) => status === "canon" && MEMORY_EVENT_KINDS.has(event.kind))) rebuildMemories(canonicalEvents);
+    if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("memory.candidate-"))) rebuildMemoryCandidates(canonicalEvents);
+    if (added.some(({ event, status }) => status === "canon" && TRAJECTORY_EVENT_KINDS.has(event.kind))) rebuildTrajectories(canonicalEvents);
+    if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("transcript."))) rebuildTranscriptCatalog(canonicalEvents);
+    if (this.commandState === undefined) throw new FoldSdkError("append requires a command boundary");
+    this.commandState.staged.push(...added);
+    entries.push(...added);
+    for (const entry of added) this.clearProjectionCachesFor(entry.event);
     return parsed;
+  }
+
+  private async appendInternal(access: FoldSdkAccessContext, event: FoldEvent, status: FoldLogEntry["status"]): Promise<FoldLogEntry> {
+    return (await this.commitEntryBatch(access, [{ event, status }]))[0]!;
+  }
+
+  private async appendSequenceInternal(access: FoldSdkAccessContext, events: readonly FoldEvent[]): Promise<readonly FoldEvent[]> {
+    return (await this.commitEntryBatch(access, events.map((event) => ({ event, status: "canon" })))).map(({ event }) => event);
   }
 
   append(
@@ -382,7 +458,7 @@ export class FoldSdk {
     event: FoldEvent,
     status: FoldLogEntry["status"] = "canon",
   ): Promise<FoldLogEntry> {
-    return this.enqueue(() => this.appendInternal(access, event, status));
+    return this.command(access, "append", event.id, { event, status }, () => this.appendInternal(access, event, status));
   }
 
   private async entriesForAccess(
@@ -555,7 +631,7 @@ export class FoldSdk {
     input: unknown,
     options: TranscriptImportOptions,
   ): Promise<TranscriptImportResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "importTranscript", options.importId, { context, input, options }, async () => {
       const bundle = transcriptImportBundleSchema.parse(input);
       if (options.importId.trim().length === 0) {
         throw new FoldSdkError("transcript import id must not be empty");
@@ -636,7 +712,7 @@ export class FoldSdk {
     stamp: TrajectoryEventStamp,
     tree: TrajectoryTreeRecord["tree"],
   ): Promise<TrajectoryTreeMutationResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "recordTrajectoryTree", stamp.id, { context, stamp, tree }, async () => {
       const event = makeTrajectoryTreeRecordedEvent(context, stamp, tree);
       const current = await this.trajectoryProjection(context.access);
       const currentTree = current.state.trees.get(tree.taskId);
@@ -681,7 +757,7 @@ export class FoldSdk {
     stamp: TrajectoryEventStamp,
     input: TrajectoryInput,
   ): Promise<TrajectoryMutationResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "recordTrajectory", stamp.id, { context, stamp, input }, async () => {
       const current = await this.trajectoryProjection(context.access);
       const tree = current.state.trees.get(input.taskId)?.tree;
       if (tree === undefined) throw new TrajectoryTaskUnavailableError(input.taskId);
@@ -744,7 +820,7 @@ export class FoldSdk {
     stamp: ActivityEventStamp,
     signal: TerminalManagerSignal,
   ): Promise<ActivityMutationResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "recordActivitySignal", stamp.id, { context, stamp, signal }, async () => {
       const event = eventFromTerminalManagerSignal(context, stamp, signal);
       await this.appendInternal(context.access, event, "canon");
       return { event };
@@ -830,7 +906,7 @@ export class FoldSdk {
     input: Omit<SurfacedCandidate, "surfacedAtMs">,
     causedBy?: readonly string[],
   ): Promise<SteeringMutationResult> {
-    return this.enqueue(() => this.appendSteeringEvent(
+    return this.command(context.access, "surfaceIntentionCandidate", stamp.id, { context, stamp, input, causedBy }, () => this.appendSteeringEvent(
       context,
       makeIntentionSurfacedEvent(context, stamp, input, causedBy),
     ));
@@ -843,7 +919,7 @@ export class FoldSdk {
     intentionId: string,
     causedBy?: readonly string[],
   ): Promise<SteeringMutationResult> {
-    return this.enqueue(() => this.appendSteeringEvent(
+    return this.command(context.access, "commitIntentionCandidate", stamp.id, { context, stamp, candidateId, intentionId, causedBy }, () => this.appendSteeringEvent(
       context,
       makeIntentionCommittedEvent(context, stamp, candidateId, intentionId, causedBy),
     ));
@@ -856,7 +932,7 @@ export class FoldSdk {
     reason: string,
     causedBy?: readonly string[],
   ): Promise<SteeringMutationResult> {
-    return this.enqueue(() => this.appendSteeringEvent(
+    return this.command(context.access, "declineIntentionCandidate", stamp.id, { context, stamp, candidateId, reason, causedBy }, () => this.appendSteeringEvent(
       context,
       makeIntentionDeclinedEvent(context, stamp, candidateId, reason, causedBy),
     ));
@@ -868,7 +944,7 @@ export class FoldSdk {
     intentionId: string,
     causedBy?: readonly string[],
   ): Promise<SteeringMutationResult> {
-    return this.enqueue(() => this.appendSteeringEvent(
+    return this.command(context.access, "recordIntentionAction", stamp.id, { context, stamp, intentionId, causedBy }, () => this.appendSteeringEvent(
       context,
       makeIntentionActedEvent(context, stamp, intentionId, causedBy),
     ));
@@ -881,7 +957,7 @@ export class FoldSdk {
     end: IntentionEnd,
     causedBy?: readonly string[],
   ): Promise<SteeringMutationResult> {
-    return this.enqueue(() => this.appendSteeringEvent(
+    return this.command(context.access, "endIntention", stamp.id, { context, stamp, intentionId, end, causedBy }, () => this.appendSteeringEvent(
       context,
       makeIntentionEndedEvent(context, stamp, intentionId, end, causedBy),
     ));
@@ -893,7 +969,11 @@ export class FoldSdk {
     input: MemoryInput,
     causedBy?: readonly string[],
   ): Promise<MemoryMutationResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "recordMemory", stamp.id, { context, stamp, input, causedBy }, async () => {
+      const current = await this.memoryProjection(context.access);
+      if (current.projection.memories.has(input.id) || current.projection.forgotten.has(input.id)) {
+        throw new FoldSdkConflictError(`memory already exists: ${input.id}`);
+      }
       const event = makeMemoryRecordedEvent(context, stamp, input, causedBy);
       await this.appendInternal(context.access, event, "canon");
       const record = memoryLogRecordsFromEvent(event)[0];
@@ -910,7 +990,7 @@ export class FoldSdk {
     input: MemoryCandidateInput,
     causedBy?: readonly string[],
   ): Promise<MemoryCandidateMutationResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "proposeMemoryCandidate", stamp.id, { context, stamp, input, causedBy }, async () => {
       const current = await this.memoryCandidateProjection(context.access);
       if (current.projection.candidates.has(input.id)) {
         throw new FoldSdkConflictError(`memory candidate already exists: ${input.id}`);
@@ -933,7 +1013,7 @@ export class FoldSdk {
       readonly causedBy?: readonly string[];
     }[],
   ): Promise<readonly MemoryCandidateMutationResult[]> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "proposeMemoryCandidates", proposals.map(({ stamp }) => stamp.id), { context, proposals }, async () => {
       if (proposals.length === 0 || proposals.length > 100) {
         throw new FoldSdkError("memory candidate batch must contain 1 to 100 proposals");
       }
@@ -982,7 +1062,7 @@ export class FoldSdk {
     candidateId: string,
     memoryId: string,
   ): Promise<MemoryCandidateAcceptanceResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "acceptMemoryCandidate", [decisionStamp.id, memoryStamp.id], { context, decisionStamp, memoryStamp, candidateId, memoryId }, async () => {
       const current = await this.memoryCandidateProjection(context.access);
       const candidate = current.projection.candidates.get(candidateId);
       if (candidate === undefined || current.projection.decisions.has(candidateId)) {
@@ -1017,7 +1097,7 @@ export class FoldSdk {
     context: EpistemicEventContext,
     acceptances: readonly MemoryCandidateAcceptanceInput[],
   ): Promise<readonly MemoryCandidateAcceptanceResult[]> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "acceptMemoryCandidates", acceptances.map(({ decisionStamp, memoryStamp }) => [decisionStamp.id, memoryStamp.id]), { context, acceptances }, async () => {
       if (acceptances.length === 0 || acceptances.length > 100) {
         throw new FoldSdkError("memory candidate acceptance batch must contain 1 to 100 items");
       }
@@ -1084,7 +1164,7 @@ export class FoldSdk {
     candidateId: string,
     reason: string,
   ): Promise<MemoryCandidateRejectionResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "rejectMemoryCandidate", stamp.id, { context, stamp, candidateId, reason }, async () => {
       const current = await this.memoryCandidateProjection(context.access);
       const candidate = current.projection.candidates.get(candidateId);
       if (candidate === undefined || current.projection.decisions.has(candidateId)) {
@@ -1108,7 +1188,7 @@ export class FoldSdk {
     patch: MemoryRevisionPatch,
     causedBy?: readonly string[],
   ): Promise<MemoryMutationResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "reviseMemory", stamp.id, { context, stamp, memoryId, patch, causedBy }, async () => {
       const current = await this.memoryProjection(context.access);
       const memory = recallProjectedMemoryById(current.projection, context.access, memoryId);
       if (memory === undefined) throw new PersonalMemoryUnavailableError(memoryId);
@@ -1128,7 +1208,7 @@ export class FoldSdk {
     input: MemoryFeedbackInput,
     causedBy?: readonly string[],
   ): Promise<MemoryFeedbackResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "recordMemoryFeedback", stamp.id, { context, stamp, memoryId, input, causedBy }, async () => {
       const current = await this.memoryProjection(context.access);
       const memory = recallProjectedMemoryById(current.projection, context.access, memoryId);
       if (memory === undefined) throw new PersonalMemoryUnavailableError(memoryId);
@@ -1147,7 +1227,7 @@ export class FoldSdk {
     reason: string,
     causedBy?: readonly string[],
   ): Promise<MemoryForgetResult> {
-    return this.enqueue(async () => {
+    return this.command(context.access, "forgetMemory", stamp.id, { context, stamp, memoryId, reason, causedBy }, async () => {
       const current = await this.memoryProjection(context.access);
       const memory = recallProjectedMemoryById(current.projection, context.access, memoryId);
       if (memory === undefined) throw new PersonalMemoryUnavailableError(memoryId);
@@ -1255,6 +1335,20 @@ export class FoldSdk {
         memories,
         ranking: { ...ranker.descriptor, corpusSize: corpus.length },
       };
+    });
+  }
+
+  /** Mutation routing can retain scope after forgetting, without exposing forgotten content. */
+  memoryMutationScope(access: FoldSdkAccessContext, memoryId: string): Promise<Pick<PersonalMemory, "audience" | "spaceId"> | undefined> {
+    return this.enqueue(async () => {
+      const entries = await this.entriesForAccess(access, { include: "canon" });
+      for (const { event } of entries) {
+        const record = memoryLogRecordsFromEvent(event)[0];
+        if (record?.recordType === "recorded" && record.memory.id === memoryId) {
+          return { audience: record.memory.audience, ...(record.memory.spaceId === undefined ? {} : { spaceId: record.memory.spaceId }) };
+        }
+      }
+      return undefined;
     });
   }
 

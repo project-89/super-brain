@@ -39,6 +39,9 @@ import {
   TrajectoryTaskUnavailableError,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type FoldConsumerCursor,
+  type FoldDeliveryCursor,
+  authorizeEventAccess,
   type MemoryPageCursor,
   type RankedMemoryRecallRequest,
   type TrajectoryTaskReport,
@@ -96,10 +99,7 @@ const stampSchema = z
 
 const consumerCursorSchema = z
   .object({
-    cursor: z.object({
-      t: z.number().finite().nonnegative(),
-      eventId: z.string().trim().min(1).max(500),
-    }).strict(),
+    cursor: z.object({ version: z.literal(2), sequence: z.string().regex(/^(0|[1-9][0-9]*)$/).max(19).refine((value) => /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 9223372036854775807n, "sequence exceeds PostgreSQL bigint") }).strict(),
   })
   .strict();
 
@@ -649,6 +649,9 @@ function sendError(response: ServerResponse, error: ApiHttpError): void {
 
 function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof ApiHttpError) return error;
+  if (error instanceof Error && "code" in error && error.code === "revision_conflict") {
+    return new ApiHttpError(503, "revision_conflict", "Concurrent update; retry the identical command", { retryAfterSeconds: 1 });
+  }
   if (error instanceof Error && error.name === "ClerkWebhookVerificationError") {
     return new ApiHttpError(401, "webhook_verification_failed", "Webhook signature verification failed");
   }
@@ -907,7 +910,15 @@ function positiveIntegerQuery(url: URL, key: string, maximum: number): number | 
   return value;
 }
 
-function afterCursorFromUrl(url: URL): FoldSdkCursor | undefined {
+function afterCursorFromUrl(url: URL): FoldConsumerCursor | undefined {
+  const sequence = url.searchParams.get("afterSequence");
+  if (sequence !== null) {
+    if (url.searchParams.has("afterT") || url.searchParams.has("afterEventId") ||
+        !/^(0|[1-9][0-9]*)$/.test(sequence) || sequence.length > 19 || BigInt(sequence) > 9223372036854775807n) {
+      throw new ApiHttpError(400, "invalid_cursor", "Use one delivery cursor version with a decimal sequence");
+    }
+    return { version: 2, sequence };
+  }
   const rawT = url.searchParams.get("afterT");
   const eventId = url.searchParams.get("afterEventId");
   if (rawT === null && eventId === null) return undefined;
@@ -933,107 +944,98 @@ function replayFromUrl(url: URL): "tail" | "all" {
   return replay;
 }
 
-function isAfterCursor(entry: FoldLogEntry, cursor: FoldSdkCursor): boolean {
-  return entry.event.at.t > cursor.t ||
-    (entry.event.at.t === cursor.t && entry.event.id > cursor.eventId);
-}
-
-async function streamBatch(
-  dependencies: ApiDependencies,
-  sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
-  tenant: TenantKey,
-  access: FoldSdkAccessContext,
-  options: {
-    readonly after?: FoldSdkCursor;
-    readonly includeDrafts?: boolean;
-    readonly kinds?: readonly string[];
-    readonly limit: number;
-  },
-): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly scannedThrough?: FoldSdkCursor }> {
-  if (dependencies.sdks.streamEntries !== undefined) {
-    return dependencies.sdks.streamEntries(tenant, access, options);
+async function streamBatch(dependencies: ApiDependencies, tenant: TenantKey, access: FoldSdkAccessContext,
+  options: { readonly after?: FoldConsumerCursor; readonly includeDrafts?: boolean; readonly kinds?: readonly string[]; readonly limit: number }) {
+  if (dependencies.sdks.streamEntries === undefined) {
+    throw new ApiHttpError(501, "delivery_cursor_unavailable", "Store does not implement ingestion-ordered delivery");
   }
-  const entries = await sdk.listEntries(access, {
-    ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
-    ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
-  });
-  const page = (options.after === undefined
-    ? entries
-    : entries.filter((entry) => isAfterCursor(entry, options.after!)))
-    .slice(0, options.limit);
-  const last = page.at(-1);
-  return {
-    entries: page,
-    ...(last === undefined ? {} : { scannedThrough: { t: last.event.at.t, eventId: last.event.id } }),
-  };
+  return dependencies.sdks.streamEntries(tenant, access, options);
 }
 
-function startEventStream(
-  request: IncomingMessage,
-  response: ServerResponse,
-  dependencies: ApiDependencies,
-  sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
-  tenant: TenantKey,
-  access: FoldSdkAccessContext,
-  initialCursor: FoldSdkCursor | undefined,
-  includeDrafts: boolean,
-  kinds: readonly string[] | undefined,
-): void {
-  response.writeHead(200, {
-    "cache-control": "no-store, no-transform",
-    "connection": "keep-alive",
-    "content-type": "text/event-stream; charset=utf-8",
-    "x-accel-buffering": "no",
-    "x-content-type-options": "nosniff",
-  });
-  response.write(": connected\n\n");
+const streamCounts = new WeakMap<ApiDependencies, { total: number; principals: Map<string, number> }>();
 
+function startEventStream(request: IncomingMessage, response: ServerResponse, dependencies: ApiDependencies,
+  tenant: TenantKey, subject: AuthenticatedSubject, initialCursor: FoldConsumerCursor | undefined,
+  includeDrafts: boolean, kinds: readonly string[] | undefined): void {
+  let counts = streamCounts.get(dependencies);
+  if (counts === undefined) { counts = { total: 0, principals: new Map() }; streamCounts.set(dependencies, counts); }
+  const countState = counts;
+  const principalKey = JSON.stringify([tenant.organizationId, tenant.workspaceId, subject.principalId]);
+  const principalCount = counts.principals.get(principalKey) ?? 0;
+  if (counts.total >= (dependencies.eventStreamMaxConnections ?? 100) || principalCount >= (dependencies.eventStreamMaxPerPrincipal ?? 5)) {
+    throw new ApiHttpError(429, "stream_limit", "Event stream connection limit reached", { retryAfterSeconds: 5 });
+  }
+  counts.total += 1;
+  counts.principals.set(principalKey, principalCount + 1);
+  response.writeHead(200, { "cache-control": "no-store, no-transform", "connection": "keep-alive",
+    "content-type": "text/event-stream; charset=utf-8", "x-accel-buffering": "no", "x-content-type-options": "nosniff" });
+  response.write(": connected\n\n");
   let cursor = initialCursor;
   let closed = false;
   let polling = false;
   const close = () => {
     if (closed) return;
     closed = true;
-    clearInterval(pollTimer);
-    clearInterval(heartbeatTimer);
+    clearInterval(pollTimer); clearInterval(heartbeatTimer); clearTimeout(lifetimeTimer);
+    countState.total -= 1;
+    const remaining = (countState.principals.get(principalKey) ?? 1) - 1;
+    if (remaining === 0) countState.principals.delete(principalKey); else countState.principals.set(principalKey, remaining);
   };
   const fail = (error: unknown) => {
-    dependencies.reportError?.(error);
-    if (!closed) {
-      response.write(`event: stream-error\ndata: ${JSON.stringify({ code: "stream_failed" })}\n\n`);
-      response.end();
-    }
+    if (closed) return;
+    const failure = asHttpError(error);
+    if (failure.status >= 500) dependencies.reportError?.(error);
+    response.end(`event: stream-error\ndata: ${JSON.stringify({ status: failure.status, code: failure.code, message: failure.message })}\n\n`);
     close();
+  };
+  const authorize = async () => {
+    const current = await authenticate(request, dependencies);
+    if (current.principalId !== subject.principalId || current.credentialId !== subject.credentialId) {
+      throw new ApiHttpError(401, "stream_identity_changed", "Event stream identity is no longer valid");
+    }
+    assertCredentialCapability(current, "events:read");
+    const access = await dependencies.memberships.resolveAccess(current, tenant.organizationId, tenant.workspaceId);
+    if (access === undefined) throw new ApiHttpError(403, "stream_access_revoked", "Event stream membership was revoked");
+    return access;
+  };
+  const write = async (frame: string) => {
+    if (closed || response.destroyed) return;
+    if (response.write(frame)) return;
+    await new Promise<void>((resolve, reject) => {
+      const clean = () => { clearTimeout(timer); response.off("drain", drained); response.off("close", ended); };
+      const drained = () => { clean(); resolve(); };
+      const ended = () => { clean(); reject(new ApiHttpError(503, "stream_closed", "Event stream closed")); };
+      const timer = setTimeout(() => { clean(); reject(new ApiHttpError(503, "stream_slow_consumer", "Event stream consumer is too slow")); }, dependencies.eventStreamDrainTimeoutMs ?? 10_000);
+      response.once("drain", drained); response.once("close", ended);
+    });
   };
   const poll = async () => {
     if (closed || polling) return;
     polling = true;
     try {
-      const batch = await streamBatch(dependencies, sdk, tenant, access, {
-        ...(cursor === undefined ? {} : { after: cursor }),
-        ...(includeDrafts ? { includeDrafts: true } : {}),
-        ...(kinds === undefined ? {} : { kinds }),
-        limit: 500,
-      });
-      for (const entry of batch.entries) {
-        const next = { t: entry.event.at.t, eventId: entry.event.id };
-        response.write(`event: fold-event\ndata: ${JSON.stringify({ entry, cursor: next })}\n\n`);
+      const access = await authorize();
+      const batch = await streamBatch(dependencies, tenant, access, {
+        ...(cursor === undefined ? {} : { after: cursor }), ...(includeDrafts ? { includeDrafts: true } : {}),
+        ...(kinds === undefined ? {} : { kinds }), limit: 500 });
+      let currentAccess = await authorize();
+      for (const [index, entry] of batch.entries.entries()) {
+        if (closed) break;
+        // Reauthorize after every asynchronous drain before the next event leaves the process.
+        currentAccess = await authorize();
+        if (!authorizeEventAccess(entry.event, currentAccess).allowed) continue;
+        await write(`event: fold-event\ndata: ${JSON.stringify({ entry, cursor: batch.cursors[index]! })}\n\n`);
       }
       if (batch.scannedThrough !== undefined) cursor = batch.scannedThrough;
-    } catch (error) {
-      fail(error);
-    } finally {
-      polling = false;
-    }
+    } catch (error) { fail(error); }
+    finally { polling = false; }
   };
   const pollTimer = setInterval(() => void poll(), dependencies.eventStreamPollMs ?? DEFAULT_EVENT_STREAM_POLL_MS);
   const heartbeatTimer = setInterval(() => {
-    if (!closed) response.write(`: heartbeat ${Date.now()}\n\n`);
+    if (!closed && !polling && response.writableLength === 0) response.write(`: heartbeat ${Date.now()}\n\n`);
   }, EVENT_STREAM_HEARTBEAT_MS);
-  pollTimer.unref();
-  heartbeatTimer.unref();
-  request.once("close", close);
-  response.once("close", close);
+  const lifetimeTimer = setTimeout(() => fail(new ApiHttpError(503, "stream_rotation", "Reconnect to renew the event stream")), dependencies.eventStreamMaxAgeMs ?? 15 * 60_000);
+  pollTimer.unref(); heartbeatTimer.unref(); lifetimeTimer.unref();
+  request.once("close", close); response.once("close", close);
   void poll();
 }
 
@@ -1529,21 +1531,15 @@ async function handleRequest(
           ...(kinds === undefined ? {} : { kinds }),
         });
       } else {
-        const entries = await sdk.listEntries(access, {
-          ...(includeDrafts ? { include: "canon+draft" } : {}),
-          ...(kinds === undefined ? {} : { kinds }),
-        });
-        const last = entries.at(-1);
-        if (last !== undefined) after = { t: last.event.at.t, eventId: last.event.id };
+        throw new ApiHttpError(501, "delivery_cursor_unavailable", "Store does not implement ingestion-ordered delivery");
       }
     }
     startEventStream(
       request,
       response,
       dependencies,
-      sdk,
       tenant,
-      access,
+      subject,
       after,
       includeDrafts,
       kinds,
@@ -2089,7 +2085,7 @@ async function handleRequest(
     const views = new Map((await sdk.memoryCandidates(access)).map((view) => [view.candidate.id, view]));
     for (const acceptance of body.acceptances) {
       const view = views.get(acceptance.candidateId);
-      if (view === undefined || view.status !== "proposed") {
+      if (view === undefined) {
         throw new ApiHttpError(404, "memory_candidate_unavailable", `Memory candidate ${acceptance.candidateId} is unavailable`);
       }
       if (view.candidate.audience !== body.audience || view.candidate.spaceId !== body.spaceId) {
@@ -2119,7 +2115,7 @@ async function handleRequest(
       throw new ApiHttpError(404, "not_found", "Route not found");
     }
     const view = (await sdk.memoryCandidates(access)).find(({ candidate }) => candidate.id === resourceId);
-    if (view === undefined || view.status !== "proposed") {
+    if (view === undefined) {
       throw new ApiHttpError(404, "memory_candidate_unavailable", "Memory candidate is unavailable");
     }
     if (view.candidate.audience === "workspace" && !canSteer(access)) {
@@ -2217,7 +2213,7 @@ async function handleRequest(
     const action = decodeSegment(resourceSegments[2]!, "memory action");
     if (action !== "feedback") throw new ApiHttpError(404, "not_found", "Route not found");
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
-    const current = await sdk.memoryById(access, resourceId);
+    const current = await sdk.memoryMutationScope(access, resourceId);
     if (current === undefined) throw new PersonalMemoryUnavailableError(resourceId);
     const body = memoryFeedbackSchema.parse(await readJsonBody(request, maxBodyBytes));
     sendJson(response, 201, await sdk.recordMemoryFeedback(
@@ -2240,7 +2236,7 @@ async function handleRequest(
       sendJson(response, 200, { memory });
       return;
     }
-    const current = await sdk.memoryById(access, resourceId);
+    const current = await sdk.memoryMutationScope(access, resourceId);
     if (current === undefined) throw new PersonalMemoryUnavailableError(resourceId);
     if (current.audience === "workspace" && !canSteer(access)) {
       throw new ApiHttpError(403, "shared_memory_access_denied", "Workspace memory changes require an owner or admin role");

@@ -16,6 +16,12 @@ function client(fetchMock: typeof fetch) {
 }
 
 describe("SuperBrainClient", () => {
+  it("surfaces stream revocation as a terminal structured error", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('event: stream-error\ndata: {"status":403,"code":"stream_access_revoked","message":"Revoked"}\n\n', { status: 200 })) as unknown as typeof fetch;
+    const read = async () => { for await (const _event of client(fetchMock).eventStream()) { /* no event expected */ } };
+    await expect(read()).rejects.toMatchObject({ status: 403, code: "stream_access_revoked" });
+  });
+
   it("uses an organization-qualified route when organization scope is configured", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entries: [] })) as unknown as typeof fetch;
     const scoped = new SuperBrainClient({
@@ -90,7 +96,7 @@ describe("SuperBrainClient", () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode(": connected\n\nevent: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-a\"},\"status\":\"canon\"},"));
-        controller.enqueue(encoder.encode("\"cursor\":{\"t\":10,\"eventId\":\"event-a\"}}\n\n"));
+        controller.enqueue(encoder.encode("\"cursor\":{\"version\":2,\"sequence\":\"10\"}}\n\n"));
         controller.close();
       },
     });
@@ -100,7 +106,7 @@ describe("SuperBrainClient", () => {
       after: { t: 5, eventId: "before" },
       kinds: ["memory.recorded"],
     })) events.push(event);
-    expect(events).toEqual([{ entry: { event: { id: "event-a" }, status: "canon" }, cursor: { t: 10, eventId: "event-a" } }]);
+    expect(events).toEqual([{ entry: { event: { id: "event-a" }, status: "canon" }, cursor: { version: 2, sequence: "10" } }]);
     expect((fetchMock as any).mock.calls[0][0]).toContain("afterT=5&afterEventId=before&kind=memory.recorded");
   });
 
@@ -108,12 +114,12 @@ describe("SuperBrainClient", () => {
     const encoder = new TextEncoder();
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ cursor: null }))
-      .mockResolvedValueOnce(new Response(new ReadableStream({ start(controller) { controller.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-a\"},\"status\":\"canon\"},\"cursor\":{\"t\":10,\"eventId\":\"event-a\"}}\n\n")); controller.close(); } }), { status: 200 }))
-      .mockResolvedValueOnce(jsonResponse({ cursor: { t: 10, eventId: "event-a" } })) as unknown as typeof fetch;
+      .mockResolvedValueOnce(new Response(new ReadableStream({ start(controller) { controller.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-a\"},\"status\":\"canon\"},\"cursor\":{\"version\":2,\"sequence\":\"10\"}}\n\n")); controller.close(); } }), { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({ cursor: { version: 2, sequence: "10" } })) as unknown as typeof fetch;
     const seen: string[] = [];
     await client(fetchMock).consumeEvents({ consumerId: "hermes-a", reconnect: false, replay: "all", onEvent(event) { seen.push(event.entry.event.id); } });
     expect(seen).toEqual(["event-a"]);
-    expect(JSON.parse(String(((fetchMock as any).mock.calls[2][1] as RequestInit).body))).toEqual({ cursor: { t: 10, eventId: "event-a" } });
+    expect(JSON.parse(String(((fetchMock as any).mock.calls[2][1] as RequestInit).body))).toEqual({ cursor: { version: 2, sequence: "10" } });
   });
 
   it("reconnects a terminated stream from the durable cursor", async () => {
@@ -123,10 +129,10 @@ describe("SuperBrainClient", () => {
       .mockResolvedValueOnce(jsonResponse({ cursor: null }))
       .mockRejectedValueOnce(new TypeError("terminated"))
       .mockResolvedValueOnce(new Response(new ReadableStream({ start(stream) {
-        stream.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-b\"},\"status\":\"canon\"},\"cursor\":{\"t\":11,\"eventId\":\"event-b\"}}\n\n"));
+        stream.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-b\"},\"status\":\"canon\"},\"cursor\":{\"version\":2,\"sequence\":\"11\"}}\n\n"));
         stream.close();
       } }), { status: 200 }))
-      .mockResolvedValueOnce(jsonResponse({ cursor: { t: 11, eventId: "event-b" } })) as unknown as typeof fetch;
+      .mockResolvedValueOnce(jsonResponse({ cursor: { version: 2, sequence: "11" } })) as unknown as typeof fetch;
     await client(fetchMock).consumeEvents({
       consumerId: "hermes-b",
       replay: "all",
@@ -141,7 +147,7 @@ describe("SuperBrainClient", () => {
     const encoder = new TextEncoder();
     const controller = new AbortController();
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ cursor: { t: 10, eventId: "event-a" } }))
+      .mockResolvedValueOnce(jsonResponse({ cursor: { version: 2, sequence: "10" } }))
       .mockResolvedValueOnce(jsonResponse({
         error: {
           code: "rate_limited",
@@ -150,18 +156,18 @@ describe("SuperBrainClient", () => {
         },
       }, 429))
       .mockResolvedValueOnce(new Response(new ReadableStream({ start(stream) {
-        stream.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-b\"},\"status\":\"canon\"},\"cursor\":{\"t\":11,\"eventId\":\"event-b\"}}\n\n"));
+        stream.enqueue(encoder.encode("event: fold-event\ndata: {\"entry\":{\"event\":{\"id\":\"event-b\"},\"status\":\"canon\"},\"cursor\":{\"version\":2,\"sequence\":\"11\"}}\n\n"));
         stream.close();
       } }), { status: 200 }))
-      .mockResolvedValueOnce(jsonResponse({ cursor: { t: 11, eventId: "event-b" } })) as unknown as typeof fetch;
+      .mockResolvedValueOnce(jsonResponse({ cursor: { version: 2, sequence: "11" } })) as unknown as typeof fetch;
     await client(fetchMock).consumeEvents({
       consumerId: "worker-a",
       reconnectDelayMs: 0,
       signal: controller.signal,
       onEvent() { controller.abort(); },
     });
-    expect((fetchMock as any).mock.calls[1][0]).toContain("afterT=10&afterEventId=event-a");
-    expect((fetchMock as any).mock.calls[2][0]).toContain("afterT=10&afterEventId=event-a");
+    expect((fetchMock as any).mock.calls[1][0]).toContain("afterSequence=10");
+    expect((fetchMock as any).mock.calls[2][0]).toContain("afterSequence=10");
   });
 
   it("returns stable API errors", async () => {

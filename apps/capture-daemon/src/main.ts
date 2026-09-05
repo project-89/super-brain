@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { HookOutbox, deliverOccurrence, receiptEncryptionKey, type HookOccurrence } from "./receipts.js";
 import { CaptureEngine } from "./capture.js";
 import {
   defaultConfigPath,
@@ -51,23 +52,10 @@ async function relay(args: readonly string[], path = "/hook"): Promise<void> {
   try {
     const config = await readCaptureConfig(configPath(args));
     const raw = await stdin();
-    const body = path === "/hook"
-      ? raw.trim().length === 0 ? "{}" : raw
-      : JSON.stringify({
-          ...(raw.trim().length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>),
-          source,
-        });
-    const response = await fetch(`http://${config.bindHost}:${config.port}${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-agent-source": source,
-        "x-super-brain-hook-token": config.hookToken,
-      },
-      body,
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!response.ok) throw new Error(`capture daemon rejected the request with HTTP ${response.status}`);
+    const payload = raw.trim().length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>;
+    const outbox = new HookOutbox(config.stateRoot, await receiptEncryptionKey(config), config.reasoningPolicy === "include" && config.retainEncryptedReasoning);
+    const occurrence = await outbox.persist(source, payload, path as HookOccurrence["endpoint"], option(args, "--receipt-id"));
+    await deliverOccurrence(config, outbox, occurrence);
   } catch (error) {
     if (path !== "/hook") throw error;
     // Lifecycle hooks must never block or break the coding-agent host.
@@ -115,6 +103,20 @@ async function run(args: readonly string[]): Promise<void> {
   }, vaultEncryptionKey);
   await server.start();
   processor.start();
+  const outbox = new HookOutbox(config.stateRoot, await receiptEncryptionKey(config), config.reasoningPolicy === "include" && config.retainEncryptedReasoning);
+  let replaying = false;
+  const replay = async () => {
+    if (replaying) return;
+    replaying = true;
+    try {
+      for (const occurrence of await outbox.pending()) {
+        try { await deliverOccurrence(config, outbox, occurrence); }
+        catch (error) { await recordRelayFailure(config.stateRoot, occurrence.source, occurrence.endpoint, error); }
+      }
+    } finally { replaying = false; }
+  };
+  const relayRetries = setInterval(() => void replay().catch(() => undefined), 5_000);
+  void replay().catch(() => undefined);
   const heartbeats = setInterval(() => void engine.heartbeat().catch(() => undefined), config.heartbeatIntervalMs);
   process.stdout.write(`Super Brain capture listening on http://${config.bindHost}:${config.port}\n`);
   await new Promise<void>((resolvePromise) => {
@@ -123,6 +125,7 @@ async function run(args: readonly string[]): Promise<void> {
     process.once("SIGTERM", stop);
   });
   clearInterval(heartbeats);
+  clearInterval(relayRetries);
   await server.close();
   await processor.stop();
 }

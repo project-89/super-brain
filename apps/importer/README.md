@@ -45,3 +45,27 @@ For an interrupted import into the same workspace and vault, add `--resume`.
 The importer loads committed run IDs from the authenticated API and skips only
 those runs, avoiding repeated redaction and delivery of completed artifacts.
 Uncommitted runs still pass source-stability, redaction, and delivery checks.
+
+
+## Native interpretation and historical compatibility
+
+`NativeTranscriptNormalizer(source, nativeRunId, { parserVersion })` is the
+shared local decoder for metadata and private text consumers. `push(record)`
+emits canonical turn identity, messages, tool actions, context and explicit
+success/failure/unknown results. Allocate identity before filtering boilerplate
+or empty text. Tool-only records still belong to their canonical turns.
+`normalizeNativeRecord` provides the pure source adapter without identity state.
+
+New imports use parser version 2. Existing immutable version 1 imports are never
+rewritten. If delivery conflicts with an older interpretation of the exact same
+source bytes, an authorized read verifies artifact SHA, source, parser identity,
+and native/run identity before returning `interpretation: "retained-existing"`.
+This acknowledges retained history and does not claim that version 2 metadata
+was committed. Changed source bytes still conflict. Historical text consumers
+must use the **catalog artifact's** parser version; version 1 compatibility
+preserves its Claude implicit-turn identity. A separate explicit reinterpretation
+migration is required to publish revised canonical historical metadata.
+
+Encryption keys are published atomically so concurrent first-use relay processes
+cannot read partially written keys. New key directories and vault materialization
+use durable file/directory syncs.

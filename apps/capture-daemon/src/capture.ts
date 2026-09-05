@@ -1,3 +1,4 @@
+import { CaptureReceiptQueue, receiptEncryptionKey, type CaptureReceipt } from "./receipts.js";
 import { createHash } from "node:crypto";
 import { basename, relative, resolve } from "node:path";
 
@@ -9,8 +10,9 @@ import {
 } from "@_89/fold-activity";
 import type { JsonValue } from "@_89/fold";
 import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
-import { RecordAnonymizer } from "@_89/super-brain-importer";
+import { RecordAnonymizer, redactJsonValue } from "@_89/super-brain-importer";
 
+import { normalizeHookEvidence, normalizeTaskAcceptance, repositoryRevisionId } from "./evidence.js";
 import { refreshProject, resolveProject } from "./project.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
 import { mergeRecoveredSteps, recoverCapturedSteps } from "./recovery.js";
@@ -27,6 +29,7 @@ import type {
   CaptureSession,
   CaptureState,
   HookSource,
+  HookAuthority,
   SpoolJob,
   StoredHookArtifact,
   TrajectoryFinalizationReason,
@@ -68,9 +71,7 @@ function agentName(source: HookSource): string {
   return source;
 }
 
-function hookName(payload: Record<string, unknown>): string {
-  return text(payload.hook_event_name) ?? text(payload.event_name) ?? text(payload.event) ?? "Unknown";
-}
+function hookName(payload: Record<string, unknown>): string { return normalizeHookEvidence(payload).name; }
 
 function nativeSessionId(payload: Record<string, unknown>): string | undefined {
   return text(payload.session_id) ?? text(payload.sessionId) ?? text(payload.conversation_id);
@@ -80,17 +81,9 @@ function transcriptPath(payload: Record<string, unknown>): string | undefined {
   return text(payload.transcript_path) ?? text(payload.transcriptPath) ?? text(payload.rollout_path);
 }
 
-function toolName(payload: Record<string, unknown>): string {
-  return bounded(text(payload.tool_name) ?? text(payload.toolName) ?? "unknown-tool", 200);
-}
-
-function toolUseId(payload: Record<string, unknown>): string | undefined {
-  return text(payload.tool_use_id) ?? text(payload.toolUseId) ?? text(payload.call_id);
-}
-
-function toolInput(payload: Record<string, unknown>): Record<string, unknown> {
-  return object(payload.tool_input) ?? object(payload.toolInput) ?? object(payload.input) ?? {};
-}
+function toolName(payload: Record<string, unknown>): string { return normalizeHookEvidence(payload).tool; }
+function toolUseId(payload: Record<string, unknown>): string | undefined { return normalizeHookEvidence(payload).toolUseId; }
+function toolInput(payload: Record<string, unknown>): Record<string, unknown> { return normalizeHookEvidence(payload).toolInput; }
 
 function canonicalPath(path: string, root: string): string {
   const absolute = resolve(root, path);
@@ -110,29 +103,6 @@ function changedPaths(payload: Record<string, unknown>, root: string): string[] 
 function pagesOf<T>(values: readonly T[], size: number): readonly (readonly T[])[] {
   if (values.length === 0) return [[]];
   return Array.from({ length: Math.ceil(values.length / size) }, (_, index) => values.slice(index * size, (index + 1) * size));
-}
-
-function commandText(payload: Record<string, unknown>): string {
-  const input = toolInput(payload);
-  return text(input.command) ?? text(input.cmd) ?? "";
-}
-
-function verificationKind(payload: Record<string, unknown>): "test" | "build" | "lint" | "typecheck" | undefined {
-  const candidate = `${toolName(payload)} ${commandText(payload)}`.toLowerCase();
-  if (/\b(typecheck|tsc\b)/.test(candidate)) return "typecheck";
-  if (/\b(lint|eslint|ruff|clippy)\b/.test(candidate)) return "lint";
-  if (/\b(build|compile|cargo check)\b/.test(candidate)) return "build";
-  if (/\b(test|vitest|jest|pytest|go test|cargo test|rspec)\b/.test(candidate)) return "test";
-  return undefined;
-}
-
-function toolSucceeded(name: string, payload: Record<string, unknown>): boolean {
-  if (name === "PostToolUseFailure") return false;
-  if (payload.is_error === true || payload.success === false) return false;
-  const response = object(payload.tool_response) ?? object(payload.toolResponse) ?? object(payload.result);
-  if (response?.is_error === true || response?.success === false) return false;
-  const exitCode = response?.exit_code ?? response?.exitCode;
-  return typeof exitCode === "number" ? exitCode === 0 : true;
 }
 
 function stamp(artifact: VaultArtifact, index: number, label: string) {
@@ -174,6 +144,7 @@ function pendingToolKey(payload: Record<string, unknown>): string {
 
 function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
   const {
+    acceptance: _acceptance,
     lastVerification: _lastVerification,
     explicitOutcome: _explicitOutcome,
     reviewText: _reviewText,
@@ -294,18 +265,6 @@ function eventTimeFromStep(step: CapturedStep): number | undefined {
   return Number.isSafeInteger(value) ? value : undefined;
 }
 
-function unitOutcome(steps: readonly CapturedStep[]): "success" | "failure" | undefined {
-  let outcome: "success" | "failure" | undefined;
-  for (const step of steps) {
-    if (step.role === "tool_call" && /edit|write|patch|notebook/i.test(step.toolName ?? "")) {
-      outcome = undefined;
-    }
-    if (/\bverification passed$/.test(step.content)) outcome = "success";
-    if (/\bverification failed$/.test(step.content)) outcome = "failure";
-  }
-  return outcome;
-}
-
 function trajectoryTaskId(session: CaptureSession, privacy: RecordAnonymizer): string {
   const projectId = privacy.alias("project", session.project.id);
   const sessionId = privacy.alias("session", session.sessionId);
@@ -328,6 +287,9 @@ function sharedNodeId(step: {
 export class CaptureEngine {
   private state: CaptureState = { version: 1, lastEventTime: -1, seenArtifacts: [], sessions: {} };
   private chain: Promise<unknown> = Promise.resolve();
+  private stagedJobs: SpoolJob[] | undefined;
+  private blockedReceiptId: string | undefined;
+  private receiptArtifact: VaultArtifact | undefined;
 
   constructor(
     readonly config: CaptureConfig,
@@ -343,6 +305,7 @@ export class CaptureEngine {
   ) {}
 
   async initialize(): Promise<void> {
+    await new CaptureReceiptQueue(this, await receiptEncryptionKey(this.config)).restorePrepared();
     this.state = await this.stateStore.load();
     await this.stepStore.initialize();
     await this.spool.initialize();
@@ -387,9 +350,53 @@ export class CaptureEngine {
     }
     this.state = { ...this.state, sessions };
     if (changed) {
-      await this.stateStore.save(this.state);
+      await this.saveState();
     }
   }
+
+  private saveState(): Promise<void> {
+    return this.stagedJobs === undefined ? this.stateStore.save(this.state) : Promise.resolve();
+  }
+
+  private enqueueJob(job: SpoolJob): Promise<void> {
+    if (this.stagedJobs !== undefined) { this.stagedJobs.push(job); return Promise.resolve(); }
+    return this.spool.enqueue(job);
+  }
+
+  processReceipt(receipt: CaptureReceipt, prepare: (prepared: NonNullable<CaptureReceipt["prepared"]>) => Promise<void>): Promise<void> {
+    const operation = this.chain.then(async () => {
+      if (this.blockedReceiptId !== undefined && this.blockedReceiptId !== receipt.occurrence.id) throw new Error("an earlier receipt commit must be recovered first");
+      let prepared = receipt.prepared;
+      if (prepared === undefined) {
+        const previous = this.state;
+        this.stagedJobs = [];
+        this.receiptArtifact = receipt.artifact;
+        try {
+          await this.ingestInternal(receipt.occurrence.source, receipt.occurrence.payload, receipt.authority);
+          prepared = { state: this.state, jobs: this.stagedJobs };
+          await prepare(prepared);
+          this.blockedReceiptId = receipt.occurrence.id;
+        } catch (error) {
+          this.state = previous;
+          throw error;
+        } finally {
+          this.stagedJobs = undefined;
+          this.receiptArtifact = undefined;
+        }
+      }
+      this.blockedReceiptId = receipt.occurrence.id;
+      // The prepared receipt is the durable commit record. Replaying materialization is idempotent.
+      for (const session of Object.values(prepared.state.sessions)) await this.stepStore.replace(session, session.steps);
+      await this.stateStore.save(prepared.state);
+      this.state = prepared.state;
+      for (const job of prepared.jobs) await this.spool.enqueue(job);
+      this.blockedReceiptId = undefined;
+    });
+    this.chain = operation.catch(() => undefined);
+    return operation;
+  }
+
+  eventWatermark(): number { return this.state.lastEventTime; }
 
   snapshot(): {
     readonly activeSessions: number;
@@ -427,23 +434,26 @@ export class CaptureEngine {
     };
   }
 
-  ingest(source: HookSource, payloadInput: unknown): Promise<{ readonly artifactId: string }> {
-    const operation = this.chain.then(() => this.ingestInternal(source, payloadInput));
+  ingest(source: HookSource, payloadInput: unknown, authority?: HookAuthority): Promise<{ readonly artifactId: string }> {
+    const operation = this.chain.then(() => {
+      if (this.blockedReceiptId !== undefined) throw new Error("capture receipt recovery is pending");
+      return this.ingestInternal(source, payloadInput, authority);
+    });
     this.chain = operation.catch(() => undefined);
     return operation;
   }
 
   heartbeat(nowMs = Date.now()): Promise<void> {
-    const operation = this.chain.then(() => this.heartbeatInternal(nowMs));
+    const operation = this.chain.then(() => this.blockedReceiptId === undefined ? this.heartbeatInternal(nowMs) : undefined);
     this.chain = operation.catch(() => undefined);
     return operation;
   }
 
-  private async nextArtifact(source: HookSource, payload: unknown): Promise<VaultArtifact> {
+  private async nextArtifact(source: HookSource, payload: unknown, authority?: HookAuthority): Promise<VaultArtifact> {
     const eventTime = Math.max(Date.now(), this.state.lastEventTime + 1);
     this.state = { ...this.state, lastEventTime: eventTime };
-    await this.stateStore.save(this.state);
-    return this.vault.store(source, payload, eventTime);
+    await this.saveState();
+    return this.vault.store(source, payload, eventTime, { ...(authority === undefined ? {} : { authority }) });
   }
 
   private context(session: CaptureSession): TerminalSensorContext {
@@ -488,7 +498,7 @@ export class CaptureEngine {
       createdAt: new Date().toISOString(),
       event,
     };
-    await this.spool.enqueue(job);
+    await this.enqueueJob(job);
   }
 
   private async observe(
@@ -502,7 +512,11 @@ export class CaptureEngine {
       ...observation,
       ...(observation.data === undefined
         ? {}
-        : { data: this.privacy.value(observation.data) as Readonly<Record<string, JsonValue>> }),
+        : { data: {
+          ...this.privacy.value(observation.data) as Readonly<Record<string, JsonValue>>,
+          // These identifiers already name canonical entities; re-aliasing breaks the acceptance join.
+          ...(observation.data.acceptance === undefined ? {} : { acceptance: observation.data.acceptance }),
+        } }),
       ...(observation.output === undefined ? {} : { output: this.privacy.text(observation.output) }),
     };
     const event = makeTerminalObservationEvent(
@@ -590,13 +604,15 @@ export class CaptureEngine {
     return { key, session, resumed: false, created: true };
   }
 
-  private async ingestInternal(source: HookSource, payloadInput: unknown): Promise<{ readonly artifactId: string }> {
-    const payload = object(payloadInput);
+  private async ingestInternal(source: HookSource, payloadInput: unknown, authority?: HookAuthority): Promise<{ readonly artifactId: string }> {
+    const payload = object(redactJsonValue(payloadInput, { retainEncryptedContent: this.config.reasoningPolicy === "include" && this.config.retainEncryptedReasoning }).value);
     if (payload === undefined) throw new TypeError("hook payload must be a JSON object");
-    const artifact = await this.nextArtifact(source, payload);
+    if (hookName(payload) === "HumanDecision" && authority === undefined) throw new TypeError("human decisions require authenticated operator authority");
+    const artifact = this.receiptArtifact ?? await this.nextArtifact(source, payload, authority);
+    this.state = { ...this.state, lastEventTime: Math.max(this.state.lastEventTime, artifact.eventTime) };
     const previousArtifactTime = this.state.seenArtifactTimes?.[artifact.id];
     if (
-      previousArtifactTime !== undefined &&
+      artifact.receiptId === undefined && previousArtifactTime !== undefined &&
       artifact.eventTime - previousArtifactTime <= HOOK_RETRY_WINDOW_MS
     ) {
       this.state = {
@@ -604,7 +620,7 @@ export class CaptureEngine {
         duplicateHooks: (this.state.duplicateHooks ?? 0) + 1,
         lastHookAt: artifact.receivedAt,
       };
-      await this.stateStore.save(this.state);
+      await this.saveState();
       return { artifactId: artifact.id };
     }
     this.state = {
@@ -612,7 +628,7 @@ export class CaptureEngine {
       receivedHooks: (this.state.receivedHooks ?? 0) + 1,
       lastHookAt: artifact.receivedAt,
     };
-    await this.stateStore.save(this.state);
+    await this.saveState();
     const ensured = await this.ensureSession(source, payload, artifact);
     let session: CaptureSession = {
       ...ensured.session,
@@ -677,7 +693,7 @@ export class CaptureEngine {
       });
     } else if (name === "PreToolUse") {
       const tool = toolName(payload);
-      const verification = verificationKind(payload);
+      const verification = normalizeHookEvidence(payload).verification;
       session = await this.observe(session, artifact, index++, {
         kind: "tool_running",
         data: {
@@ -741,8 +757,9 @@ export class CaptureEngine {
       }
     } else if (name === "PostToolUse" || name === "PostToolUseFailure") {
       const tool = toolName(payload);
-      const success = toolSucceeded(name, payload);
-      const verification = verificationKind(payload);
+      const normalized = normalizeHookEvidence(payload);
+      const success = normalized.result === "success";
+      const verification = normalized.verification;
       const key = pendingToolKey(payload);
       const pending = session.pendingTools?.[key];
       const durationMs = pending === undefined ? undefined : Math.max(0, artifact.eventTime - pending.eventTime);
@@ -750,7 +767,7 @@ export class CaptureEngine {
         kind: "tool_result",
         data: {
           toolName: tool,
-          status: success ? "completed" : "failed",
+          status: normalized.result === "unknown" ? "unknown" : normalized.resultLabel,
           artifactId: artifact.id,
           ...(durationMs === undefined ? {} : { durationMs }),
           ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
@@ -764,7 +781,7 @@ export class CaptureEngine {
       session = stepFor(session, {
         nodeKind: "observation",
         role: "tool_call_response",
-        content: `${tool} ${success ? "completed" : "failed"}`,
+        content: `${tool} ${normalized.resultLabel}`,
         toolName: tool,
         artifactId: artifact.id,
         eventId: session.lastEventId!,
@@ -782,8 +799,8 @@ export class CaptureEngine {
         ...(repositoryChanged ? refreshedProject.changedPaths ?? [] : []),
       ])];
       const mutatingTool = /edit|write|patch|notebook/i.test(tool) || repositoryChanged;
-      if (success && mutatingTool) session = withoutVerifiedOutcome(session);
-      if (success && mutatingTool) {
+      if (mutatingTool) session = withoutVerifiedOutcome(session);
+      if (repositoryChanged || (success && mutatingTool)) {
         const pathPages = pagesOf(paths, 200);
         for (const [pathPage, pagePaths] of pathPages.entries()) {
           session = await this.observe(session, artifact, index++, {
@@ -810,7 +827,8 @@ export class CaptureEngine {
           kind: "verification_result",
           data: {
             category: verification,
-            status: success ? "success" : "failure",
+            status: normalized.result,
+            ...(repositoryRevisionId(refreshedProject) === undefined ? {} : { revisionId: repositoryRevisionId(refreshedProject)! }),
             toolName: tool,
             artifactId: artifact.id,
             ...(durationMs === undefined ? {} : { durationMs }),
@@ -821,7 +839,7 @@ export class CaptureEngine {
           ...stepFor(session, {
             nodeKind: "observation",
             role: "tool_call_response",
-            content: `${verification} verification ${success ? "passed" : "failed"}`,
+            content: `${verification} verification ${normalized.verificationLabel}`,
             toolName: tool,
             artifactId: artifact.id,
             eventId: session.lastEventId!,
@@ -829,7 +847,9 @@ export class CaptureEngine {
             ...(durationMs === undefined ? {} : { durationMs }),
             ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
           }),
-          lastVerification: success ? "success" : "failure",
+          checks: [...(session.checks ?? []), { category: verification, result: normalized.result,
+            artifactId: artifact.id, eventId: session.lastEventId!,
+            ...(repositoryRevisionId(refreshedProject) === undefined ? {} : { revisionId: repositoryRevisionId(refreshedProject)! }) }],
         };
       }
     } else if (name === "FileChanged") {
@@ -885,14 +905,23 @@ export class CaptureEngine {
         ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
       });
     } else if (name === "HumanDecision") {
+      session = { ...session, project: await refreshProject(session.project) };
       const summary = text(payload.summary);
-      const verdict = payload.verdict === "success" || payload.verdict === "failure" ? payload.verdict : undefined;
+      const acceptance = normalizeTaskAcceptance(payload.acceptance, authority, {
+        taskId: trajectoryTaskId(session, this.privacy),
+        attemptId: this.attemptId(session),
+        ...(repositoryRevisionId(session.project) === undefined ? {} : { revisionId: repositoryRevisionId(session.project)! }),
+        artifactId: artifact.id,
+      });
+      const verdict = acceptance?.verdict;
       if (summary === undefined) throw new TypeError("human decision requires summary");
       session = await this.observe(session, artifact, index++, {
         kind: "human_decision",
         data: {
           summary: bounded(summary, 2_000),
           artifactId: artifact.id,
+          authority: { ...authority! },
+          ...(acceptance === undefined ? {} : { acceptance: JSON.parse(JSON.stringify(acceptance)) as JsonValue }),
           ...(verdict === undefined ? {} : { verdict }),
           ...(typeof payload.confidence === "number" && Number.isFinite(payload.confidence)
             ? { confidence: Math.max(0, Math.min(1, payload.confidence)) }
@@ -912,6 +941,7 @@ export class CaptureEngine {
           ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
         }),
         ...(verdict === undefined ? {} : {
+          acceptance: { ...acceptance!, eventId: session.lastEventId! },
           explicitOutcome: verdict,
           reviewText: `VERDICT: ${verdict === "success" ? "approve" : "reject"}${confidence === undefined ? "" : `\nCONFIDENCE: ${confidence}`}`,
         }),
@@ -973,7 +1003,6 @@ export class CaptureEngine {
         session = {
           ...session,
           explicitOutcome: "failure",
-          reviewText: `VERDICT: reject\nDETAIL: ${text(payload.error_type) ?? "agent response failed"}`,
         };
       }
       if (await this.enqueueTrajectory(session, artifact, index, "stop")) {
@@ -1033,7 +1062,7 @@ export class CaptureEngine {
       session = { ...session, lastTreeSnapshotEventCount: session.observedEventCount ?? 0 };
     }
 
-    session = await this.stepStore.synchronize(session);
+    if (this.stagedJobs === undefined) session = await this.stepStore.synchronize(session);
     const seenArtifacts = [...this.state.seenArtifacts, artifact.id].slice(-10_000);
     const retainedArtifacts = new Set(seenArtifacts);
     const seenArtifactTimes = Object.fromEntries([
@@ -1046,7 +1075,7 @@ export class CaptureEngine {
       seenArtifactTimes,
       sessions: { ...this.state.sessions, [ensured.key]: session },
     };
-    await this.stateStore.save(this.state);
+    await this.saveState();
     return { artifactId: artifact.id };
   }
 
@@ -1151,13 +1180,7 @@ export class CaptureEngine {
           ? undefined
           : `prompt-${privateDigest(this.privacy, "prompt", normalizedPrompt).slice(0, 24)}`;
       const steps = session.steps.slice(unit.startStepNumber - 1, unit.endStepNumber);
-      const humanDecision = [...steps].reverse()
-        .map((step) => step.artifactId === undefined ? undefined : artifactsById.get(step.artifactId)?.payload)
-        .find((payload) => payload !== undefined && hookName(payload) === "HumanDecision");
-      const explicitOutcome = humanDecision?.verdict === "success" || humanDecision?.verdict === "failure"
-        ? humanDecision.verdict
-        : undefined;
-      const inferredOutcome = unitOutcome(steps);
+      // Legacy labels/check prose carry no independently authenticated acceptance.
       const {
         comparisonKey: _comparisonKey,
         taskKey: _taskKey,
@@ -1172,11 +1195,6 @@ export class CaptureEngine {
         completedUnitCount,
         ...(comparisonKey === undefined ? {} : { comparisonKey }),
         ...(explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
-        ...(inferredOutcome === undefined ? {} : { lastVerification: inferredOutcome }),
-        ...(explicitOutcome === undefined ? {} : {
-          explicitOutcome,
-          reviewText: `VERDICT: ${explicitOutcome === "success" ? "approve" : "reject"}`,
-        }),
       };
       const storedBoundary = unit.boundaryStep.artifactId === undefined
         ? undefined
@@ -1306,7 +1324,7 @@ export class CaptureEngine {
         observedEvents: String(session.observedEventCount ?? 0),
       },
     };
-    await this.spool.enqueue(job);
+    await this.enqueueJob(job);
   }
 
   private async enqueueTranscript(session: CaptureSession, artifact: VaultArtifact): Promise<void> {
@@ -1324,7 +1342,7 @@ export class CaptureEngine {
       const changing = error instanceof Error && error.message.includes("changed while");
       if (!missing && !changing) throw error;
     }
-    await this.spool.enqueue({
+    await this.enqueueJob({
       version: 1,
       kind: "transcript",
       id: `capture-${artifact.eventTime.toString().padStart(13, "0")}-950-transcript-${artifact.id.slice(0, 12)}`,
@@ -1337,6 +1355,10 @@ export class CaptureEngine {
     });
   }
 
+  private attemptId(session: CaptureSession): string {
+    return `trajectory:${session.source}:${this.privacy.alias("session", session.sessionId)}:unit-${(session.completedUnitCount ?? 0) + 1}`;
+  }
+
   private async enqueueTrajectory(
     session: CaptureSession,
     artifact: VaultArtifact,
@@ -1345,7 +1367,11 @@ export class CaptureEngine {
   ): Promise<boolean> {
     const steps = currentUnitSteps(session);
     if (steps.length === 0) return false;
-    const outcome = session.explicitOutcome ?? session.lastVerification ?? "unknown";
+    if (session.acceptance !== undefined) session = { ...session, project: await refreshProject(session.project) };
+    const acceptance = session.acceptance;
+    const outcome = acceptance !== undefined && acceptance.taskId === trajectoryTaskId(session, this.privacy) &&
+      acceptance.attemptId === this.attemptId(session) && acceptance.revisionId === repositoryRevisionId(session.project)
+      ? acceptance.verdict : session.explicitOutcome === "failure" ? "failure" : "unknown";
     const tree = this.treeFor(session, outcome);
     const taskId = tree.taskId;
     const finalStepId = `step-${steps.length + 1}`;
@@ -1370,7 +1396,7 @@ export class CaptureEngine {
       }]),
     );
     const input: TrajectoryInput = {
-      id: `trajectory:${session.source}:${this.privacy.alias("session", session.sessionId)}:unit-${(session.completedUnitCount ?? 0) + 1}`,
+      id: this.attemptId(session),
       taskId,
       model: {
         id: session.model ?? session.agent,
@@ -1378,7 +1404,7 @@ export class CaptureEngine {
       outcome,
       steps: allSteps,
       assignments,
-      ...(session.reviewText === undefined ? {} : { reviewText: session.reviewText }),
+      ...(outcome === "unknown" || session.reviewText === undefined ? {} : { reviewText: session.reviewText }),
     };
     const captureIdentity = this.captureIdentity(session, finalizationReason);
     const job: SpoolJob = {
@@ -1392,7 +1418,7 @@ export class CaptureEngine {
       input,
       captureIdentity,
     };
-    await this.spool.enqueue(job);
+    await this.enqueueJob(job);
     return true;
   }
 
@@ -1404,23 +1430,9 @@ export class CaptureEngine {
         await this.finalizeOrphan(key, session, nowMs);
         continue;
       }
-      if (!session.active) continue;
-      const eventTime = Math.max(nowMs, this.state.lastEventTime + 1);
-      const receivedAt = new Date(eventTime).toISOString();
-      const artifact: VaultArtifact = {
-        id: hash(`heartbeat:${key}:${eventTime}`),
-        receivedAt,
-        eventTime,
-        path: "",
-      };
-      this.state = { ...this.state, lastEventTime: eventTime };
-      await this.enqueueEvent(makeSensorLifecycleEvent(
-        this.context(session),
-        stamp(artifact, 0, "heartbeat"),
-        "heartbeat",
-      ));
+      // Liveness is established by received hooks; an idle timer cannot attest host activity.
     }
-    await this.stateStore.save(this.state);
+    await this.saveState();
   }
 
   private async finalizeOrphan(key: string, sessionInput: CaptureSession, nowMs: number): Promise<void> {
@@ -1442,12 +1454,10 @@ export class CaptureEngine {
     const reasoning = await this.captureExposedReasoning(session, artifact, 0);
     session = { ...reasoning.session, active: false, finalized: true, finalizationReason: "orphan-timeout" };
     let index = reasoning.nextIndex;
-    await this.enqueueEvent(makeSensorLifecycleEvent(
-      this.context(session),
-      stamp(artifact, index++, "orphan"),
-      "offline",
-      `Capture finalized after ${this.config.orphanAfterMs}ms without a hook`,
-    ));
+    session = await this.observe(session, artifact, index++, {
+      kind: "harness_event", data: { hookEvent: "CaptureTimeout", liveness: "unknown",
+        reason: `No hook observed for ${this.config.orphanAfterMs}ms` },
+    });
     if (await this.enqueueTrajectory(session, artifact, index, "orphan-timeout")) {
       session = completeCurrentUnit(session);
     }

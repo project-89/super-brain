@@ -17,6 +17,7 @@ import type {
   CaptureSession,
   CaptureState,
   HookSource,
+  HookAuthority,
   SpoolJob,
   StoredHookArtifact,
   VaultArtifact,
@@ -42,9 +43,23 @@ export interface SpoolSnapshot {
   readonly lastFailure?: string;
 }
 
-async function secureDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true, mode: 0o700 });
+export async function syncPrivateDirectory(path: string): Promise<void> {
+  const directory = await open(path, "r");
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
+export async function secureDirectory(path: string): Promise<void> {
+  const created = await mkdir(path, { recursive: true, mode: 0o700 });
   await chmod(path, 0o700);
+  if (created !== undefined) {
+    const boundary = dirname(resolve(created));
+    let current = resolve(path);
+    while (true) {
+      await syncPrivateDirectory(current);
+      if (current === boundary || current === dirname(current)) break;
+      current = dirname(current);
+    }
+  }
 }
 
 async function atomicPrivateJson(path: string, value: unknown): Promise<void> {
@@ -57,6 +72,7 @@ async function atomicPrivateJson(path: string, value: unknown): Promise<void> {
     await file.close();
     await rename(temporary, path);
     await chmod(path, 0o600);
+    await syncPrivateDirectory(dirname(path));
   } catch (error) {
     await file.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
@@ -74,6 +90,7 @@ async function atomicPrivateText(path: string, value: string): Promise<void> {
     await file.close();
     await rename(temporary, path);
     await chmod(path, 0o600);
+    await syncPrivateDirectory(dirname(path));
   } catch (error) {
     await file.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
@@ -306,6 +323,7 @@ export class SessionStepStore {
         await file.close();
       }
       await chmod(path, 0o600);
+      await syncPrivateDirectory(dirname(path));
       existing.push(...additions);
     }
     return { ...session, steps: [...existing], stepCount: existing.length };
@@ -376,6 +394,7 @@ export class TranscriptSnapshotStore {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         await rename(temporary, target);
         await chmod(target, 0o600);
+        await syncPrivateDirectory(dirname(target));
       }
       return target;
     } catch (error) {
@@ -404,30 +423,30 @@ export class HookVault {
     } = {},
   ) {}
 
-  async store(source: HookSource, payload: unknown, eventTime: number): Promise<VaultArtifact> {
+  async store(source: HookSource, payload: unknown, eventTime: number, metadata: { readonly receiptId?: string; readonly authority?: HookAuthority } = {}): Promise<VaultArtifact> {
     const anonymized = this.options.anonymizer?.value(payload) ?? payload;
     const redacted = redactJsonValue(anonymized, {
       ...(this.options.retainEncryptedReasoning === undefined
         ? {}
         : { retainEncryptedContent: this.options.retainEncryptedReasoning }),
     }).value;
-    const canonical = JSON.stringify({ source, payload: redacted });
+    const canonical = JSON.stringify({ source, payload: redacted, ...metadata });
     const id = sha256(canonical);
     const directory = join(this.root, "hooks", safeSource(source), id.slice(0, 2));
     const path = join(directory, `${id}.json${this.encryptionKey === undefined ? "" : ".enc"}`);
     try {
       await stat(path);
-      return { id, receivedAt: new Date(eventTime).toISOString(), eventTime, path };
+      return { id, receivedAt: new Date(eventTime).toISOString(), eventTime, path, ...metadata };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const receivedAt = new Date(eventTime).toISOString();
-    const serialized = `${JSON.stringify({ version: 1, id, source, receivedAt, eventTime, payload: redacted })}\n`;
+    const serialized = `${JSON.stringify({ version: 1, id, source, receivedAt, eventTime, payload: redacted, ...metadata })}\n`;
     await atomicPrivateText(
       path,
       this.encryptionKey === undefined ? serialized : `${encryptVaultLine(serialized.trimEnd(), this.encryptionKey)}\n`,
     );
-    return { id, receivedAt, eventTime, path };
+    return { id, receivedAt, eventTime, path, ...metadata };
   }
 
   async sessionArtifacts(source: HookSource, sessionId: string): Promise<readonly StoredHookArtifact[]> {
@@ -475,6 +494,8 @@ export class HookVault {
           receivedAt: parsed.receivedAt,
           eventTime: parsed.eventTime,
           payload: record,
+          ...(parsed.authority === undefined ? {} : { authority: parsed.authority }),
+          ...(parsed.receiptId === undefined ? {} : { receiptId: parsed.receiptId }),
         });
       }
     }

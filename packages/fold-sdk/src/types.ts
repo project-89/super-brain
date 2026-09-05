@@ -43,8 +43,31 @@ import type {
 
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
+/** Delivery order is independent of canonical event time. Decimal strings preserve bigint precision. */
+export interface FoldDeliveryCursor {
+  readonly version: 2;
+  readonly sequence: string;
+}
+
+/** Legacy offsets migrate by replaying from delivery origin, never by guessing a sequence. */
+export type FoldConsumerCursor = FoldDeliveryCursor | FoldSdkCursor;
+
+export interface FoldCommandReceipt {
+  readonly commandId: string;
+  readonly request: unknown;
+  readonly result: unknown;
+  readonly entries: readonly FoldLogEntry[];
+  readonly revision: string;
+}
+
+export interface FoldCommitOptions {
+  readonly expectedRevision: string;
+  readonly command: Omit<FoldCommandReceipt, "entries" | "revision">;
+}
+
 export interface FoldSdkStore {
   readonly stableReads?: boolean;
+  readonly requireDurableCommands?: boolean;
   read(options?: { readonly missing?: "error" | "empty" }): Promise<{
     readonly entries: readonly FoldLogEntry[];
     readonly revision?: string;
@@ -52,6 +75,9 @@ export interface FoldSdkStore {
   append(entry: FoldLogEntry): Promise<void>;
   appendMany?(entries: readonly FoldLogEntry[]): Promise<void>;
   revision?(): Promise<string>;
+  /** Atomic compare-and-swap, including the retry receipt. */
+  commit?(entries: readonly FoldLogEntry[], options: FoldCommitOptions): Promise<FoldCommandReceipt>;
+  commandReceipt?(commandId: string): Promise<FoldCommandReceipt | undefined>;
 }
 
 export interface FoldSdkCursor {

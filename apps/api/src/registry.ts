@@ -7,7 +7,7 @@ import {
   unlink,
   type FileHandle,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import type { FoldLogEntry } from "@_89/fold";
 import { PostgresFoldDatabase, type PostgresFoldDatabaseOptions } from "@_89/fold-postgres";
@@ -16,10 +16,13 @@ import {
   authorizeEventAccess,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type FoldConsumerCursor,
+  type FoldDeliveryCursor,
   type FoldSdkStore,
 } from "@_89/fold-sdk";
 import {
   FoldJournal,
+  eventRecord,
   type ReadJournalOptions,
 } from "@_89/fold-storage";
 
@@ -122,6 +125,7 @@ async function acquireWriterLease(path: string, lease: WriterLease): Promise<Fil
 
 class DurableJournalStore implements FoldSdkStore {
   readonly stableReads = true;
+  readonly requireDurableCommands = true;
   private entries: FoldLogEntry[] | undefined;
 
   constructor(private readonly journal: FoldJournal) {}
@@ -135,8 +139,17 @@ class DurableJournalStore implements FoldSdkStore {
   }
 
   async append(entry: FoldLogEntry): Promise<void> {
-    await this.journal.append(entry, { sync: true });
-    this.entries?.push(entry);
+    await this.appendMany([entry]);
+  }
+
+  async appendMany(entries: readonly FoldLogEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    const current = (await this.read({ missing: "empty" })).entries;
+    const combined = [...current, ...entries];
+    await this.journal.rewrite(combined.map(eventRecord), { sync: true });
+    const directory = await open(dirname(this.journal.path), "r");
+    try { await directory.sync(); } finally { await directory.close(); }
+    this.entries = combined;
   }
 }
 
@@ -161,6 +174,8 @@ export function workspaceJournalFilename(
 export class JournalSdkRegistry implements FoldSdkRegistry {
   private readonly ready: Promise<void>;
   private readonly sdks = new Map<string, FoldSdk>();
+  private readonly pending = new Map<string, Promise<FoldSdk>>();
+  private readonly stores = new Map<string, DurableJournalStore>();
   private readonly lockPath: string;
   private readonly lease: WriterLease;
   private lockHandle: FileHandle | undefined;
@@ -187,59 +202,50 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
   async sdkFor(tenant: TenantKey): Promise<FoldSdk> {
     await this.open();
     const key = tenantStorageKey(tenant);
-    let sdk = this.sdks.get(key);
-    if (sdk === undefined) {
-      const path = join(
-        this.dataDirectory,
-        workspaceJournalFilename(tenant.workspaceId, tenant.organizationId),
-      );
-      await chmod(path, 0o600).catch((error: unknown) => {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      });
-      sdk = new FoldSdk(new DurableJournalStore(new FoldJournal(path)));
-      this.sdks.set(key, sdk);
+    const existing = this.sdks.get(key);
+    if (existing !== undefined) return existing;
+    let pending = this.pending.get(key);
+    if (pending === undefined) {
+      pending = (async () => {
+        const path = join(this.dataDirectory, workspaceJournalFilename(tenant.workspaceId, tenant.organizationId));
+        await chmod(path, 0o600).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        });
+        const store = new DurableJournalStore(new FoldJournal(path));
+        const sdk = new FoldSdk(store);
+        this.stores.set(key, store);
+        this.sdks.set(key, sdk);
+        return sdk;
+      })();
+      this.pending.set(key, pending);
     }
-    return sdk;
+    try { return await pending; }
+    finally { this.pending.delete(key); }
   }
 
-  async streamEntries(
-    tenant: TenantKey,
-    access: FoldSdkAccessContext,
-    options: {
-      readonly after?: FoldSdkCursor;
-      readonly includeDrafts?: boolean;
-      readonly kinds?: readonly string[];
-      readonly limit: number;
-    },
-  ) {
-    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
-      ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
-      ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
-    });
-    const after = options.after;
-    const remaining = after === undefined ? entries : entries.filter(({ event }) =>
-      event.at.t > after.t || (event.at.t === after.t && event.id > after.eventId));
-    const page = remaining.slice(0, options.limit);
+  async streamEntries(tenant: TenantKey, access: FoldSdkAccessContext, options: {
+    readonly after?: FoldConsumerCursor; readonly includeDrafts?: boolean;
+    readonly kinds?: readonly string[]; readonly limit: number;
+  }) {
+    await this.sdkFor(tenant);
+    const entries = (await this.stores.get(tenantStorageKey(tenant))!.read({ missing: "empty" })).entries;
+    const after = options.after !== undefined && "version" in options.after ? BigInt(options.after.sequence) : 0n;
+    const page = entries.map((entry, index) => ({ entry, cursor: { version: 2 as const, sequence: String(index + 1) } }))
+      .filter(({ cursor }) => BigInt(cursor.sequence) > after)
+      .slice(0, options.limit);
+    const allowed = page.filter(({ entry }) =>
+      (options.includeDrafts || entry.status === "canon") &&
+      (options.kinds === undefined || options.kinds.includes(entry.event.kind)) &&
+      authorizeEventAccess(entry.event, access).allowed);
     const last = page.at(-1);
-    return {
-      entries: page,
-      ...(last === undefined ? {} : {
-        scannedThrough: { t: last.event.at.t, eventId: last.event.id },
-      }),
-    };
+    return { entries: allowed.map(({ entry }) => entry), cursors: allowed.map(({ cursor }) => cursor),
+      ...(last === undefined ? {} : { scannedThrough: last.cursor }) };
   }
 
-  async latestEventCursor(
-    tenant: TenantKey,
-    access: FoldSdkAccessContext,
-    options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] },
-  ) {
-    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
-      ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
-      ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
-    });
-    const last = entries.at(-1);
-    return last === undefined ? undefined : { t: last.event.at.t, eventId: last.event.id };
+  async latestEventCursor(tenant: TenantKey, _access: FoldSdkAccessContext,
+    _options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] }): Promise<FoldDeliveryCursor> {
+    await this.sdkFor(tenant);
+    return { version: 2, sequence: String((await this.stores.get(tenantStorageKey(tenant))!.read({ missing: "empty" })).entries.length) };
   }
 
   async close(): Promise<void> {
@@ -281,30 +287,24 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
     tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: {
-      readonly after?: FoldSdkCursor;
+      readonly after?: FoldConsumerCursor;
       readonly includeDrafts?: boolean;
       readonly kinds?: readonly string[];
       readonly limit: number;
     },
   ) {
     const page = await this.database.readEventPage(tenant, options);
+    const allowed = page.entries.map((entry, index) => ({ entry, cursor: page.cursors[index]! }))
+      .filter(({ entry }) => authorizeEventAccess(entry.event, access).allowed);
     return {
-      entries: page.entries.filter(({ event }) => authorizeEventAccess(event, access).allowed),
+      entries: allowed.map(({ entry }) => entry), cursors: allowed.map(({ cursor }) => cursor),
       ...(page.scannedThrough === undefined ? {} : { scannedThrough: page.scannedThrough }),
     };
   }
 
-  async latestEventCursor(
-    tenant: TenantKey,
-    access: FoldSdkAccessContext,
-    options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] },
-  ) {
-    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
-      ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
-      ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
-    });
-    const last = entries.at(-1);
-    return last === undefined ? undefined : { t: last.event.at.t, eventId: last.event.id };
+  async latestEventCursor(tenant: TenantKey, _access: FoldSdkAccessContext,
+    _options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] }) {
+    return this.database.latestDeliveryCursor(tenant);
   }
 
   close(): Promise<void> {
@@ -318,7 +318,7 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
   commitConsumerCursor(
     tenant: TenantKey,
     consumerId: string,
-    cursor: { readonly t: number; readonly eventId: string },
+    cursor: FoldConsumerCursor,
   ) {
     return this.database.commitConsumerCursor(tenant, consumerId, cursor);
   }

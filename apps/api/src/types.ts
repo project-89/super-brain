@@ -3,6 +3,8 @@ import type {
   FoldSdk,
   FoldSdkAccessContext,
   FoldSdkCursor,
+  FoldConsumerCursor,
+  FoldDeliveryCursor,
   MemoryRanker,
 } from "@_89/fold-sdk";
 import type { FoldLogEntry } from "@_89/fold";
@@ -82,14 +84,15 @@ export interface FoldSdkRegistry {
     tenant: TenantKey,
     access: FoldSdkAccessContext,
     options: {
-      readonly after?: FoldSdkCursor;
+      readonly after?: FoldConsumerCursor;
       readonly includeDrafts?: boolean;
       readonly kinds?: readonly string[];
       readonly limit: number;
     },
   ): Promise<{
     readonly entries: readonly FoldLogEntry[];
-    readonly scannedThrough?: FoldSdkCursor;
+    readonly scannedThrough?: FoldDeliveryCursor;
+    readonly cursors: readonly FoldDeliveryCursor[];
   }>;
   latestEventCursor?(
     tenant: TenantKey,
@@ -98,12 +101,12 @@ export interface FoldSdkRegistry {
       readonly includeDrafts?: boolean;
       readonly kinds?: readonly string[];
     },
-  ): Promise<FoldSdkCursor | undefined>;
-  consumerCursor?(tenant: TenantKey, consumerId: string): Promise<FoldSdkCursor | undefined>;
+  ): Promise<FoldConsumerCursor | undefined>;
+  consumerCursor?(tenant: TenantKey, consumerId: string): Promise<FoldConsumerCursor | undefined>;
   commitConsumerCursor?(
     tenant: TenantKey,
     consumerId: string,
-    cursor: FoldSdkCursor,
+    cursor: FoldConsumerCursor,
   ): Promise<void>;
 }
 
@@ -163,6 +166,10 @@ export interface ApiDependencies {
   readonly corsOrigins?: readonly string[];
   readonly reportError?: (error: unknown) => void;
   readonly eventStreamPollMs?: number;
+  readonly eventStreamMaxConnections?: number;
+  readonly eventStreamMaxPerPrincipal?: number;
+  readonly eventStreamMaxAgeMs?: number;
+  readonly eventStreamDrainTimeoutMs?: number;
   readonly fleetOrphanAfterMs?: number;
   readonly tenantAdministration?: TenantAdministration;
   readonly identityProvisioningWebhook?: IdentityProvisioningWebhook;

@@ -266,6 +266,12 @@ export class ClerkProvisioningWebhook {
     const eventId = headers.get("svix-id")?.trim();
     if (eventId === undefined || eventId.length === 0) throw new TypeError("Clerk webhook id is required");
 
+    // Clerk's signed payload timestamp is source occurrence time; Svix delivery time can change on retry.
+    // https://clerk.com/docs/guides/development/webhooks/overview#payload-structure
+    const occurredAt = (event as WebhookEvent & { readonly timestamp?: unknown }).timestamp;
+    if (typeof occurredAt !== "number" || !Number.isSafeInteger(occurredAt) || occurredAt < 0) {
+      throw new TypeError("Clerk provisioning event requires its signed occurrence timestamp");
+    }
     const organizationId = async (externalId: string) =>
       await this.store.resolveExternalOrganization?.("clerk", externalId) ?? provisionedOrganizationId(externalId);
 
@@ -273,6 +279,7 @@ export class ClerkProvisioningWebhook {
       return {
         applied: await this.store.applyExternalIdentityProvisioningEvent({
           eventId,
+          occurredAt,
           provider: "clerk",
           type: "organization.upsert",
           externalOrganizationId: event.data.id,
@@ -286,6 +293,7 @@ export class ClerkProvisioningWebhook {
       return {
         applied: await this.store.applyExternalIdentityProvisioningEvent({
           eventId,
+          occurredAt,
           provider: "clerk",
           type: "organization.delete",
           externalOrganizationId: event.data.id,
@@ -304,6 +312,7 @@ export class ClerkProvisioningWebhook {
       return {
         applied: await this.store.applyExternalIdentityProvisioningEvent({
           eventId,
+          occurredAt,
           provider: "clerk",
           type: event.type === "organizationMembership.deleted" ? "membership.delete" : "membership.upsert",
           externalOrganizationId,

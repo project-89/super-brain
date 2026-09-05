@@ -160,12 +160,12 @@ describe("capture daemon", () => {
     const trajectory = jobs.find(({ job }) => job.kind === "trajectory")?.job;
     expect(trajectory).toMatchObject({
       kind: "trajectory",
-      input: { outcome: "success", model: { id: "codex" } },
+      input: { outcome: "unknown", model: { id: "codex" } },
       captureIdentity: { agent: "codex", session, project: "super-brain" },
     });
     if (trajectory?.kind !== "trajectory") throw new Error("missing trajectory job");
     expect(trajectory.input.steps.map((step) => step.role)).toContain("model_thought");
-    expect(trajectory.tree.nodes.at(-1)).toMatchObject({ kind: "outcome", label: "Outcome success" });
+    expect(trajectory.tree.nodes.at(-1)).toMatchObject({ kind: "outcome", label: "Outcome not verified" });
 
     const artifactPath = join(
       current.vaultRoot,
@@ -270,6 +270,7 @@ describe("capture daemon", () => {
       ...common,
       hook_event_name: "PostToolUse",
       tool_name: "Edit",
+      tool_response: { success: true },
       tool_input: { file_path: Array.from({ length: 205 }, (_, index) => join(process.cwd(), `file-${index}.ts`)) },
     });
     await engine.ingest("claude-code", {
@@ -480,7 +481,7 @@ describe("capture daemon", () => {
     expect(jobs).toHaveLength(jobsBeforeRetry.length);
     const trajectories = jobs.filter((job) => job.kind === "trajectory");
     expect(trajectories).toHaveLength(2);
-    expect(trajectories.map(({ input }) => input.outcome)).toEqual(["success", "unknown"]);
+    expect(trajectories.map(({ input }) => input.outcome)).toEqual(["unknown", "unknown"]);
     expect(trajectories.map(({ input }) => input.id)).toEqual([
       expect.stringMatching(/:unit-1$/),
       expect.stringMatching(/:unit-2$/),

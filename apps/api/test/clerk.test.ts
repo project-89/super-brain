@@ -78,6 +78,7 @@ describe("Clerk authentication", () => {
       async verifier() {
         return {
           type: "organizationMembership.created",
+          timestamp: 100,
           data: {
             role: "org:admin",
             organization: { id: "org_external", name: "Acme" },
@@ -94,6 +95,7 @@ describe("Clerk authentication", () => {
     })).resolves.toEqual({ applied: true });
     expect(events).toEqual([{
       eventId: "event-a",
+      occurredAt: 100,
       provider: "clerk",
       type: "membership.upsert",
       externalOrganizationId: "org_external",

@@ -8,8 +8,10 @@ vault and its canonical events are durably spooled before delivery to Super Brai
 It captures session/project identity, prompts as private artifact references,
 tool calls and outcomes, relative file changes, test/build/lint verification,
 structured reasoning checkpoints, human decisions, session trajectories, and a
-stable transcript import after `SessionEnd`. It does not claim success when no
-verification or explicit verdict was observed.
+stable transcript import after `SessionEnd`. Tool results and individual checks
+retain explicit success, failure, or unknown. Task success requires authenticated
+operator acceptance bound to the task, attempt, and current repository revision.
+Passing a check or ending a response does not establish task acceptance.
 
 The Claude installer subscribes to the full current lifecycle surface,
 including subagents, tasks, permissions, compaction, model switches, worktrees,
@@ -84,6 +86,48 @@ exposing private transcript content:
 printf '%s' '{"session_id":"...","summary":"Cache invalidation is the leading hypothesis","evidence":"Focused test fails before refresh"}' \
   | super-brain-capture checkpoint codex
 
-printf '%s' '{"session_id":"...","summary":"Operator accepted the verified result","verdict":"success","confidence":1}' \
+printf '%s' '{"session_id":"...","summary":"Operator accepted the verified result","confidence":1}' \
   | super-brain-capture decision codex
 ```
+
+
+## Receipt durability and authority
+
+Run one daemon per state directory. The relay saves a redacted, encrypted
+occurrence in `stateRoot/receipts/sender` before contacting the daemon. A 202
+acknowledgement means the receiver has durably accepted that occurrence; Git,
+transcript processing, and canonical delivery happen afterward. Receipt IDs
+survive retries indefinitely; identical payloads with different occurrence IDs
+remain separate observations. An explicit `--receipt-id` reuses a producer's
+occurrence identity. The daemon replays pending sender files after downtime.
+
+Receiver processing first saves an encrypted prepared state/event batch, then
+syncs the resulting step journals, state and outbound jobs before creating a
+completion tombstone. Startup finishes prepared batches before hydrating state.
+Transient failures retain ordering. Invalid payloads remain in an encrypted
+`receipts/receiver/rejected` directory for inspection. `/health` includes receipt
+pending, completed, rejected and failure counts. A relay timeout is an ambiguous
+acknowledgement, not evidence that a hook was lost.
+
+`/decision`, and any `HumanDecision` submitted through `/hook`, require the
+separate `x-super-brain-operator-token`. Hook credentials cannot attest human
+provenance. Legacy configurations sharing hook/operator tokens must rotate the
+operator token before authoritative decisions are enabled. The CLI `decision`
+command uses the operator credential. Caller-selected `authority` fields and a
+bare `verdict` do not establish accepted outcomes.
+
+An optional decision `acceptance` object has `version: 1`, `taskId`, `attemptId`,
+`revisionId` and `verdict: "success" | "failure"`. All identifiers must match the
+active captured attempt and freshly observed Git/worktree fingerprint; unknown
+or failed fingerprints cannot accept a task. Operator authority is added by the
+server, outside the caller's payload, and retained with the protected artifact.
+Completion tombstones preserve canonical event digests for independently
+verifying this provenance. Old events without this evidence remain historical
+claims, not authenticated acceptance.
+
+Daemon timers report capture silence as unknown liveness. Only observed hooks
+and explicit session-end signals attest host lifecycle. Repository fingerprints
+include bounded untracked file content and fail explicitly on unavailable Git,
+nonregular untracked files, concurrent edits or more than 16 MiB of untracked
+content. They are integrity references; reconstructible patch/file artifacts
+are a separate task-evidence capability.

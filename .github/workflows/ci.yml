@@ -64,12 +64,16 @@ jobs:
           CREATE ROLE fold_app LOGIN PASSWORD 'fold_test' NOSUPERUSER NOBYPASSRLS;
           GRANT CONNECT, CREATE ON DATABASE super_brain_test TO fold_app;
           SQL
-      - name: Build PostgreSQL package dependencies
-        run: pnpm --filter '@_89/fold-postgres...' build
+      - name: Build API and PostgreSQL package dependencies
+        run: pnpm --filter '@_89/super-brain-api...' build
       - name: Exercise PostgreSQL tenancy and RLS
         env:
           FOLD_TEST_DATABASE_URL: postgres://fold_app:fold_test@127.0.0.1:5432/super_brain_test
         run: pnpm --filter @_89/fold-postgres test
+      - name: Exercise two-process API commands, delivery, and revocation
+        env:
+          FOLD_TEST_DATABASE_URL: postgres://fold_app:fold_test@127.0.0.1:5432/super_brain_test
+        run: pnpm --filter @_89/super-brain-api test test/postgres-concurrency.test.ts
 
   secrets:
     runs-on: ubuntu-latest

@@ -1,5 +1,6 @@
 import {
   transcriptImportBundleSchema,
+  transcriptArtifactSchema,
   transcriptRunSchema,
   type TranscriptImportBundle,
   type TranscriptRun,
@@ -18,6 +19,7 @@ export interface TranscriptDeliveryResult {
   readonly imported: boolean;
   readonly eventCount: number;
   readonly run: TranscriptRun;
+  readonly interpretation?: "retained-existing";
 }
 
 export class TranscriptDeliveryError extends Error {
@@ -90,6 +92,28 @@ function parseResult(body: unknown): TranscriptDeliveryResult {
   };
 }
 
+async function retainedInterpretation(
+  bundle: TranscriptImportBundle,
+  options: TranscriptDeliveryOptions,
+  fetcher: typeof fetch,
+): Promise<TranscriptDeliveryResult | undefined> {
+  const response = await fetcher(endpoint(options, `transcript-runs/${encodeURIComponent(bundle.run.id)}`), {
+    headers: { authorization: `Bearer ${options.bearerToken}` }, signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) return undefined;
+  const body = await response.json() as { run?: unknown; artifact?: unknown };
+  const run = transcriptRunSchema.safeParse(body.run);
+  const artifact = transcriptArtifactSchema.safeParse(body.artifact);
+  if (!run.success || !artifact.success) return undefined;
+  const previous = Number(artifact.data.parser.version);
+  const current = Number(bundle.artifact.parser.version);
+  if (run.data.id !== bundle.run.id || run.data.nativeId !== bundle.run.nativeId || run.data.source !== bundle.run.source ||
+    run.data.artifactId !== bundle.run.artifactId || artifact.data.id !== bundle.artifact.id || artifact.data.sha256 !== bundle.artifact.sha256 ||
+    artifact.data.source !== bundle.artifact.source || artifact.data.parser.id !== bundle.artifact.parser.id ||
+    !Number.isInteger(previous) || !Number.isInteger(current) || previous >= current) return undefined;
+  return { imported: false, eventCount: 0, run: run.data, interpretation: "retained-existing" };
+}
+
 export async function deliverTranscriptBundle(
   input: TranscriptImportBundle,
   options: TranscriptDeliveryOptions,
@@ -112,10 +136,15 @@ export async function deliverTranscriptBundle(
           "content-type": "application/json",
         },
         body: JSON.stringify(bundle),
+        signal: AbortSignal.timeout(10_000),
       });
       const body = await response.json().catch(() => undefined) as unknown;
       if (response.ok) return parseResult(body);
       const error = responseError(response.status, body);
+      if (response.status === 409) {
+        const retained = await retainedInterpretation(bundle, options, fetcher);
+        if (retained !== undefined) return retained;
+      }
       if (![429, 502, 503, 504].includes(response.status) || attempt === attempts) throw error;
       if (response.status === 429) {
         const retryAfterSeconds = Number(response.headers.get("retry-after"));

@@ -50,8 +50,34 @@ export interface ProjectIdentity {
   readonly remote?: string;
   readonly head?: string;
   readonly worktreeDigest?: string;
+  readonly fingerprintStatus?: "available" | "unavailable";
   readonly changedPaths?: readonly string[];
   readonly dirty?: boolean;
+}
+
+export interface HookAuthority {
+  readonly kind: "local-operator";
+  readonly principalId: string;
+  readonly authenticatedAt: string;
+}
+
+export interface TaskAcceptanceEvidence {
+  readonly version: 1;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly revisionId: string;
+  readonly verdict: "success" | "failure";
+  readonly artifactId: string;
+  readonly eventId?: string;
+  readonly authority: HookAuthority;
+}
+
+export interface VerificationEvidence {
+  readonly category: "test" | "build" | "lint" | "typecheck";
+  readonly result: "success" | "failure" | "unknown";
+  readonly artifactId: string;
+  readonly eventId: string;
+  readonly revisionId?: string;
 }
 
 export type CapturedStep = TrajectoryInput["steps"][number] & {
@@ -88,6 +114,8 @@ export interface CaptureSession {
     readonly toolName: string;
     readonly eventId: string;
   }>>;
+  readonly acceptance?: TaskAcceptanceEvidence;
+  readonly checks?: readonly VerificationEvidence[];
   readonly lastVerification?: "success" | "failure";
   readonly explicitOutcome?: "success" | "failure";
   readonly reviewText?: string;
@@ -158,6 +186,8 @@ export interface VaultArtifact {
   readonly receivedAt: string;
   readonly eventTime: number;
   readonly path: string;
+  readonly receiptId?: string;
+  readonly authority?: HookAuthority;
 }
 
 export interface StoredHookArtifact extends Omit<VaultArtifact, "path"> {

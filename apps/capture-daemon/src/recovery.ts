@@ -1,3 +1,4 @@
+import { normalizeHookEvidence } from "./evidence.js";
 import type { CapturedStep, StoredHookArtifact } from "./types.js";
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -14,51 +15,9 @@ function bounded(value: string, length = 500): string {
   return value.length <= length ? value : `${value.slice(0, length - 3)}...`;
 }
 
-function hookName(payload: Record<string, unknown>): string {
-  return text(payload.hook_event_name) ?? text(payload.event_name) ?? text(payload.event) ?? "Unknown";
-}
-
-function toolName(payload: Record<string, unknown>): string {
-  return bounded(text(payload.tool_name) ?? text(payload.toolName) ?? "unknown-tool", 200);
-}
-
-function toolUseId(payload: Record<string, unknown>): string | undefined {
-  return text(payload.tool_use_id) ?? text(payload.toolUseId) ?? text(payload.call_id);
-}
-
-function toolInput(payload: Record<string, unknown>): Record<string, unknown> {
-  return object(payload.tool_input) ?? object(payload.toolInput) ?? object(payload.input) ?? {};
-}
-
-function commandText(payload: Record<string, unknown>): string {
-  const input = toolInput(payload);
-  return text(input.command) ?? text(input.cmd) ?? "";
-}
-
-function verificationKind(payload: Record<string, unknown>): "test" | "build" | "lint" | "typecheck" | undefined {
-  const candidate = `${toolName(payload)} ${commandText(payload)}`.toLowerCase();
-  if (/\b(typecheck|tsc\b)/.test(candidate)) return "typecheck";
-  if (/\b(lint|eslint|ruff|clippy)\b/.test(candidate)) return "lint";
-  if (/\b(build|compile|cargo check)\b/.test(candidate)) return "build";
-  if (/\b(test|vitest|jest|pytest|go test|cargo test|rspec)\b/.test(candidate)) return "test";
-  return undefined;
-}
-
-function toolSucceeded(name: string, payload: Record<string, unknown>): boolean {
-  if (name === "PostToolUseFailure") return false;
-  if (payload.is_error === true || payload.success === false) return false;
-  const response = object(payload.tool_response) ?? object(payload.toolResponse) ?? object(payload.result);
-  if (response?.is_error === true || response?.success === false) return false;
-  const exitCode = response?.exit_code ?? response?.exitCode;
-  return typeof exitCode === "number" ? exitCode === 0 : true;
-}
-
 function pendingToolKey(payload: Record<string, unknown>): string {
-  return toolUseId(payload) ?? `${toolName(payload)}:unpaired`;
-}
-
-function currentTurnId(payload: Record<string, unknown>): string | undefined {
-  return text(payload.turn_id) ?? text(payload.turnId);
+  const evidence = normalizeHookEvidence(payload);
+  return evidence.toolUseId ?? `${evidence.tool}:unpaired`;
 }
 
 type StepInput = Omit<CapturedStep, "id" | "stepNumber">;
@@ -76,10 +35,13 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
   if (first !== undefined) {
     append(first, { nodeKind: "observation", role: "decision", content: "Coding-agent session started" });
   }
+  let lastTurnId: string | undefined;
   for (const artifact of artifacts) {
     const payload = artifact.payload;
-    const name = hookName(payload);
-    const turnId = currentTurnId(payload);
+    const evidence = normalizeHookEvidence(payload);
+    const name = evidence.name;
+    lastTurnId = evidence.turnId ?? lastTurnId;
+    const turnId = lastTurnId;
     if (name === "UserPromptSubmit") {
       append(artifact, {
         nodeKind: "observation",
@@ -88,7 +50,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         ...(turnId === undefined ? {} : { turnId }),
       });
     } else if (name === "PreToolUse") {
-      const tool = toolName(payload);
+      const tool = evidence.tool;
       pending.set(pendingToolKey(payload), { startedAt: artifact.receivedAt, eventTime: artifact.eventTime });
       append(artifact, {
         nodeKind: "action",
@@ -112,8 +74,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         });
       }
     } else if (name === "PostToolUse" || name === "PostToolUseFailure") {
-      const tool = toolName(payload);
-      const success = toolSucceeded(name, payload);
+      const tool = evidence.tool;
       const started = pending.get(pendingToolKey(payload));
       pending.delete(pendingToolKey(payload));
       const timing = started === undefined ? {} : {
@@ -123,17 +84,17 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
       append(artifact, {
         nodeKind: "observation",
         role: "tool_call_response",
-        content: `${tool} ${success ? "completed" : "failed"}`,
+        content: `${tool} ${evidence.resultLabel}`,
         toolName: tool,
         ...timing,
         ...(turnId === undefined ? {} : { turnId }),
       });
-      const verification = verificationKind(payload);
+      const verification = evidence.verification;
       if (verification !== undefined) {
         append(artifact, {
           nodeKind: "observation",
           role: "tool_call_response",
-          content: `${verification} verification ${success ? "passed" : "failed"}`,
+          content: `${verification} verification ${evidence.verificationLabel}`,
           toolName: tool,
           ...timing,
           ...(turnId === undefined ? {} : { turnId }),
@@ -173,11 +134,11 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         content: "Operator steering applied",
         ...(turnId === undefined ? {} : { turnId }),
       });
-    } else if (name === "Stop") {
+    } else if (name === "Stop" || name === "StopFailure") {
       append(artifact, {
         nodeKind: "observation",
         role: "model_output",
-        content: "Agent completed a response",
+        content: name === "StopFailure" ? `Agent response failed${text(payload.error_type) === undefined ? "" : `: ${text(payload.error_type)!}`}` : "Agent completed a response",
         ...(turnId === undefined ? {} : { turnId }),
       });
     } else if (name === "TranscriptDelta" && Array.isArray(payload.summaries)) {
@@ -204,7 +165,7 @@ function recoveryKey(step: CapturedStep): string {
     step.nodeKind,
     step.role,
     step.toolName ?? "",
-    step.content,
+    step.role === "tool_call_response" ? step.content.match(/^(test|build|lint|typecheck) verification /)?.[1] ?? "tool-result" : step.content,
   ]);
 }
 
@@ -222,7 +183,7 @@ export function mergeRecoveredSteps(
     const match = available.get(recoveryKey(candidate))?.find((step) => !used.has(step));
     if (match === undefined) return candidate;
     used.add(match);
-    return match;
+    return { ...match, content: candidate.content };
   });
   for (const step of existing) {
     if (!used.has(step)) merged.push(step);

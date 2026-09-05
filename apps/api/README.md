@@ -259,7 +259,8 @@ records are rejected from the generic event route. Workspace members may read
 steering state but cannot mutate it.
 
 Each organization/workspace pair uses an opaque SHA-256 journal filename and one serialized SDK
-instance. Appends use complete-line JSONL with `sync: true`. The process
+instance. Basic writes use an atomic full-journal replacement with file and directory fsync;
+state-dependent commands require PostgreSQL durable receipts. The process
 acquires an exclusive writer lease before binding its HTTP socket, removes that
 lease on graceful shutdown, and recovers a well-formed lease whose PID no longer
 exists. This provides one-writer protection for processes on one host. Multiple
@@ -303,3 +304,20 @@ can be enabled with `FOLD_DATABASE_URL`, `FOLD_EMBEDDING_URL`,
 Missing document embeddings are requested from the sidecar in batches of 64.
 Vector queries remain restricted to the authorized Fold memory IDs supplied by
 recall and are partitioned by authenticated organization and workspace.
+
+### Stream lifetime and journal fallback
+
+SSE uses v2 ingestion cursors (`afterSequence`, `{version:2,sequence}`), independently of canonical
+replay time. Legacy `afterT`/`afterEventId` requests replay from ingestion origin once. Consumers
+must tolerate duplicates and commit only the v2 cursor delivered with each processed event.
+Every poll and emission checks current credential, capability and membership. Revocation ends
+with a structured `stream-error` frame carrying HTTP-equivalent status/code/message. SDK clients
+treat 401/403 as terminal. Connections rotate after 15 minutes, are capped at 100 per API process
+and 5 per principal/tenant, and slow consumers have a 10-second drain deadline. These limits are
+configurable through `ApiDependencies`; deployment-wide quotas still need the operated topology.
+
+The local journal remains single-process with a writer lease and single-flight tenant SDK
+initialization. Basic event, memory-record and activity writes use fsynced atomic journal rewrite.
+State-dependent commands require PostgreSQL's durable result receipts and fail closed with an
+explicit configuration error on the journal backend. Journal in-process retry caching does not
+claim PostgreSQL's cross-process/restart result guarantee. Existing canonical JSONL remains readable.

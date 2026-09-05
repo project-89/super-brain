@@ -47,3 +47,31 @@ External identity bindings are control-plane lookup tables because they must be
 resolved before a tenant is known. They contain mappings only, never Fold
 content, and are replaced per provider alongside provider-owned memberships so
 removed identities fail closed.
+
+### Atomic commands and delivery cursor upgrade
+
+PostgreSQL is the supported pilot backend for state-dependent commands. The SDK pins the
+snapshot used for validation, stages the complete event batch, then commits with an expected
+workspace revision and a durable command receipt in one tenant transaction. Stable command
+identity comes from principal, operation and supplied event stamps. Repeating identical input
+returns the recorded result across API processes/restarts; changed input conflicts. Benign
+revision contention is revalidated a bounded number of times, then returns retryable HTTP 503
+`revision_conflict`. Domain conflicts remain HTTP 409. Receipts are protected by tenant RLS.
+
+Canonical replay/fork cursors remain `(t,eventId)`. Delivery and consumer offsets now use
+`{version:2,sequence:"123"}` and SSE `afterSequence=123`, preserving PostgreSQL bigint precision.
+A legacy event-time stream cursor, or an existing offset row without a delivery sequence,
+replays from sequence zero and emits v2 cursors. This intentionally permits duplicate delivery
+to repair possible late-event gaps; consumers must make processing idempotent before upgrading.
+Legacy offset writes are rejected. Stop old workers/API processes before upgrading, start the
+new API once to apply additive DDL, then restart upgraded consumers. Persisted v2 acknowledgments
+cannot regress or exceed the committed workspace delivery head. Do not roll back consumers to
+old binaries against upgraded offsets without a fresh replay consumer identity.
+
+Initializers share one DDL lock, including fresh-schema creation. Identity provisioning persists
+source occurrence times per organization, membership and credential, with deletion winning ties.
+A deleted organization blocks subordinate upserts until a newer explicit organization upsert.
+Signed Clerk webhooks must include their source `timestamp`; delivery retry timestamps are not
+ordering evidence. Existing identity audit history seeds conservative occurrence watermarks using
+its receipt time during migration, so older replayed provider events may be deliberately ignored;
+reconcile current provider state with a new source event when needed.

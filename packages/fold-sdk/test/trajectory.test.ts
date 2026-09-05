@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseEvent } from "@_89/fold";
-import { makeTrajectoryTreeRecordedEvent } from "@_89/fold-trajectory";
+import { makeTrajectoryRecordedEvent, makeTrajectoryTreeRecordedEvent } from "@_89/fold-trajectory";
 
 import {
   FoldSdk,
@@ -70,6 +70,21 @@ function trajectory(id: string) {
 }
 
 describe("SDK trajectory API", () => {
+  it("rejects a late-arriving run that canonically precedes its task tree before committing", async () => {
+    const store = new MemoryStore();
+    const sdk = new FoldSdk(store);
+    const context = trajectoryContext();
+    await sdk.recordTrajectoryTree(context, stamp("tree-event", 100), tree);
+    const backdatedRun = makeTrajectoryRecordedEvent(context, stamp("backdated-run", 50), tree, trajectory("run-a"));
+
+    await expect(sdk.append(context.access, backdatedRun)).rejects.toThrow("references missing task tree");
+    expect(store.entries.map(({ event }) => event.id)).toEqual(["tree-event"]);
+    expect((await new FoldSdk(store).trajectoryTasks(context.access))[0]?.trajectoryCount).toBe(0);
+
+    await sdk.recordTrajectory(context, stamp("later-run", 101), trajectory("run-a"));
+    expect((await new FoldSdk(store).trajectoryTasks(context.access))[0]?.trajectoryCount).toBe(1);
+  });
+
   it("records a scoped tree and run, then returns summaries and analysis", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     const context = trajectoryContext();

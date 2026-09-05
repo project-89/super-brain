@@ -135,6 +135,7 @@ async function main(): Promise<void> {
     readonly source: string;
     readonly imported?: boolean;
     readonly eventCount?: number;
+    readonly interpretation?: "retained-existing";
     readonly error?: string;
   }> = [];
   for (const transcript of report.transcripts) {
@@ -165,6 +166,7 @@ async function main(): Promise<void> {
         source: delivered.run.source,
         imported: delivered.imported,
         eventCount: delivered.eventCount,
+        ...(delivered.interpretation === undefined ? {} : { interpretation: delivered.interpretation }),
       });
     } catch (error) {
       results.push({

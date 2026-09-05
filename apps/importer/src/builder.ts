@@ -1,3 +1,4 @@
+import type { EvidenceResult, NormalizedNativeRecord } from "./native.js";
 import { basename, normalize } from "node:path";
 
 import {
@@ -103,6 +104,30 @@ export class TranscriptBuilder {
     readonly source: TranscriptSource,
     readonly nativeId: string,
   ) {}
+
+  consume(record: NormalizedNativeRecord): void {
+    this.countRecord(record.at);
+    if (record.unknown) this.countUnknown();
+    this.observeContext(record.cwd, record.branch, record.at, record.remote);
+    this.setClientVersion(record.clientVersion);
+    this.setModel(record.model);
+    if (record.turn !== undefined) {
+      const identity = record.turn;
+      let turn = this.turns[identity.ordinal];
+      if (turn === undefined) {
+        if (identity.ordinal !== this.turns.length) throw new Error("native transcript turn sequence is not contiguous");
+        turn = { ...identity, ...(record.at === undefined ? {} : { startedAt: record.at }), messageCount: 0, actionCount: 0, roles: new Set() };
+        this.turns.push(turn);
+        if (identity.nativeId !== undefined) this.turnsByNativeId.set(identity.nativeId, turn);
+      }
+      this.currentTurn = turn;
+    }
+    for (const message of record.messages) this.addMessage(message.role, record.at, message.nativeId);
+    for (const action of record.actions) {
+      if (action.kind === "call") this.addToolCall(action.name, record.at, action.nativeId);
+      else this.addToolResult(action.name, record.at, action.result ?? "unknown", action.nativeId);
+    }
+  }
 
   countRecord(timestamp?: string): void {
     this.records += 1;
@@ -211,7 +236,7 @@ export class TranscriptBuilder {
     turn.actionCount += 1;
   }
 
-  addToolResult(name: string | undefined, at: string | undefined, failed = false, nativeId?: string): void {
+  addToolResult(name: string | undefined, at: string | undefined, result: EvidenceResult | boolean = "unknown", nativeId?: string): void {
     if (this.currentTurn === undefined) this.startTurn(undefined, at);
     const actionKey = nativeId === undefined ? undefined : `result:${nativeId}`;
     if (actionKey !== undefined && this.actionIds.has(actionKey)) return;
@@ -225,7 +250,7 @@ export class TranscriptBuilder {
       ...(at === undefined ? {} : { at }),
       kind: "tool-result",
       ...(name === undefined ? {} : { name }),
-      status: failed ? "failed" : "completed",
+      status: result === true || result === "failure" ? "failed" : result === false || result === "success" ? "completed" : "unknown",
     });
     turn.actionCount += 1;
   }

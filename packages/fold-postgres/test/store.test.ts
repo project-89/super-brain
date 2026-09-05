@@ -130,18 +130,67 @@ integrationDescribe("Postgres Fold store", () => {
       .rejects.toBeInstanceOf(PostgresFoldConflictError);
   });
 
-  it("persists monotonic consumer cursors", async () => {
-    await expect(database.consumerCursor(workspaceId, "hermes-a")).resolves.toBeUndefined();
-    await database.commitConsumerCursor(workspaceId, "hermes-a", { t: 4, eventId: "event-d" });
-    await expect(database.consumerCursor(workspaceId, "hermes-a")).resolves.toEqual({
-      t: 4,
-      eventId: "event-d",
-    });
-    await expect(database.commitConsumerCursor(
-      workspaceId,
-      "hermes-a",
-      { t: 3, eventId: "event-c" },
-    )).rejects.toBeInstanceOf(PostgresFoldConflictError);
+  it("persists monotonic bigint delivery cursors without allowing future acknowledgement", async () => {
+    const tenant = `${workspaceId}-delivery`;
+    await database.store(tenant).append(entry("delivery-head", 100));
+    const head = await database.latestDeliveryCursor(tenant);
+    await database.commitConsumerCursor(tenant, "worker", head);
+    await expect(database.consumerCursor(tenant, "worker")).resolves.toEqual(head);
+    await expect(database.commitConsumerCursor(tenant, "worker", { version: 2, sequence: "0" })).rejects.toBeInstanceOf(PostgresFoldConflictError);
+    await expect(database.commitConsumerCursor(tenant, "worker", { version: 2, sequence: String(BigInt(head.sequence) + 1n) })).rejects.toBeInstanceOf(PostgresFoldConflictError);
+    await database.store(tenant).append(entry("late-arrival", 1));
+    const page = await database.readEventPage(tenant, { after: head });
+    expect(page.entries.map(({ event }) => event.id)).toEqual(["late-arrival"]);
+    expect(page.cursors[0]).toEqual(page.scannedThrough);
+    expect((await database.readEventPage(tenant, { after: { t: 100, eventId: "delivery-head" } })).entries).toHaveLength(2);
+  });
+
+  it("migrates persisted legacy offsets by replaying from delivery origin", async () => {
+    const tenant = `${workspaceId}-legacy-offset`;
+    await database.store(tenant).append(entry("legacy-newer", 100));
+    await database.store(tenant).append(entry("legacy-late", 1));
+    const pool = new Pool({ connectionString: connectionString! });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.organization_id', 'local', true)");
+      await client.query(`INSERT INTO "${schema}".fold_consumer_offsets
+        (organization_id, workspace_id, consumer_id, cursor_t, cursor_event_id)
+        VALUES ('local', $1, 'legacy-worker', 100, 'legacy-newer')`, [tenant]);
+      await client.query("COMMIT");
+    } finally { client.release(); await pool.end(); }
+    const cursor = await database.consumerCursor(tenant, "legacy-worker");
+    expect(cursor).toEqual({ version: 2, sequence: "0" });
+    expect((await database.readEventPage(tenant, { after: cursor! })).entries.map(({ event }) => event.id)).toEqual(["legacy-newer", "legacy-late"]);
+    await expect(database.commitConsumerCursor(tenant, "legacy-worker", { t: 100, eventId: "legacy-newer" })).rejects.toThrow("legacy consumer commits");
+  });
+
+  it("rejects delayed identity resurrection, gives deletion precedence on ties, and permits a newer explicit rejoin", async () => {
+    const organizationId = `org-ordered-${workspaceId}`;
+    const base = { provider: "clerk", externalOrganizationId: organizationId, organizationId,
+      externalPrincipalId: "user:ordered", principalId: "ordered", workspaceId: "default",
+      organizationRole: "member" as const, workspaceRole: "member" as const };
+    await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-create", type: "membership.upsert", occurredAt: 10 });
+    await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-delete", type: "membership.delete", occurredAt: 20 });
+    expect(await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-late", type: "membership.upsert", occurredAt: 15 })).toBe(false);
+    expect(await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-tie", type: "membership.upsert", occurredAt: 20 })).toBe(false);
+    expect(await administration.resolveMembership(organizationId, "default", "ordered")).toBeUndefined();
+    expect(await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-new", type: "membership.upsert", occurredAt: 30 })).toBe(true);
+    await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-org-delete", type: "organization.delete", occurredAt: 40 });
+    expect(await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-org-late", type: "organization.upsert", occurredAt: 35 })).toBe(false);
+    expect(await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "ordered-member-late", type: "membership.upsert", occurredAt: 50 })).toBe(false);
+    expect(await administration.resolveMembership(organizationId, "default", "ordered")).toBeUndefined();
+  });
+
+  it("does not let credential provisioning suppress a membership revocation", async () => {
+    const organizationId = `org-namespaces-${workspaceId}`;
+    const base = { provider: "clerk", externalOrganizationId: organizationId, organizationId,
+      externalPrincipalId: "machine:overlap", principalId: "overlap", workspaceId: "default",
+      organizationRole: "member" as const, workspaceRole: "member" as const };
+    await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "namespace-member", type: "membership.upsert", occurredAt: 10 });
+    await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "namespace-credential", type: "credential.upsert", occurredAt: 100 });
+    expect(await administration.applyExternalIdentityProvisioningEvent({ ...base, eventId: "namespace-delete", type: "membership.delete", occurredAt: 20 })).toBe(true);
+    expect(await administration.resolveMembership(organizationId, "default", "overlap")).toBeUndefined();
   });
 
   it("round-trips rebuildable projection checkpoints", async () => {
