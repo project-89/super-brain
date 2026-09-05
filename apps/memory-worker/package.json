@@ -24,6 +24,7 @@
     "@_89/fold-transcript": "workspace:*",
     "@_89/fold-trajectory": "workspace:*",
     "@_89/super-brain-importer": "workspace:*",
+    "@_89/super-brain-capture-daemon": "workspace:*",
     "@_89/super-brain-client": "workspace:*"
   }
 }

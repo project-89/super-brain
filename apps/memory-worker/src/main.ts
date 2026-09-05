@@ -2,6 +2,7 @@
 import { SuperBrainClient } from "@_89/super-brain-client";
 import { readVaultKey } from "@_89/super-brain-importer";
 import { fileURLToPath } from "node:url";
+import { createCapturedEventVerifier } from "./authority.js";
 
 import { installMemoryWorkerLaunchAgent } from "./install.js";
 import { TranscriptMemoryWorker } from "./worker.js";
@@ -33,8 +34,8 @@ async function main(): Promise<void> {
     process.stdout.write(`${path}\n`);
     return;
   }
-  if (command !== "scan" && command !== "backfill" && command !== "watch") {
-    throw new TypeError("supported commands: scan, backfill, watch, install-service");
+  if (command !== "scan" && command !== "backfill" && command !== "watch" && command !== "retry") {
+    throw new TypeError("supported commands: scan, backfill, watch, retry, install-service");
   }
   if (command === "backfill" && !args.includes("--confirm")) {
     throw new TypeError("backfill requires --confirm; run scan first to review counts");
@@ -64,25 +65,51 @@ async function main(): Promise<void> {
 
   const client = new SuperBrainClient({ baseUrl, organizationId, workspaceId, token });
   const autoPromote = args.includes("--auto-promote");
+  const trustedSensorId = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_SENSOR;
+  const captureStateRoot = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_STATE_ROOT;
+  const captureVaultRoot = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_VAULT_ROOT;
+  const receiptKeyPath = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_RECEIPT_KEY_FILE;
+  const captureKeyPath = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_VAULT_KEY_FILE;
+  const verifyCapturedEvent = trustedSensorId && captureStateRoot && captureVaultRoot && receiptKeyPath
+    ? createCapturedEventVerifier({ organizationId, workspaceId, trustedSensorId, stateRoot: captureStateRoot, vaultRoot: captureVaultRoot,
+      receiptEncryptionKey: await readVaultKey(receiptKeyPath),
+      ...(captureKeyPath === undefined ? {} : { vaultEncryptionKey: await readVaultKey(captureKeyPath) }) }) : undefined;
+  if (autoPromote && verifyCapturedEvent === undefined) console.error("[memory-worker] Promotion is disabled until an explicit capture witness verifier is configured");
+  const stateRoot = option("--state-root") ?? process.env.SUPER_BRAIN_WORKER_STATE_ROOT;
+  const spaceId = option("--space") ?? process.env.SUPER_BRAIN_WORKER_SPACE;
   const worker = new TranscriptMemoryWorker({
     client,
     vaultRoot,
     maxCandidatesPerRun,
     audience,
     autoPromote,
-    continuousCognition: command === "watch" && !args.includes("--no-continuous-cognition"),
+    continuousCognition: (command === "watch" || command === "retry") && !args.includes("--no-continuous-cognition"),
     cognitionEveryEvents,
+    ...(stateRoot === undefined ? {} : { stateRoot }),
+    ...(spaceId === undefined ? {} : { spaceId }),
+    ...(verifyCapturedEvent === undefined ? {} : { verifyCapturedEvent }),
+    ...(process.env.SUPER_BRAIN_COGNITION_PROVIDER === undefined ? {} : { cognitionProviderId: process.env.SUPER_BRAIN_COGNITION_PROVIDER }),
     reportWarning: (message) => console.error(`[memory-worker] ${message}`),
     ...(vaultEncryptionKey === undefined ? {} : { vaultEncryptionKey }),
   });
+  if (command === "retry") {
+    try { await worker.retryJob(required(option("--job"), "--job")); await worker.drainModelJobs(); await worker.drainJobs(); process.stdout.write(`${JSON.stringify(await worker.coverage())}\n`); }
+    finally { await worker.close(); }
+    return;
+  }
   if (command === "watch") {
-    await worker.watch({
+    const shutdown = new AbortController();
+    const stop = () => shutdown.abort();
+    process.once("SIGINT", stop); process.once("SIGTERM", stop);
+    try { await worker.watch({
+      signal: shutdown.signal,
       consumerId: option("--consumer") ?? "transcript-memory-extractor-v1",
       ...(args.includes("--replay-all") ? { replay: "all" } : {}),
-    });
+    }); } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); await worker.close(); }
     return;
   }
 
+  try {
   const archive = await worker.archiveRuns();
   const runs = limit === undefined ? archive.runs : archive.runs.slice(0, limit);
   const results = [];
@@ -94,7 +121,7 @@ async function main(): Promise<void> {
       results.push({ runId: run.id, candidates: 0, proposed: 0, skippedReason: "run event unavailable" });
       continue;
     }
-    const result = await worker.processRun(run, runEventId, false);
+    const result = await worker.processRun(run, runEventId, command === "backfill");
     extractedCandidates.push(...result.candidates);
     for (const candidate of result.candidates) {
       if (samples.length >= sample) break;
@@ -102,8 +129,17 @@ async function main(): Promise<void> {
     }
     results.push({ runId: run.id, candidates: result.candidates.length, proposed: result.proposed, ...(result.skippedReason === undefined ? {} : { skippedReason: result.skippedReason }) });
   }
-  const proposed = command === "backfill" ? await worker.propose(extractedCandidates) : 0;
-  const promoted = command === "backfill" ? await worker.promote(extractedCandidates) : 0;
+  let proposed = results.reduce((total, result) => total + result.proposed, 0);
+  let promoted = 0;
+  if (command === "backfill") {
+    // Finish runnable work; waiting artifacts and retryable failures remain durable for watch/retry.
+    while (true) {
+      const before = await worker.coverage();
+      const more = await worker.drainJobs(); proposed += more.proposed; promoted += more.promoted;
+      const after = await worker.coverage();
+      if (after.pending === 0 || after.pending >= before.pending && after.completed === before.completed) break;
+    }
+  }
   const bySource = extractedCandidates.reduce<Record<string, number>>((counts, candidate) => {
     counts[candidate.source] = (counts[candidate.source] ?? 0) + 1;
     return counts;
@@ -118,10 +154,12 @@ async function main(): Promise<void> {
     skippedRuns: results.filter((result) => result.skippedReason !== undefined).length,
     bySource,
     projectScoped,
-    global: extractedCandidates.length - projectScoped,
+    unresolved: extractedCandidates.length - projectScoped,
     ...(samples.length === 0 ? {} : { samples }),
     results,
+    ...(command === "backfill" ? { processing: await worker.coverage() } : {}),
   }, null, 2)}\n`);
+  } finally { await worker.close(); }
 }
 
 void main().catch((error: unknown) => {

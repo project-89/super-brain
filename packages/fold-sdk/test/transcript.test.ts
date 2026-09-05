@@ -6,7 +6,7 @@ import {
   type FoldSdkTranscriptContext,
   type TranscriptImportBundle,
 } from "../src/index.js";
-import { access, MemoryStore } from "./helpers.js";
+import { access, MemoryStore, memoryContext, stamp, MEMORY_A, MEMORY_B } from "./helpers.js";
 
 const project = {
   id: "project-a",
@@ -100,6 +100,21 @@ function context(workspaceId = "workspace-1"): FoldSdkTranscriptContext {
 }
 
 describe("Fold SDK transcript imports", () => {
+  it("resolves cited turns to their actual project segment and rejects unknown timing or invented joins", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    const projectB = { ...project, id: "project-b", identityKeyHash: "d".repeat(64) };
+    const switched = { ...run, segments: [{ ...run.segments[0]!, endedAt: "2026-08-20T12:02:00.000Z" }, { ...run.segments[0]!, id: "segment-b", ordinal: 1, projectId: projectB.id, startedAt: "2026-08-20T12:02:00.000Z" }] };
+    const laterChunk = { ...chunk, turns: [{ ...chunk.turns[0]!, startedAt: "2026-08-20T12:03:00.000Z", endedAt: "2026-08-20T12:04:00.000Z" }, { ...chunk.turns[0]!, id: "unknown-turn", ordinal: 1, startedAt: undefined }] };
+    const { startedAt: _missing, ...unknownTurn } = laterChunk.turns[1]!;
+    const imported = await sdk.importTranscript(context(), { ...bundle, projects: [project, projectB], run: switched, chunks: [{ ...laterChunk, turns: [laterChunk.turns[0]!, unknownTurn] }] }, { importId: "switch", importedAt: 1 });
+    const source = imported.events.find((event) => event.kind === "transcript.run-imported")!;
+    const own = memoryContext({ audience: "workspace" });
+    const input = { id: MEMORY_A, audience: "workspace" as const, source: "transcript", applicability: { kind: "projects" as const, projectIds: [projectB.id] }, evidence: [{ eventId: source.id, runId: run.id, turnId: chunk.turns[0]!.id, projectId: projectB.id }] };
+    await expect(sdk.recordMemory(own, stamp("later-project", 100), input)).resolves.toMatchObject({ memory: { evidence: input.evidence } });
+    await expect(sdk.recordMemory(own, stamp("wrong-project", 101), { ...input, id: MEMORY_B, evidence: [{ ...input.evidence[0]!, projectId: project.id }] })).rejects.toThrow("project");
+    await expect(sdk.recordMemory(own, stamp("unknown-time", 102), { ...input, id: MEMORY_B, evidence: [{ ...input.evidence[0]!, turnId: "unknown-turn" }] })).rejects.toThrow("project");
+  });
+
   it("imports an immutable bundle and exposes project and run queries", async () => {
     const store = new MemoryStore();
     const sdk = new FoldSdk(store);

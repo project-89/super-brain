@@ -5,6 +5,7 @@ import {
   MEMORY_A,
   MEMORY_B,
   access,
+  event,
   memoryContext,
   MemoryStore,
   stamp,
@@ -16,7 +17,7 @@ describe("SDK personal memory API", () => {
     const sdk = new FoldSdk(store);
     const created = await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {
       id: MEMORY_A,
-      source: "conversation",
+      applicability: { kind: "global" }, source: "conversation",
       content: { decision: "ship" },
       tags: ["decision"],
     });
@@ -57,7 +58,7 @@ describe("SDK personal memory API", () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {
       id: MEMORY_A,
-      source: "conversation",
+      applicability: { kind: "global" }, source: "conversation",
     });
     const other = access({ principalId: "user-b", workspaceRole: "owner" });
     expect(await sdk.listEntries(other)).toEqual([]);
@@ -74,7 +75,7 @@ describe("SDK personal memory API", () => {
     await sdk.recordMemory(
       memoryContext({ spaceId: "space-a" }),
       stamp("event-a", 100),
-      { id: MEMORY_A, spaceId: "space-a", source: "conversation" },
+      { id: MEMORY_A, spaceId: "space-a", applicability: { kind: "global" }, source: "conversation" },
     );
     const revoked = access();
     expect(await sdk.listEntries(revoked)).toEqual([]);
@@ -85,13 +86,13 @@ describe("SDK personal memory API", () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {
       id: MEMORY_A,
-      source: "conversation",
+      applicability: { kind: "global" }, source: "conversation",
       summary: "Own",
     });
     await sdk.recordMemory(
       memoryContext({ principalId: "user-b" }),
       stamp("event-b", 101),
-      { id: MEMORY_B, source: "conversation", summary: "Other" },
+      { id: MEMORY_B, applicability: { kind: "global" }, source: "conversation", summary: "Other" },
     );
 
     const recalled = await sdk.recallMemories(access(), {
@@ -107,13 +108,13 @@ describe("SDK personal memory API", () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {
       id: MEMORY_A,
-      source: "conversation",
+      applicability: { kind: "global" }, source: "conversation",
       summary: "Refresh the access token",
     });
     await sdk.recordMemory(
       memoryContext({ principalId: "user-b" }),
       stamp("event-b", 101),
-      { id: MEMORY_B, source: "conversation", summary: "Private owner note" },
+      { id: MEMORY_B, applicability: { kind: "global" }, source: "conversation", summary: "Private owner note" },
     );
 
     const seen: string[] = [];
@@ -145,7 +146,7 @@ describe("SDK personal memory API", () => {
     for (const [index, id] of ids.entries()) {
       await sdk.recordMemory(memoryContext(), stamp(`event-page-${index}`, 100 + index), {
         id,
-        source: "conversation",
+        applicability: { kind: "global" }, source: "conversation",
         summary: `Memory ${index}`,
       });
     }
@@ -163,7 +164,7 @@ describe("SDK personal memory API", () => {
       const memoryId = `01890f47-7d00-7000-8000-${index.toString(16).padStart(12, "0")}`;
       await sdk.recordMemory(memoryContext(), stamp(`event-${index.toString().padStart(3, "0")}`, 1_000 + index), {
         id: memoryId,
-        source: "archive",
+        applicability: { kind: "global" }, source: "archive",
         summary: `Memory ${index}`,
       });
     }
@@ -198,7 +199,7 @@ describe("SDK personal memory API", () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.recordMemory(memoryContext(), stamp("event-a", 100), {
       id: MEMORY_A,
-      source: "conversation",
+      applicability: { kind: "global" }, source: "conversation",
     });
     const otherContext = memoryContext({ principalId: "user-b" });
     await expect(
@@ -212,6 +213,8 @@ describe("SDK personal memory API", () => {
   it("promotes a workspace candidate and its memory atomically with provenance", async () => {
     const store = new MemoryStore();
     const sdk = new FoldSdk(store);
+    const source = event({ id: "transcript-chunk-1", t: 1, actorId: "agent-a" });
+    await sdk.append(access({ principalId: "agent-a" }), { ...source, capture: { ...source.capture, identity: { ...source.capture.identity, project: "project-a", run: "run-a" } } });
     const proposed = await sdk.proposeMemoryCandidate(
       memoryContext({ principalId: "agent-a", audience: "workspace" }),
       stamp("candidate-event", 100),
@@ -253,6 +256,7 @@ describe("SDK personal memory API", () => {
 
   it("does not expose personal candidates to another principal", async () => {
     const sdk = new FoldSdk(new MemoryStore());
+    await sdk.append(access(), event({ id: "transcript-chunk-1", t: 1, creatorId: "user-a" }));
     await sdk.proposeMemoryCandidate(memoryContext(), stamp("candidate-event", 100), {
       id: MEMORY_A,
       source: "transcript",
@@ -269,7 +273,8 @@ describe("SDK personal memory API", () => {
   it("atomically appends bounded candidate batches", async () => {
     const store = new MemoryStore();
     const sdk = new FoldSdk(store);
-    const context = memoryContext({ audience: "workspace" });
+    const context = memoryContext({ audience: "workspace", workspaceRole: "owner" });
+    for (let index = 0; index < 2; index++) await sdk.append(access(), event({ id: `run-event-${index}`, t: index + 1 }));
     const results = await sdk.proposeMemoryCandidates(context, [MEMORY_A, MEMORY_B].map((id, index) => ({
       stamp: stamp(`candidate-event-${index}`, 100 + index),
       input: {
@@ -292,7 +297,8 @@ describe("SDK personal memory API", () => {
   it("atomically promotes a bounded candidate batch into active memory", async () => {
     const store = new MemoryStore();
     const sdk = new FoldSdk(store);
-    const context = memoryContext({ audience: "workspace" });
+    const context = memoryContext({ audience: "workspace", workspaceRole: "owner" });
+    for (let index = 0; index < 2; index++) await sdk.append(access(), event({ id: `run-event-${index}`, t: index + 1 }));
     const memoryC = "01890f47-7c02-7000-8000-000000000003";
     const memoryD = "01890f47-7c03-7000-8000-000000000004";
     await sdk.proposeMemoryCandidates(context, [MEMORY_A, MEMORY_B].map((id, index) => ({

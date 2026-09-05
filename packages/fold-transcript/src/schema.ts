@@ -18,6 +18,7 @@ export const transcriptArtifactSchema = z.object({
   id: z.string().trim().min(1).max(300),
   source: transcriptSourceSchema,
   sha256: sha256Schema,
+  storedSha256: sha256Schema.optional(),
   sourcePathHash: sha256Schema,
   byteLength: z.number().int().nonnegative(),
   mediaType: z.string().trim().min(1).max(200),

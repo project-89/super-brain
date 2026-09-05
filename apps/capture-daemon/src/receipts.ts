@@ -17,6 +17,7 @@ export interface HookOccurrence {
 export interface CaptureReceipt {
   readonly version: 1;
   readonly occurrence: HookOccurrence;
+  readonly tenant?: { readonly organizationId: string; readonly workspaceId: string };
   readonly fingerprint: string;
   readonly receivedAt: string;
   readonly artifact: VaultArtifact;
@@ -156,7 +157,7 @@ export class CaptureReceiptQueue {
       const receivedAt = new Date().toISOString();
       this.lastEventTime = Math.max(Date.now(), this.lastEventTime + 1, this.engine.eventWatermark() + 1);
       const artifact = await this.engine.vault.store(occurrence.source, protectedPayload, this.lastEventTime, { receiptId: occurrence.id, ...(authority === undefined ? {} : { authority }) });
-      const receipt: CaptureReceipt = { version: 1, occurrence: { ...occurrence, payload: protectedPayload }, fingerprint,
+      const receipt: CaptureReceipt = { version: 1, tenant: { organizationId: this.engine.config.organizationId, workspaceId: this.engine.config.workspaceId }, occurrence: { ...occurrence, payload: protectedPayload }, fingerprint,
         receivedAt, artifact, status: "accepted", ...(authority === undefined ? {} : { authority }) };
       await writeProtected(this.path(occurrence.id), receipt, this.key, true);
       return { accepted: true as const, receiptId: occurrence.id, artifactId: artifact.id };
@@ -221,4 +222,20 @@ export class CaptureReceiptQueue {
       }
     }
   }
+}
+
+/** Read only authenticated completion witnesses. Plain JSON at an .enc path is not evidence. */
+export async function readCompletedCaptureReceipt(options: {
+  readonly stateRoot: string;
+  readonly receiptId: string;
+  readonly encryptionKey: Uint8Array;
+}): Promise<CaptureReceipt | undefined> {
+  let encrypted: string;
+  try { encrypted = (await readFile(join(options.stateRoot, "receipts", "receiver", "completed", filename(options.receiptId)), "utf8")).trim(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  const envelope = JSON.parse(encrypted) as { $superBrainEncrypted?: unknown };
+  if (envelope.$superBrainEncrypted !== 1) throw new TypeError("capture witness is not authenticated encrypted evidence");
+  const receipt = JSON.parse(decryptVaultLine(encrypted, options.encryptionKey)) as CaptureReceipt;
+  if (receipt.version !== 1 || receipt.status !== "completed" || receipt.occurrence?.id !== options.receiptId) throw new TypeError("capture witness receipt identity is invalid");
+  return receipt;
 }

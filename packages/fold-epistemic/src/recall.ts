@@ -1,4 +1,5 @@
 import { authorizeRecall, canAccessSpace, validateAccessContext } from "./access.js";
+import { normalizeMemoryApplicability } from "./validity.js";
 import { normalizeMemoryTags } from "./events.js";
 import type {
   EpistemicAccessContext,
@@ -41,6 +42,8 @@ function matchesScope(memory: PersonalMemory, request: RecallRequest): boolean {
 
 function matchesFilters(memory: PersonalMemory, request: RecallRequest): boolean {
   if (!matchesScope(memory, request)) return false;
+  const applicability = normalizeMemoryApplicability(memory.applicability, memory.projectIds);
+  if (request.includeNeedsReview !== true && (applicability.kind === "unresolved" || (memory.currentness !== undefined && memory.currentness.status !== "current"))) return false;
   const tags = normalizeMemoryTags(request.tags);
   if (tags.length > 0 && !tags.every((tag) => memory.tags.includes(tag))) return false;
   if (request.sources !== undefined && request.sources.length > 0 && !request.sources.includes(memory.source)) {
@@ -48,7 +51,7 @@ function matchesFilters(memory: PersonalMemory, request: RecallRequest): boolean
   }
   if (request.projectIds !== undefined && request.projectIds.length > 0) {
     const requested = new Set(request.projectIds);
-    if (memory.projectIds.length > 0 && !memory.projectIds.some((projectId) => requested.has(projectId))) {
+    if (applicability.kind === "projects" && !applicability.projectIds.some((projectId) => requested.has(projectId))) {
       return false;
     }
   }

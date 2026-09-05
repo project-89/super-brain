@@ -826,6 +826,8 @@ describe("Fold HTTP API", () => {
   it("reviews workspace memory candidates and exposes accepted project memory", async () => {
     const api = await startApi();
     try {
+      const evidence = apiEvent({ id: "transcript-chunk-1", t: 1 });
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { method: "POST", token: "token-a", body: { event: { ...evidence, capture: { ...evidence.capture, identity: { ...evidence.capture.identity, run: "run-a", repo: "project-a" } } } } });
       const proposed = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memory-candidates", {
         method: "POST",
         token: "token-a",
@@ -920,7 +922,7 @@ describe("Fold HTTP API", () => {
         method: "POST",
         token: "token-a",
         body: memoryRecordBody({
-          input: { id: MEMORY_A, source: "conversation", summary: "Refresh token" },
+          input: { id: MEMORY_A, source: "conversation", applicability: { kind: "global" }, summary: "Refresh token" },
         }),
       });
       await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", {
@@ -960,6 +962,7 @@ describe("Fold HTTP API", () => {
           input: {
             id: MEMORY_A,
             source: "conversation",
+            applicability: { kind: "global" },
             summary: "Rotate the access token before retrying",
             content: { outcome: "refresh succeeded" },
             tags: ["authentication"],

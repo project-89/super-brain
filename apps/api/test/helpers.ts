@@ -216,6 +216,7 @@ export function memoryRecordBody(
     input: {
       id: MEMORY_A,
       source: "conversation",
+      applicability: { kind: "global" },
       content: { decision: "ship" },
       tags: ["decision"],
     },

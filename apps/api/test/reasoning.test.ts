@@ -19,13 +19,30 @@ const evidence: ReasoningEvidence[] = [{
 }];
 
 describe("local evidence reasoner", () => {
+  it("binds provider configuration without secrets and cancels the upstream HTTP request", async () => {
+    const config = { url: "https://reasoning.internal/answer", model: "reasoner-1" };
+    const first = new HttpModelReasoner({ ...config, token: "first-secret" });
+    expect(first.descriptor.configRevision).toBe(new HttpModelReasoner({ ...config, token: "rotated-secret" }).descriptor.configRevision);
+    expect(first.descriptor.configRevision).not.toBe(new HttpModelReasoner({ ...config, url: "https://other.internal/answer" }).descriptor.configRevision);
+    expect(first.descriptor.configRevision).not.toContain("secret");
+    let cancelled = false;
+    const reasoner = new HttpModelReasoner({ ...config, fetch: async (_url, init) => new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => { cancelled = true; reject(init!.signal!.reason); }, { once: true });
+    }) });
+    const controller = new AbortController();
+    const request = reasoner.answer({ question: "Slow request", evidence, signal: controller.signal });
+    controller.abort(new Error("Caller stopped"));
+    await expect(request).rejects.toThrow("Caller stopped");
+    expect(cancelled).toBe(true);
+  });
+
   it("returns an explicitly extractive answer with authorized citations", async () => {
     const reasoner = new LocalEvidenceReasoner();
     expect(await reasoner.answer({ question: "How did refresh recover?", evidence })).toEqual({
       answer: "Relevant evidence: Rotate the access token before retrying.",
       citations: ["memory-a"],
     });
-    expect(reasoner.descriptor).toEqual({ id: "local-evidence-v1", kind: "extractive", provider: "local" });
+    expect(reasoner.descriptor).toMatchObject({ id: "local-evidence-v1", kind: "extractive", provider: "local" });
   });
 
   it("rejects citations outside the supplied evidence", () => {
@@ -52,7 +69,7 @@ describe("local evidence reasoner", () => {
       answer: "Rotate the token first.",
       citations: ["memory-a"],
     });
-    expect(reasoner.descriptor).toEqual({ id: "http-model:reasoner-1", kind: "model", provider: "custom", model: "reasoner-1" });
+    expect(reasoner.descriptor).toMatchObject({ id: "http-model:reasoner-1", kind: "model", provider: "custom", model: "reasoner-1" });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://reasoning.internal/v1/answer");
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer provider-token");

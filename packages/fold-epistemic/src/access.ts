@@ -1,6 +1,7 @@
 import type {
   EpistemicAccessContext,
   PersonalMemory,
+  MemoryWriteAuthority,
   RecallDecision,
 } from "./types.js";
 
@@ -65,11 +66,23 @@ export function assertCanWritePersonalMemory(
   if (access.platformDataAccess === true) {
     throw new EpistemicAccessError("platform data access is read-only");
   }
-  if (scope.creatorId !== access.principalId) {
+  if ((scope.audience ?? "personal") === "personal" && scope.creatorId !== access.principalId) {
     throw new EpistemicAccessError("creator-mismatch: memory writes require the originating creator");
+  }
+  if (scope.audience === "workspace" && scope.spaceId !== undefined && !["admin", "writer"].includes(access.spaceRoles[scope.spaceId] ?? "")) {
+    throw new EpistemicAccessError("shared space memory writes require a writer role");
   }
   const decision = authorizeRecall(scope, access);
   if (!decision.allowed) {
     throw new EpistemicAccessError(`personal memory access denied: ${decision.reason}`);
   }
+}
+
+export function memoryWriteAuthority(scope: Pick<PersonalMemory, "workspaceId" | "creatorId" | "spaceId" | "audience">, access: EpistemicAccessContext): MemoryWriteAuthority {
+  assertCanWritePersonalMemory(scope, access);
+  return scope.audience === "personal" ? "creator" : scope.spaceId === undefined ? "workspace-writer" : "space-writer";
+}
+export function validReplayMemoryAuthority(scope: Pick<PersonalMemory, "creatorId" | "spaceId" | "audience">, actorId: string, authority: unknown): boolean {
+  if (scope.audience === "personal") return actorId === scope.creatorId && (authority === undefined || authority === "creator");
+  return authority === (scope.spaceId === undefined ? "workspace-writer" : "space-writer") || (authority === undefined && actorId === scope.creatorId);
 }

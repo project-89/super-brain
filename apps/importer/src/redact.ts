@@ -199,6 +199,8 @@ export async function storeRedactedArtifact(
         options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true ? "retained" : "excluded",
       anonymizationPolicy: options.anonymizer?.policy ?? "none",
       stored: true,
+      // Hash the published bytes: an existing encrypted target retains its original nonce.
+      storedSha256: await sha256File(target),
       redactionCount,
     },
   });

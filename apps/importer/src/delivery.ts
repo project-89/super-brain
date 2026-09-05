@@ -1,6 +1,8 @@
 import {
   transcriptImportBundleSchema,
   transcriptArtifactSchema,
+  transcriptChunkSchema,
+  transcriptProjectSchema,
   transcriptRunSchema,
   type TranscriptImportBundle,
   type TranscriptRun,
@@ -101,7 +103,7 @@ async function retainedInterpretation(
     headers: { authorization: `Bearer ${options.bearerToken}` }, signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) return undefined;
-  const body = await response.json() as { run?: unknown; artifact?: unknown };
+  const body = await response.json() as { run?: unknown; artifact?: unknown; chunks?: unknown; projects?: unknown };
   const run = transcriptRunSchema.safeParse(body.run);
   const artifact = transcriptArtifactSchema.safeParse(body.artifact);
   if (!run.success || !artifact.success) return undefined;
@@ -110,7 +112,16 @@ async function retainedInterpretation(
   if (run.data.id !== bundle.run.id || run.data.nativeId !== bundle.run.nativeId || run.data.source !== bundle.run.source ||
     run.data.artifactId !== bundle.run.artifactId || artifact.data.id !== bundle.artifact.id || artifact.data.sha256 !== bundle.artifact.sha256 ||
     artifact.data.source !== bundle.artifact.source || artifact.data.parser.id !== bundle.artifact.parser.id ||
-    !Number.isInteger(previous) || !Number.isInteger(current) || previous >= current) return undefined;
+    !Number.isInteger(previous) || !Number.isInteger(current) || previous > current) return undefined;
+  if (previous === current) {
+    // Adding integrity metadata cannot rewrite the immutable historical artifact.
+    const { storedSha256: priorChecksum, ...prior } = artifact.data;
+    const { storedSha256: nextChecksum, ...next } = bundle.artifact;
+    const chunks = transcriptChunkSchema.array().safeParse(body.chunks);
+    const projects = transcriptProjectSchema.array().safeParse(body.projects);
+    if (!projects.success || JSON.stringify(projects.data) !== JSON.stringify(bundle.projects) || !chunks.success || JSON.stringify(chunks.data) !== JSON.stringify(bundle.chunks) || priorChecksum !== undefined || nextChecksum === undefined || JSON.stringify(prior) !== JSON.stringify(next) ||
+      JSON.stringify(run.data) !== JSON.stringify(bundle.run)) return undefined;
+  }
   return { imported: false, eventCount: 0, run: run.data, interpretation: "retained-existing" };
 }
 

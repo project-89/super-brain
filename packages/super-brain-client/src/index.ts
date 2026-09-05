@@ -1,6 +1,10 @@
 import type { FoldEvent, FoldLogEntry } from "@_89/fold";
 import type {
   MemoryAudience,
+  MemoryCandidate,
+  MemoryCandidateEvidence,
+  MemoryRevisionRef,
+  MemoryEvidenceContributionInput,
   MemoryCandidateInput,
   MemoryCandidateView,
   MemoryFeedbackInput,
@@ -11,7 +15,7 @@ import type {
   RecallRequest,
   RecalledMemory,
 } from "@_89/fold-epistemic";
-import type { FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
+import type { TranscriptRunDetail, MemoryCandidateAcceptanceResult, FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
 import type { TranscriptRun } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
@@ -39,6 +43,12 @@ export interface EventStamp {
   readonly worldDate: string;
 }
 
+export interface RequestOptions { readonly signal?: AbortSignal; readonly timeoutMs?: number }
+export interface ReasoningProviderStatus { readonly id: string; readonly kind: "extractive" | "model"; readonly model?: string; readonly configRevision?: string; readonly configured: boolean; readonly isDefault?: boolean }
+
+export interface MutationOptions { readonly stamp?: EventStamp }
+export interface MemoryAcceptanceOptions extends MutationOptions { readonly memoryStamp?: EventStamp; readonly memoryId?: string }
+
 export interface StreamedFoldEvent {
   readonly entry: FoldLogEntry;
   readonly cursor: FoldDeliveryCursor;
@@ -63,7 +73,8 @@ export interface ConsumeEventOptions extends Omit<EventStreamOptions, "after" | 
 export interface ReasoningResponse {
   readonly answer: string;
   readonly citations: readonly string[];
-  readonly provider: { readonly id: string; readonly kind: "extractive" | "model" };
+  readonly citationRefs: readonly MemoryRevisionRef[];
+  readonly provider: { readonly id: string; readonly kind: "extractive" | "model"; readonly configRevision?: string };
   readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic" | "explicit"; readonly corpusSize: number };
   readonly evidence: readonly {
     readonly memoryId: string;
@@ -205,11 +216,19 @@ export class SuperBrainClient {
       : `/v1/organizations/${encodeURIComponent(this.organizationId)}/workspaces/${workspace}/${resource}`;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
+    if (options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 300_000)) throw new TypeError("request timeout must be within 1 to 300000 milliseconds");
+    const controller = new AbortController();
+    const signals = [options.signal, init.signal].filter((signal): signal is AbortSignal => signal != null);
+    const abort = () => controller.abort(signals.find((signal) => signal.aborted)?.reason);
+    for (const signal of signals) signal.addEventListener("abort", abort, { once: true });
+    if (signals.some((signal) => signal.aborted)) abort();
+    const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new DOMException("Request deadline exceeded", "TimeoutError")), options.timeoutMs);
+    try {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${this.token}`);
     if (init.body !== undefined) headers.set("content-type", "application/json");
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { ...init, headers });
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
     const body = await response.json().catch(() => ({})) as {
       readonly error?: { readonly code?: string; readonly message?: string; readonly details?: unknown };
     };
@@ -221,7 +240,12 @@ export class SuperBrainClient {
         body.error?.details,
       );
     }
+    if (controller.signal.aborted) throw controller.signal.reason;
     return body as T;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      for (const signal of signals) signal.removeEventListener("abort", abort);
+    }
   }
 
   appendEvent(event: FoldEvent, status: "canon" | "draft" = "canon") {
@@ -231,11 +255,26 @@ export class SuperBrainClient {
     });
   }
 
-  async listEvents(options: { readonly kinds?: readonly string[]; readonly include?: "canon" | "canon+draft"; readonly limit?: number } = {}): Promise<readonly FoldLogEntry[]> {
+  async listEvents(options: { readonly eventIds?: readonly string[]; readonly kinds?: readonly string[]; readonly include?: "canon" | "canon+draft"; readonly limit?: number } = {}): Promise<readonly FoldLogEntry[]> {
+    if (options.eventIds !== undefined) {
+      if (options.eventIds.length < 1 || options.eventIds.length > 1000 || options.eventIds.some((id) => !id.trim() || id.length > 500)) throw new TypeError("eventIds must contain 1 to 1000 valid event IDs");
+      const batches: string[][] = [[]]; let encodedLength = 0;
+      for (const id of new Set(options.eventIds)) {
+        const length = encodeURIComponent(id).length + 9;
+        if (encodedLength + length > 6000 && batches.at(-1)!.length > 0) { batches.push([]); encodedLength = 0; }
+        batches.at(-1)!.push(id); encodedLength += length;
+      }
+      if (batches.length > 1) {
+        const entries: FoldLogEntry[] = [];
+        for (const batch of batches) entries.push(...await this.listEvents({ ...options, eventIds: batch, limit: batch.length }));
+        return entries.sort((a, b) => a.event.at.t - b.event.at.t || (a.event.id < b.event.id ? -1 : a.event.id > b.event.id ? 1 : 0)).slice(0, options.limit ?? 1000);
+      }
+    }
     const params = new URLSearchParams();
+    appendRepeated(params, "eventId", options.eventIds);
     appendRepeated(params, "kind", options.kinds);
     if (options.include !== undefined) params.set("include", options.include);
-    if (options.limit !== undefined) params.set("limit", options.limit.toString());
+    if (options.limit !== undefined || options.eventIds !== undefined) params.set("limit", String(options.limit ?? options.eventIds!.length));
     const response = await this.request<{ readonly entries: readonly FoldLogEntry[] }>(
       `${this.workspacePath("events")}${params.size === 0 ? "" : `?${params}`}`,
     );
@@ -307,6 +346,40 @@ export class SuperBrainClient {
     });
   }
 
+  reasoningProviders(): Promise<{ readonly providers: readonly ReasoningProviderStatus[] }> { return this.request(this.workspacePath("reasoning/providers")); }
+
+  identity(): Promise<{ readonly principalId: string; readonly organizationId?: string; readonly workspaceId: string }> {
+    return this.request(this.workspacePath("identity"));
+  }
+
+  async transcriptRun(runId: string): Promise<TranscriptRunDetail | undefined> {
+    try { return await this.request(`${this.workspacePath("transcript-runs")}/${encodeURIComponent(runId)}`); }
+    catch (error) { if (error instanceof SuperBrainApiError && error.status === 404) return undefined; throw error; }
+  }
+
+  async memoryPage(options: { readonly limit?: number; readonly cursor?: string; readonly projectIds?: readonly string[]; readonly includeNeedsReview?: boolean } = {}): Promise<{ readonly memories: readonly PersonalMemory[]; readonly nextCursor?: string; readonly total: number }> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor !== undefined) params.set("cursor", options.cursor);
+    if (options.includeNeedsReview !== undefined) params.set("includeNeedsReview", String(options.includeNeedsReview));
+    appendRepeated(params, "projectId", options.projectIds);
+    const page = await this.request<{ memories: readonly RecalledMemory[]; nextCursor?: string; total: number }>(`${this.workspacePath("memories")}${params.size ? `?${params}` : ""}`);
+    return { ...page, memories: page.memories.map(({ memory }) => memory) };
+  }
+
+  contributeMemoryEvidence(memoryId: string, input: MemoryEvidenceContributionInput, options: MutationOptions = {}): Promise<{ readonly event: FoldEvent; readonly memory: PersonalMemory }> {
+    return this.request(`${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/evidence`, { method: "POST", body: JSON.stringify({ stamp: options.stamp ?? nextEventStamp(), input }) });
+  }
+
+  contributeMemoryCandidateEvidence(candidateId: string, input: Pick<MemoryEvidenceContributionInput, "evidence">, options: MutationOptions = {}): Promise<{ readonly event: FoldEvent; readonly candidate: MemoryCandidate }> {
+    return this.request(`${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/evidence`, { method: "POST", body: JSON.stringify({ stamp: options.stamp ?? nextEventStamp(), input }) });
+  }
+
+  memoryEvidencePage(memoryId: string, options: { readonly revision?: number; readonly offset?: number; readonly limit?: number } = {}): Promise<{ readonly memoryId: string; readonly revision: number; readonly evidence: readonly MemoryCandidateEvidence[]; readonly total: number; readonly nextOffset?: number }> {
+    const params = new URLSearchParams(Object.entries(options).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return this.request(`${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/evidence${params.size ? `?${params}` : ""}`);
+  }
+
   recallMemories(request: Omit<RecallRequest, "candidates"> = {}): Promise<{ readonly memories: readonly RecalledMemory[] }> {
     return this.request(this.workspacePath("memories/recall"), { method: "POST", body: JSON.stringify(request) });
   }
@@ -340,11 +413,14 @@ export class SuperBrainClient {
     readonly question: string;
     readonly actorId?: string;
     readonly providerId?: string;
+    readonly providerConfigRevision?: string;
     readonly memoryIds?: readonly string[];
-  }): Promise<ReasoningResponse> {
+    readonly memoryRefs?: readonly MemoryRevisionRef[];
+  }, options: RequestOptions = {}): Promise<ReasoningResponse> {
     const result = await this.request<ReasoningResponse>(
       this.workspacePath("reasoning/ask"),
       { method: "POST", body: JSON.stringify(request) },
+      options,
     );
     await this.recordRecallTelemetry(result.citations, request.question, "reasoning-answer");
     return result;
@@ -367,8 +443,9 @@ export class SuperBrainClient {
     }
   }
 
-  recordMemory(input: Omit<MemoryInput, "id"> & { readonly id?: string }, causedBy?: readonly string[]) {
-    const stamp = nextEventStamp();
+  recordMemory(input: Omit<MemoryInput, "id"> & { readonly id?: string }, causedBy?: readonly string[], options: MutationOptions = {}) {
+    if (options.stamp !== undefined && input.id === undefined) throw new TypeError("stable memory commands require an explicit memory ID");
+    const stamp = options.stamp ?? nextEventStamp();
     return this.request<{ readonly event: FoldEvent; readonly memory: PersonalMemory }>(this.workspacePath("memories"), {
       method: "POST",
       body: JSON.stringify({
@@ -379,20 +456,20 @@ export class SuperBrainClient {
     });
   }
 
-  reviseMemory(memoryId: string, patch: MemoryRevisionPatch, causedBy?: readonly string[]) {
+  reviseMemory(memoryId: string, patch: MemoryRevisionPatch, causedBy?: readonly string[], options: MutationOptions = {}) {
     return this.request<{ readonly event: FoldEvent; readonly memory: PersonalMemory }>(
       `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`,
       {
         method: "PATCH",
-        body: JSON.stringify({ stamp: nextEventStamp(), patch, ...(causedBy === undefined ? {} : { causedBy }) }),
+        body: JSON.stringify({ stamp: options.stamp ?? nextEventStamp(), patch, ...(causedBy === undefined ? {} : { causedBy }) }),
       },
     );
   }
 
-  forgetMemory(memoryId: string, reason: string, causedBy?: readonly string[]) {
+  forgetMemory(memoryId: string, reason: string, causedBy?: readonly string[], options: MutationOptions = {}) {
     return this.request(`${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}`, {
       method: "DELETE",
-      body: JSON.stringify({ stamp: nextEventStamp(), reason, ...(causedBy === undefined ? {} : { causedBy }) }),
+      body: JSON.stringify({ stamp: options.stamp ?? nextEventStamp(), reason, ...(causedBy === undefined ? {} : { causedBy }) }),
     });
   }
 
@@ -409,9 +486,11 @@ export class SuperBrainClient {
   proposeMemoryCandidate(
     input: Omit<MemoryCandidateInput, "id"> & { readonly id?: string },
     causedBy?: readonly string[],
+    options: MutationOptions = {},
   ) {
-    const stamp = nextEventStamp();
-    return this.request(this.workspacePath("memory-candidates"), {
+    if (options.stamp !== undefined && input.id === undefined) throw new TypeError("stable candidate commands require an explicit candidate ID");
+    const stamp = options.stamp ?? nextEventStamp();
+    return this.request<{ readonly event: FoldEvent; readonly candidate: MemoryCandidate }>(this.workspacePath("memory-candidates"), {
       method: "POST",
       body: JSON.stringify({
         stamp,
@@ -461,9 +540,10 @@ export class SuperBrainClient {
     return response.candidates;
   }
 
-  acceptMemoryCandidate(candidateId: string, options: { readonly memoryId?: string } = {}) {
-    const stamp = nextEventStamp();
-    const memoryStamp = nextEventStamp(stamp.t + 1);
+  acceptMemoryCandidate(candidateId: string, options: MemoryAcceptanceOptions = {}): Promise<MemoryCandidateAcceptanceResult> {
+    if ((options.stamp !== undefined && options.memoryId === undefined) || (options.memoryStamp !== undefined && options.stamp === undefined)) throw new TypeError("stable acceptance requires an explicit decision stamp and memory ID");
+    const stamp = options.stamp ?? nextEventStamp();
+    const memoryStamp = options.memoryStamp ?? (options.stamp === undefined ? nextEventStamp(stamp.t + 1) : { ...stamp, id: `${stamp.id}:memory`, t: stamp.t + 1 });
     return this.request(`${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/accept`, {
       method: "POST",
       body: JSON.stringify({ stamp, memoryStamp, memoryId: options.memoryId ?? uuidV7(memoryStamp.t) }),
@@ -495,10 +575,10 @@ export class SuperBrainClient {
     );
   }
 
-  rejectMemoryCandidate(candidateId: string, reason: string) {
+  rejectMemoryCandidate(candidateId: string, reason: string, options: MutationOptions = {}) {
     return this.request(`${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/reject`, {
       method: "POST",
-      body: JSON.stringify({ stamp: nextEventStamp(), reason }),
+      body: JSON.stringify({ stamp: options.stamp ?? nextEventStamp(), reason }),
     });
   }
 

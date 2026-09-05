@@ -1,6 +1,6 @@
 import { parseEvent, type FoldEvent, type JsonValue, type Provenance } from "@_89/fold";
 
-import { assertCanWritePersonalMemory, validateAccessContext } from "./access.js";
+import { assertCanWritePersonalMemory, memoryWriteAuthority, validateAccessContext } from "./access.js";
 import type {
   EpistemicEventContext,
   EpistemicEventStamp,
@@ -12,6 +12,7 @@ import type {
   MemoryRevisionPatch,
   PersonalMemory,
 } from "./types.js";
+import { memoryProjectIds, memoryValidity, memoryValidityJson, normalizeMemoryEvidence, parseMemorySourceCandidate, memoryRevision } from "./validity.js";
 import { assertUuidV7 } from "./uuidv7.js";
 
 export const MEMORY_NODE_KIND = "x.fold.personal-memory";
@@ -32,6 +33,8 @@ export type MemoryLogRecord =
     }
   | {
       readonly recordType: "revised";
+      readonly authority?: import("./types.js").MemoryWriteAuthority;
+      readonly baseRevision?: number;
       readonly actorId: string;
       readonly workspaceId: string;
       readonly spaceId?: string;
@@ -42,6 +45,8 @@ export type MemoryLogRecord =
     }
   | {
       readonly recordType: "forgotten";
+      readonly authority?: import("./types.js").MemoryWriteAuthority;
+      readonly baseRevision?: number;
       readonly actorId: string;
       readonly workspaceId: string;
       readonly spaceId?: string;
@@ -206,6 +211,8 @@ function memoryJson(memory: PersonalMemory): Record<string, JsonValue> {
     creatorId: memory.creatorId,
     audience: memory.audience,
     projectIds: [...memory.projectIds],
+    ...memoryValidityJson(memory, memory.projectIds),
+    ...(memory.sourceCandidate === undefined ? {} : { sourceCandidate: { ...memory.sourceCandidate } }),
     source: memory.source,
     summary: memory.summary,
     content: memory.content,
@@ -219,25 +226,13 @@ function memoryJson(memory: PersonalMemory): Record<string, JsonValue> {
 }
 
 function evidenceJson(evidence: readonly MemoryCandidateEvidence[]): JsonValue[] {
-  return evidence.map((item) => ({
-    eventId: item.eventId,
-    ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
-    ...(item.runId === undefined ? {} : { runId: item.runId }),
-    ...(item.turnId === undefined ? {} : { turnId: item.turnId }),
-  }));
+  return normalizeMemoryEvidence(evidence, 1_000).map((item) => ({ ...item }));
 }
-
-function validateEvidence(evidence: readonly MemoryCandidateEvidence[]): void {
-  for (const [index, item] of evidence.entries()) {
-    nonEmpty(item.eventId, `memory evidence ${index} eventId`, 500);
-    if (item.projectId !== undefined) nonEmpty(item.projectId, `memory evidence ${index} projectId`, 300);
-    if (item.runId !== undefined) nonEmpty(item.runId, `memory evidence ${index} runId`, 500);
-    if (item.turnId !== undefined) nonEmpty(item.turnId, `memory evidence ${index} turnId`, 500);
-  }
-}
+function validateEvidence(evidence: readonly MemoryCandidateEvidence[]): void { normalizeMemoryEvidence(evidence, 1_000); }
 
 function patchJson(patch: MemoryRevisionPatch): Record<string, JsonValue> {
   return {
+    ...Object.fromEntries(Object.entries(memoryValidityJson(patch)).filter(([key]) => key in patch)),
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: [...patch.tags] }),
@@ -276,7 +271,9 @@ export function makeMemoryRecordedEvent(
     ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
     creatorId: context.access.principalId,
     audience,
-    projectIds: normalizeMemoryProjectIds(input.projectIds),
+    projectIds: memoryProjectIds(input, normalizeMemoryProjectIds(input.projectIds)),
+    ...memoryValidity(input, input.projectIds),
+    ...(input.sourceCandidate === undefined ? {} : { sourceCandidate: parseMemorySourceCandidate(input.sourceCandidate)! }),
     source: input.source,
     summary: input.summary ?? summarizeMemoryContent(content),
     content,
@@ -318,7 +315,7 @@ export function makeMemoryRevisedEvent(
   if (stamp.t < memory.updatedAt) {
     throw new MemoryEventError("memory revision must not predate the current memory");
   }
-  const allowed = new Set(["summary", "content", "tags", "evidence"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "sourceMemoryRefs", "supersedes", "contradicts"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
@@ -327,6 +324,7 @@ export function makeMemoryRevisedEvent(
   }
   validateEvidence(patch.evidence ?? []);
   const normalizedPatch: MemoryRevisionPatch = {
+    ...Object.fromEntries(Object.entries(memoryValidity(patch)).filter(([key]) => key in patch)),
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: normalizeMemoryTags(patch.tags) }),
@@ -342,6 +340,8 @@ export function makeMemoryRevisedEvent(
     subject: `urn:fold-record:${stamp.id}`,
     after: {
       recordType: "revised",
+      authority: memoryWriteAuthority(memory, context.access),
+      baseRevision: memory.revision,
       actorId: context.access.principalId,
       workspaceId: context.access.workspaceId,
       ...(memory.spaceId === undefined ? {} : { spaceId: memory.spaceId }),
@@ -375,6 +375,8 @@ export function makeMemoryForgottenEvent(
     subject: `urn:fold-record:${stamp.id}`,
     after: {
       recordType: "forgotten",
+      authority: memoryWriteAuthority(memory, context.access),
+      baseRevision: memory.revision,
       actorId: context.access.principalId,
       workspaceId: context.access.workspaceId,
       ...(memory.spaceId === undefined ? {} : { spaceId: memory.spaceId }),
@@ -431,19 +433,7 @@ function parseEntities(value: JsonValue | undefined): MemoryEntityRef[] {
 }
 
 function parseEvidence(value: JsonValue | undefined): MemoryCandidateEvidence[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value)) throw new MemoryEventError("memory evidence must be an array");
-  const evidence = value.map((item, index) => {
-    const record = objectValue(item, `memory evidence ${index}`);
-    return {
-      eventId: stringValue(record.eventId, `memory evidence ${index} eventId`),
-      ...(record.projectId === undefined ? {} : { projectId: stringValue(record.projectId, `memory evidence ${index} projectId`) }),
-      ...(record.runId === undefined ? {} : { runId: stringValue(record.runId, `memory evidence ${index} runId`) }),
-      ...(record.turnId === undefined ? {} : { turnId: stringValue(record.turnId, `memory evidence ${index} turnId`) }),
-    };
-  });
-  validateEvidence(evidence);
-  return evidence;
+  return value === undefined ? undefined : normalizeMemoryEvidence(value, 1_000);
 }
 
 function optionalString(value: JsonValue | undefined, label: string): string | undefined {
@@ -514,10 +504,10 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
     workspaceId: stringValue(memory.workspaceId, "memory workspaceId"),
     ...(memory.spaceId === undefined ? {} : { spaceId: stringValue(memory.spaceId, "memory spaceId") }),
     creatorId: stringValue(memory.creatorId, "memory creatorId"),
+    ...memoryValidity(memory, memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds")),
+    ...(memory.sourceCandidate === undefined ? {} : { sourceCandidate: parseMemorySourceCandidate(memory.sourceCandidate)! }),
     audience: memoryAudience(memory.audience),
-    projectIds: normalizeMemoryProjectIds(
-      memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds"),
-    ),
+    projectIds: memoryProjectIds(memory, normalizeMemoryProjectIds(memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds"))),
     source,
     summary,
     content: memory.content,
@@ -532,12 +522,13 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
 
 function parsePatch(value: JsonValue | undefined): MemoryRevisionPatch {
   const patch = objectValue(value, "memory revision patch");
-  const allowed = new Set(["summary", "content", "tags", "evidence"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "sourceMemoryRefs", "supersedes", "contradicts"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
   if (Object.keys(patch).length === 0) throw new MemoryEventError("memory revision patch must not be empty");
   const parsed: MemoryRevisionPatch = {
+    ...Object.fromEntries(Object.entries(memoryValidity(patch)).filter(([key]) => key in patch)),
     ...(patch.summary === undefined
       ? {}
       : { summary: textValue(patch.summary, "summary") }),
@@ -599,6 +590,8 @@ export function memoryLogRecordsFromEvent(event: FoldEvent): MemoryLogRecord[] {
       assertUuidV7(memoryId, "memory id");
       records.push({
         recordType,
+        ...(payload.authority === undefined ? {} : { authority: parseAuthority(payload.authority) }),
+        ...(payload.baseRevision === undefined ? {} : { baseRevision: memoryRevision(payload.baseRevision) }),
         actorId,
         workspaceId,
         ...(spaceId === undefined ? {} : { spaceId }),
@@ -615,6 +608,8 @@ export function memoryLogRecordsFromEvent(event: FoldEvent): MemoryLogRecord[] {
       assertUuidV7(memoryId, "memory id");
       records.push({
         recordType,
+        ...(payload.authority === undefined ? {} : { authority: parseAuthority(payload.authority) }),
+        ...(payload.baseRevision === undefined ? {} : { baseRevision: memoryRevision(payload.baseRevision) }),
         actorId,
         workspaceId,
         ...(spaceId === undefined ? {} : { spaceId }),
@@ -642,4 +637,9 @@ export function forgottenMemoryFromRecord(
     forgottenAt: record.atMs,
     reason: record.reason,
   };
+}
+
+function parseAuthority(value: unknown): import("./types.js").MemoryWriteAuthority {
+  if (value !== "creator" && value !== "workspace-writer" && value !== "space-writer") throw new MemoryEventError("invalid memory write authority");
+  return value;
 }

@@ -38,3 +38,10 @@ The package performs no network, model, process, or database I/O. HTTP
 authentication, membership resolution, ranker implementation, IDs, clocks, and service
 transactions remain host responsibilities. See [`PROVENANCE.md`](./PROVENANCE.md)
 for the ownership boundary.
+
+The [memory contract](../../docs/PHASE2_MEMORY_CONTRACT.md) describes attributable
+shared corrections, bounded evidence contributions, accepted candidate snapshots,
+exact source revisions, and currentness. Direct lookup supports review; default
+recall omits unresolved, superseded, or otherwise stale claims. New contribution
+and revision events are validated in canonical order at the atomic command
+boundary, including source authorization and audience containment.

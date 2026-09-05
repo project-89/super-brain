@@ -1,6 +1,6 @@
 import { compareEventKeys, parseEvent, type FoldEvent, type JsonValue, type Provenance } from "@_89/fold";
 
-import { validateAccessContext } from "./access.js";
+import { assertCanWritePersonalMemory, validReplayMemoryAuthority, validateAccessContext } from "./access.js";
 import { normalizeMemoryProjectIds, normalizeMemoryTags } from "./events.js";
 import type {
   EpistemicEventContext,
@@ -13,6 +13,8 @@ import type {
   MemoryCandidateProjection,
   MemoryCandidateView,
 } from "./types.js";
+import { memoryEvidenceContributionsFromEvent } from "./contributions.js";
+import { memoryProjectIds, memoryValidity, memoryValidityJson, normalizeMemoryEvidence, mergeMemoryEvidence, memoryRevision } from "./validity.js";
 import { assertUuidV7 } from "./uuidv7.js";
 
 export const MEMORY_CANDIDATE_NODE_KIND = "x.fold.memory-candidate";
@@ -88,29 +90,8 @@ function optionalString(value: JsonValue | undefined, label: string): string | u
   return value === undefined ? undefined : stringValue(value, label);
 }
 
-function evidenceJson(evidence: readonly MemoryCandidateEvidence[]): JsonValue[] {
-  return evidence.map((item) => ({
-    eventId: item.eventId,
-    ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
-    ...(item.runId === undefined ? {} : { runId: item.runId }),
-    ...(item.turnId === undefined ? {} : { turnId: item.turnId }),
-  }));
-}
-
-function parseEvidence(value: JsonValue | undefined): MemoryCandidateEvidence[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new MemoryCandidateError("candidate evidence must be a non-empty array");
-  }
-  return value.map((item, index) => {
-    const record = objectValue(item, `candidate evidence ${index}`);
-    return {
-      eventId: stringValue(record.eventId, `candidate evidence ${index} eventId`),
-      ...(record.projectId === undefined ? {} : { projectId: stringValue(record.projectId, `candidate evidence ${index} projectId`) }),
-      ...(record.runId === undefined ? {} : { runId: stringValue(record.runId, `candidate evidence ${index} runId`) }),
-      ...(record.turnId === undefined ? {} : { turnId: stringValue(record.turnId, `candidate evidence ${index} turnId`) }),
-    };
-  });
-}
+function evidenceJson(evidence: readonly MemoryCandidateEvidence[]): JsonValue[] { return normalizeMemoryEvidence(evidence, 100, 1).map((item) => ({ ...item })); }
+function parseEvidence(value: JsonValue | undefined): MemoryCandidateEvidence[] { return normalizeMemoryEvidence(value, 100, 1); }
 
 function candidateJson(candidate: MemoryCandidate): Record<string, JsonValue> {
   return {
@@ -120,6 +101,7 @@ function candidateJson(candidate: MemoryCandidate): Record<string, JsonValue> {
     proposerId: candidate.proposerId,
     audience: candidate.audience,
     projectIds: [...candidate.projectIds],
+    ...memoryValidityJson(candidate, candidate.projectIds),
     source: candidate.source,
     summary: candidate.summary,
     content: candidate.content,
@@ -160,7 +142,10 @@ function parseCandidate(value: JsonValue | undefined): MemoryCandidate {
     ...(candidate.spaceId === undefined ? {} : { spaceId: stringValue(candidate.spaceId, "candidate spaceId") }),
     proposerId: stringValue(candidate.proposerId, "candidate proposerId"),
     audience: audienceValue(candidate.audience),
-    projectIds: normalizeMemoryProjectIds(stringArray(candidate.projectIds, "candidate projectIds")),
+    projectIds: memoryProjectIds(candidate, normalizeMemoryProjectIds(stringArray(candidate.projectIds, "candidate projectIds"))),
+    ...memoryValidity(candidate, normalizeMemoryProjectIds(stringArray(candidate.projectIds, "candidate projectIds"))),
+    revision: 0,
+    updatedAt: numberValue(candidate.proposedAt, "candidate proposedAt"),
     source: nonEmpty(stringValue(candidate.source, "candidate source"), "candidate source", 200),
     summary: nonEmpty(textValue(candidate.summary, "candidate summary"), "candidate summary", 500),
     content: candidate.content,
@@ -233,15 +218,20 @@ export function makeMemoryCandidateProposedEvent(
   boundedScore(input.salience, "candidate salience");
   nonEmpty(input.extractor.id, "candidate extractor id", 200);
   nonEmpty(input.extractor.version, "candidate extractor version", 100);
+  assertCanWritePersonalMemory({ workspaceId: context.access.workspaceId, creatorId: context.access.principalId, audience, ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }) }, context.access);
+  normalizeMemoryEvidence(input.evidence, 100, 1);
   const candidate: MemoryCandidate = {
     ...input,
     workspaceId: context.access.workspaceId,
     proposerId: context.access.principalId,
     audience,
-    projectIds: normalizeMemoryProjectIds(input.projectIds),
+    projectIds: memoryProjectIds(input, normalizeMemoryProjectIds(input.projectIds)),
+    ...memoryValidity(input, input.projectIds),
+    revision: 0,
     tags: normalizeMemoryTags(input.tags),
     entities: [...(input.entities ?? [])],
     proposedAt: stamp.t,
+    updatedAt: stamp.t,
     proposalEventId: stamp.id,
   };
   return makeEvent(context, stamp, {
@@ -254,6 +244,11 @@ export function makeMemoryCandidateProposedEvent(
   });
 }
 
+export function assertCanReviewMemoryCandidate(candidate: MemoryCandidate, access: EpistemicEventContext["access"]): void {
+  assertCanWritePersonalMemory({ ...candidate, creatorId: candidate.proposerId }, access);
+  if (candidate.audience === "workspace" && access.workspaceRole !== "owner" && access.workspaceRole !== "admin") throw new MemoryCandidateError("workspace candidate review requires an owner or admin role");
+}
+
 function makeDecisionEvent(
   context: EpistemicEventContext,
   stamp: EpistemicEventStamp,
@@ -264,15 +259,17 @@ function makeDecisionEvent(
   if (candidate.audience === "personal" && context.access.principalId !== candidate.proposerId) {
     throw new MemoryCandidateError("only the proposer may decide a personal memory candidate");
   }
+  assertCanReviewMemoryCandidate(candidate, context.access);
   const after: Record<string, JsonValue> = {
     recordType: decision.kind,
+    reviewAuthority: candidate.audience === "personal" ? "creator" : "workspace-reviewer",
     candidateId: candidate.id,
     actorId: context.access.principalId,
     workspaceId: candidate.workspaceId,
     ...(candidate.spaceId === undefined ? {} : { spaceId: candidate.spaceId }),
     audience: candidate.audience,
     atMs: stamp.t,
-    ...(decision.kind === "accepted" ? { memoryId: decision.memoryId } : { reason: decision.reason }),
+    ...(decision.kind === "accepted" ? { memoryId: decision.memoryId, candidateRevision: candidate.revision ?? 0 } : { reason: decision.reason }),
   };
   return makeEvent(context, stamp, {
     kind: `memory.candidate-${decision.kind}`,
@@ -335,8 +332,9 @@ export function memoryCandidateLogRecordsFromEvent(event: FoldEvent): CandidateL
       const workspaceId = stringValue(change.after.workspaceId, "candidate decision workspaceId");
       const spaceId = optionalString(change.after.spaceId, "candidate decision spaceId");
       const audience = audienceValue(change.after.audience);
+      if (change.after.reviewAuthority !== undefined && change.after.reviewAuthority !== (audience === "personal" ? "creator" : "workspace-reviewer")) throw new MemoryCandidateError("candidate review authority does not match audience");
       const decision: MemoryCandidateDecision = recordType === "accepted"
-        ? { ...base, kind: "accepted", memoryId: stringValue(change.after.memoryId, "candidate decision memoryId") }
+        ? { ...base, kind: "accepted", ...(change.after.candidateRevision === undefined ? {} : { candidateRevision: memoryRevision(change.after.candidateRevision) }), memoryId: stringValue(change.after.memoryId, "candidate decision memoryId") }
         : { ...base, kind: "rejected", reason: stringValue(change.after.reason, "candidate decision reason") };
       assertUuidV7(decision.candidateId, "candidate decision candidateId");
       if (decision.kind === "accepted") assertUuidV7(decision.memoryId, "candidate decision memoryId");
@@ -360,7 +358,8 @@ export function memoryCandidateLogRecordsFromEvent(event: FoldEvent): CandidateL
 
 export function validateMemoryCandidateEnvelope(event: FoldEvent): void {
   const records = memoryCandidateLogRecordsFromEvent(event);
-  const isCandidateEvent = event.kind.startsWith("memory.candidate-");
+  memoryEvidenceContributionsFromEvent(event);
+  const isCandidateEvent = event.kind.startsWith("memory.candidate-") && event.kind !== "memory.candidate-evidence-contributed";
   if (isCandidateEvent && (records.length !== 1 || event.changes.length !== 1)) {
     throw new MemoryCandidateError(`candidate event ${event.id} must contain exactly one candidate record`);
   }
@@ -373,6 +372,11 @@ export function rebuildMemoryCandidates(events: readonly FoldEvent[]): MemoryCan
   const candidates = new Map<string, MemoryCandidate>();
   const decisions = new Map<string, MemoryCandidateDecision>();
   for (const event of [...events].sort(compareEventKeys)) {
+    for (const contribution of memoryEvidenceContributionsFromEvent(event).filter(({ target }) => target === "candidate")) {
+      const candidate = candidates.get(contribution.targetId);
+      if (candidate === undefined || decisions.has(candidate.id) || (candidate.revision ?? 0) !== contribution.baseRevision || contribution.atMs < (candidate.updatedAt ?? candidate.proposedAt) || candidate.workspaceId !== contribution.workspaceId || candidate.spaceId !== contribution.spaceId || candidate.audience !== contribution.audience || !validReplayMemoryAuthority({ ...candidate, creatorId: candidate.proposerId }, contribution.actorId, contribution.authority)) throw new MemoryCandidateError("candidate evidence contribution does not match pending candidate revision or authority");
+      candidates.set(candidate.id, { ...candidate, revision: contribution.baseRevision + 1, updatedAt: contribution.atMs, evidence: mergeMemoryEvidence(candidate.evidence, contribution.evidence) });
+    }
     for (const record of memoryCandidateLogRecordsFromEvent(event)) {
       if (record.recordType === "proposed") {
         if (candidates.has(record.candidate.id)) throw new MemoryCandidateError(`candidate ${record.candidate.id} was proposed more than once`);
@@ -391,7 +395,9 @@ export function rebuildMemoryCandidates(events: readonly FoldEvent[]): MemoryCan
         ) {
           throw new MemoryCandidateError(`decision scope does not match candidate ${candidate.id}`);
         }
+        if (record.decision.kind === "accepted" && record.decision.candidateRevision !== undefined && record.decision.candidateRevision !== (candidate.revision ?? 0)) throw new MemoryCandidateError("accepted candidate evidence revision changed");
         decisions.set(candidate.id, record.decision);
+        candidates.set(candidate.id, { ...candidate, updatedAt: record.decision.atMs });
       }
     }
   }

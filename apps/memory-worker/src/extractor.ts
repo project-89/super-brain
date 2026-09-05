@@ -5,8 +5,25 @@ import type { TranscriptRun } from "@_89/fold-transcript";
 
 import type { ExtractedCandidate, VaultMessage } from "./types.js";
 
-export const RULE_EXTRACTOR = { kind: "rule", id: "durable-transcript-memory", version: "1" } as const;
-export const LIVE_EXTRACTOR = { kind: "rule", id: "live-structured-memory", version: "1" } as const;
+export const RULE_EXTRACTOR = { kind: "rule", id: "durable-transcript-memory", version: "2" } as const;
+export const LIVE_EXTRACTOR = { kind: "rule", id: "live-structured-memory", version: "2" } as const;
+
+/** Explicit v2 extractor contract: provenance locates a claim but is not its meaning.
+ * Unknown/custom extractor payloads require exact content equality. */
+export function extractedClaimContent(candidate: Pick<ExtractedCandidate, "content" | "source" | "extractor">): JsonValue {
+  const content = candidate.content;
+  if (content === null || typeof content !== "object" || Array.isArray(content)) return content;
+  if (candidate.extractor.kind !== "rule" || candidate.extractor.version !== "2") return content;
+  if (candidate.extractor.id === RULE_EXTRACTOR.id && candidate.source === "transcript-rule") {
+    const { runId: _run, turnId: _turn, ...claim } = content;
+    return claim;
+  }
+  if (candidate.extractor.id === LIVE_EXTRACTOR.id && ["live-human-decision", "live-reasoning-checkpoint"].includes(candidate.source)) {
+    const { evidence: _evidence, artifactId: _artifact, sessionId: _session, turnId: _turn, model: _model, runtime: _runtime, ...claim } = content;
+    return claim;
+  }
+  return content;
+}
 
 function decodeXml(value: string): string {
   return value
@@ -148,23 +165,31 @@ export function extractMemoryCandidates(
   run: TranscriptRun,
   runEventId: string,
   messages: readonly VaultMessage[],
-  maxCandidates = 25,
+  proposalBudget = 25,
 ): ExtractedCandidate[] {
-  if (!Number.isInteger(maxCandidates) || maxCandidates < 1 || maxCandidates > 500) {
-    throw new TypeError("maxCandidates must be an integer within [1, 500]");
+  if (!Number.isInteger(proposalBudget) || proposalBudget < 1 || proposalBudget > 500) {
+    throw new TypeError("proposalBudget must be an integer within [1, 500]");
   }
   const candidates: ExtractedCandidate[] = [];
-  const summaries = new Set<string>();
+  // Budgets govern job dispatch, never how much of the source is examined.
+  // Scope/evidence consolidation happens once, at the worker boundary.
   for (const message of messages) {
+    if (message.role === "tool") {
+      if (message.result === undefined || !/\b(test|lint|build|check|verify|error|fail)\b/i.test(`${message.toolName ?? ""} ${message.text}`)) continue;
+      const projectId = projectFor(run, message.at);
+      const summary = `${message.toolName ?? "Tool"} verification result: ${message.result}. ${message.text.replace(/\s+/g, " ").trim()}`.slice(0, 500);
+      candidates.push({
+        id: deterministicCandidateId(timestampFor(run, message), `${RULE_EXTRACTOR.version}\0tool\0${run.id}\0${message.turnId}\0${message.nativeId ?? ""}\0${summary}`),
+        projectIds: projectId === undefined ? [] : [projectId], source: "transcript-verification",
+        summary, content: { result: message.result, excerpt: message.text.slice(0, 2_000), taskAcceptance: "unknown" },
+        tags: ["verification", message.result], evidence: evidence(run, runEventId, message),
+        confidence: 0.7, salience: message.result === "failure" ? 0.8 : 0.5, extractor: RULE_EXTRACTOR,
+      });
+      continue;
+    }
     const extracted = structuredObservations(run, runEventId, message);
     const candidatesForMessage = extracted.length > 0 ? extracted : durableStatements(run, runEventId, message);
-    for (const candidate of candidatesForMessage) {
-      const key = candidate.summary.toLocaleLowerCase().replace(/\s+/g, " ");
-      if (summaries.has(key)) continue;
-      summaries.add(key);
-      candidates.push(candidate);
-      if (candidates.length >= maxCandidates) return candidates;
-    }
+    candidates.push(...candidatesForMessage);
   }
   return candidates;
 }

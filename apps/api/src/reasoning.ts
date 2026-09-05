@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { JsonValue } from "@_89/fold";
 import type { SteeringSnapshot } from "@_89/fold-sdk";
 import { z } from "zod";
@@ -7,6 +8,7 @@ export type ReasoningProviderKind = "extractive" | "model";
 export interface ReasoningProviderDescriptor {
   readonly id: string;
   readonly kind: ReasoningProviderKind;
+  readonly configRevision?: string;
   readonly provider?: "local" | "gemini" | "claude" | "codex" | "custom";
   readonly model?: string;
 }
@@ -27,6 +29,7 @@ export interface ReasoningEvidence {
 
 export interface ReasoningProviderRequest {
   readonly question: string;
+  readonly signal?: AbortSignal;
   readonly evidence: readonly ReasoningEvidence[];
   readonly steering?: SteeringSnapshot;
 }
@@ -47,7 +50,7 @@ function compactText(value: JsonValue): string {
 }
 
 export class LocalEvidenceReasoner implements ReasoningProvider {
-  readonly descriptor = { id: "local-evidence-v1", kind: "extractive", provider: "local" } as const;
+  readonly descriptor = { configRevision: "local-evidence-v1:exact-revisions-v2", id: "local-evidence-v1", kind: "extractive", provider: "local" } as const;
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
     const evidence = request.evidence.slice(0, 3);
@@ -142,7 +145,7 @@ export class GeminiReasoner extends NativeModelReasoner {
   readonly descriptor: ReasoningProviderDescriptor;
   constructor(options: NativeReasonerOptions) {
     super(options);
-    this.descriptor = { id: `gemini:${this.model}`, kind: "model", provider: "gemini", model: this.model };
+    this.descriptor = { configRevision: createHash("sha256").update(JSON.stringify(["memory-answer-v2", "gemini", this.model, this.timeoutMs])).digest("hex"), id: `gemini:${this.model}`, kind: "model", provider: "gemini", model: this.model };
   }
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
@@ -151,7 +154,7 @@ export class GeminiReasoner extends NativeModelReasoner {
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: request.signal === undefined ? AbortSignal.timeout(this.timeoutMs) : AbortSignal.any([request.signal, AbortSignal.timeout(this.timeoutMs)]),
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: modelPrompt(request) }] }],
           generationConfig: { responseMimeType: "application/json", responseJsonSchema: resultJsonSchema },
@@ -169,14 +172,14 @@ export class CodexReasoner extends NativeModelReasoner {
   readonly descriptor: ReasoningProviderDescriptor;
   constructor(options: NativeReasonerOptions) {
     super(options);
-    this.descriptor = { id: `codex:${this.model}`, kind: "model", provider: "codex", model: this.model };
+    this.descriptor = { configRevision: createHash("sha256").update(JSON.stringify(["memory-answer-v2", "codex", this.model, this.timeoutMs])).digest("hex"), id: `codex:${this.model}`, kind: "model", provider: "codex", model: this.model };
   }
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
     const response = await this.fetchImpl("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { "authorization": `Bearer ${this.apiKey}`, "content-type": "application/json" },
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: request.signal === undefined ? AbortSignal.timeout(this.timeoutMs) : AbortSignal.any([request.signal, AbortSignal.timeout(this.timeoutMs)]),
       body: JSON.stringify({
         model: this.model,
         input: modelPrompt(request),
@@ -197,14 +200,14 @@ export class ClaudeReasoner extends NativeModelReasoner {
   readonly descriptor: ReasoningProviderDescriptor;
   constructor(options: NativeReasonerOptions) {
     super(options);
-    this.descriptor = { id: `claude:${this.model}`, kind: "model", provider: "claude", model: this.model };
+    this.descriptor = { configRevision: createHash("sha256").update(JSON.stringify(["memory-answer-v2", "claude", this.model, this.timeoutMs])).digest("hex"), id: `claude:${this.model}`, kind: "model", provider: "claude", model: this.model };
   }
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
     const response = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "anthropic-version": "2023-06-01", "content-type": "application/json", "x-api-key": this.apiKey },
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: request.signal === undefined ? AbortSignal.timeout(this.timeoutMs) : AbortSignal.any([request.signal, AbortSignal.timeout(this.timeoutMs)]),
       body: JSON.stringify({
         model: this.model,
         max_tokens: 4_096,
@@ -290,7 +293,7 @@ export class HttpModelReasoner implements ReasoningProvider {
       throw new TypeError("reasoning provider input budget must be an integer within [1000, 1000000]");
     }
     this.fetchImpl = options.fetch ?? fetch;
-    this.descriptor = { id: `http-model:${this.model}`, kind: "model", provider: "custom", model: this.model };
+    this.descriptor = { configRevision: createHash("sha256").update(JSON.stringify(["memory-answer-v2", this.url, this.model, this.timeoutMs, this.maxEvidence, this.maxInputCharacters])).digest("hex"), id: `http-model:${this.model}`, kind: "model", provider: "custom", model: this.model };
   }
 
   async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
@@ -308,7 +311,7 @@ export class HttpModelReasoner implements ReasoningProvider {
     const response = await this.fetchImpl(this.url, {
       method: "POST",
       headers,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: request.signal === undefined ? AbortSignal.timeout(this.timeoutMs) : AbortSignal.any([request.signal, AbortSignal.timeout(this.timeoutMs)]),
       body: JSON.stringify({
         model: this.model,
         question: request.question,

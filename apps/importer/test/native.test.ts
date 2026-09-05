@@ -79,3 +79,19 @@ it("keeps v1 Claude implicit-turn identity when string-only assistant metadata w
   const current = new NativeTranscriptNormalizer("claude-code", "run", { parserVersion: "2" });
   expect(records.map((record) => current.push(record).turn?.id)).toEqual(["claude-code:run:turn:0", "claude-code:run:turn:1"]);
 });
+
+it("retains a checksum-only metadata addition without swallowing same-parser chunk changes", async () => {
+  const { deliverTranscriptBundle } = await import("../src/index.js");
+  const root = await mkdtemp(join(tmpdir(), "native-checksum-migration-"));
+  const path = join(root, "legacy.jsonl");
+  await writeFile(path, JSON.stringify({ type: "response_item", payload: { type: "function_call_output", output: "done", call_id: "call" } }));
+  const { bundle } = await parseCodexTranscript(path);
+  const updated = { ...bundle, artifact: { ...bundle.artifact, storedSha256: "a".repeat(64) } };
+  const options = { apiUrl: "http://127.0.0.1:1", workspaceId: "workspace-a", bearerToken: "test", maxAttempts: 1,
+    fetcher: async (_url: string | URL | Request, init?: RequestInit) => init?.method === "POST"
+      ? new Response(JSON.stringify({ error: { code: "conflict", message: "immutable artifact" } }), { status: 409 })
+      : new Response(JSON.stringify({ run: bundle.run, artifact: bundle.artifact, chunks: bundle.chunks, projects: bundle.projects }), { status: 200 }) };
+  expect(await deliverTranscriptBundle(updated, options)).toMatchObject({ interpretation: "retained-existing", imported: false });
+  const changed = { ...updated, chunks: updated.chunks.map((chunk) => ({ ...chunk, actions: chunk.actions.map((action) => ({ ...action, status: "completed" as const })) })) };
+  await expect(deliverTranscriptBundle(changed, options)).rejects.toMatchObject({ status: 409 });
+});

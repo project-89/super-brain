@@ -20,7 +20,27 @@ export interface MemoryEntityRef {
 
 export type MemoryAudience = "personal" | "workspace";
 
-export interface PersonalMemory {
+export type MemoryApplicability =
+  | { readonly kind: "unresolved" }
+  | { readonly kind: "global" }
+  | { readonly kind: "projects"; readonly projectIds: readonly string[] };
+export interface MemoryRevisionRef { readonly memoryId: string; readonly revision: number }
+export interface MemoryCurrentness { readonly status: "current" | "needs-review" | "superseded"; readonly reasons: readonly string[] }
+export interface MemorySourceCandidateRef { readonly candidateId: string; readonly revision: number; readonly decisionEventId: string }
+export interface MemoryValidityInput {
+  readonly applicability?: MemoryApplicability;
+  readonly sourceMemoryRefs?: readonly MemoryRevisionRef[];
+  readonly supersedes?: readonly MemoryRevisionRef[];
+  readonly contradicts?: readonly MemoryRevisionRef[];
+}
+export interface MemoryEvidenceContributionInput { readonly evidence: readonly MemoryCandidateEvidence[]; readonly expectedRevision?: number }
+/** Attested at the authorized command boundary; replay retains the actor and scope. */
+export type MemoryWriteAuthority = "creator" | "workspace-writer" | "space-writer";
+
+
+export interface PersonalMemory extends MemoryValidityInput {
+  readonly currentness?: MemoryCurrentness;
+  readonly sourceCandidate?: MemorySourceCandidateRef;
   readonly id: string;
   readonly workspaceId: string;
   readonly spaceId?: string;
@@ -38,7 +58,8 @@ export interface PersonalMemory {
   readonly revision: number;
 }
 
-export interface MemoryInput {
+export interface MemoryInput extends MemoryValidityInput {
+  readonly sourceCandidate?: MemorySourceCandidateRef;
   readonly id: string;
   readonly spaceId?: string;
   readonly audience?: MemoryAudience;
@@ -51,7 +72,7 @@ export interface MemoryInput {
   readonly evidence?: readonly MemoryCandidateEvidence[];
 }
 
-export interface MemoryRevisionPatch {
+export interface MemoryRevisionPatch extends MemoryValidityInput {
   readonly summary?: string;
   readonly content?: JsonValue;
   readonly tags?: readonly string[];
@@ -69,6 +90,7 @@ export interface ForgottenMemory {
 }
 
 export interface MemoryProjection {
+  readonly revisions?: ReadonlyMap<string, ReadonlyMap<number, PersonalMemory>>;
   readonly memories: ReadonlyMap<string, PersonalMemory>;
   readonly forgotten: ReadonlyMap<string, ForgottenMemory>;
 }
@@ -93,6 +115,7 @@ export interface SemanticMemoryCandidate {
 }
 
 export interface RecallRequest {
+  readonly includeNeedsReview?: boolean;
   readonly scope?: RecallScope;
   readonly tags?: readonly string[];
   readonly sources?: readonly string[];
@@ -114,6 +137,7 @@ export interface MemoryCaptureIdentity extends Readonly<Record<string, string>> 
 }
 
 export interface MemoryCandidateEvidence {
+  readonly relation?: "supports" | "opposes";
   readonly eventId: string;
   readonly projectId?: string;
   readonly runId?: string;
@@ -126,7 +150,7 @@ export interface MemoryCandidateExtractor {
   readonly version: string;
 }
 
-export interface MemoryCandidateInput {
+export interface MemoryCandidateInput extends MemoryValidityInput {
   readonly id: string;
   readonly spaceId?: string;
   readonly audience?: MemoryAudience;
@@ -149,6 +173,8 @@ export interface MemoryCandidate extends Omit<MemoryCandidateInput, "audience" |
   readonly projectIds: readonly string[];
   readonly tags: readonly string[];
   readonly entities: readonly MemoryEntityRef[];
+  readonly revision?: number;
+  readonly updatedAt?: number;
   readonly proposedAt: number;
   readonly proposalEventId: string;
 }
@@ -160,6 +186,7 @@ export type MemoryCandidateDecision =
       readonly actorId: string;
       readonly atMs: number;
       readonly eventId: string;
+      readonly candidateRevision?: number;
       readonly memoryId: string;
     }
   | {

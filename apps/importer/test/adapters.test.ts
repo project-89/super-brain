@@ -192,14 +192,17 @@ describe("transcript source adapters", () => {
     const vault = await mkdtemp(join(tmpdir(), "fold-vault-encrypted-"));
     const keyFile = join(vault, "keys", "vault.key");
     const { key } = await ensureVaultKey(keyFile);
-    await storeRedactedArtifact(parsed, vault, { encryptionKey: key });
+    const firstStored = await storeRedactedArtifact(parsed, vault, { encryptionKey: key });
     const target = join(vault, "claude-code", parsed.bundle.artifact.sha256.slice(0, 2), `${parsed.bundle.artifact.sha256}.jsonl.enc`);
     const encrypted = await readFile(target, "utf8");
     expect(encrypted).not.toContain("durable choice");
     expect(decryptVaultLine(encrypted.trim(), key)).toContain("durable choice");
     expect(decryptVaultLine(encrypted.trim(), key)).toContain("[REDACTED]");
     expect((await stat(keyFile)).mode & 0o777).toBe(0o600);
-    await expect(storeRedactedArtifact(parsed, vault, { encryptionKey: key })).resolves.toBeDefined();
+    const retained = await storeRedactedArtifact(parsed, vault, { encryptionKey: key });
+    expect(retained.bundle.artifact.storedSha256).toBe(firstStored.bundle.artifact.storedSha256);
+    expect(retained.bundle.artifact.storedSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(await readFile(target, "utf8")).toBe(encrypted);
     await expect(() => decryptVaultLine(encrypted.trim(), new Uint8Array(32))).toThrow(/authentication/);
   });
 

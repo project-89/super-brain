@@ -127,10 +127,21 @@ const memoryCandidateEvidenceSchema = z.object({
   projectId: z.string().trim().min(1).max(300).optional(),
   runId: z.string().trim().min(1).max(500).optional(),
   turnId: z.string().trim().min(1).max(500).optional(),
+  relation: z.enum(["supports", "opposes"]).optional(),
 }).strict();
+
+const memoryRevisionRefSchema = z.object({ memoryId: z.string().min(1).max(300), revision: z.number().int().nonnegative().safe() }).strict();
+const memoryApplicabilitySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("unresolved") }).strict(),
+  z.object({ kind: z.literal("global") }).strict(),
+  z.object({ kind: z.literal("projects"), projectIds: z.array(z.string().trim().min(1).max(300)).min(1).max(100) }).strict(),
+]);
+const memoryValidityFields = { applicability: memoryApplicabilitySchema.optional(), sourceMemoryRefs: z.array(memoryRevisionRefSchema).max(100).optional(), supersedes: z.array(memoryRevisionRefSchema).max(100).optional(), contradicts: z.array(memoryRevisionRefSchema).max(100).optional() };
+const memoryContributionSchema = z.object({ stamp: stampSchema, input: z.object({ evidence: z.array(memoryCandidateEvidenceSchema).min(1).max(100), expectedRevision: z.number().int().nonnegative().safe().optional() }).strict() }).strict();
 
 const memoryInputSchema = z
   .object({
+    ...memoryValidityFields,
     id: z.string().min(1),
     spaceId: z.string().min(1).optional(),
     audience: z.enum(["personal", "workspace"]).optional(),
@@ -146,6 +157,7 @@ const memoryInputSchema = z
 
 const memoryPatchSchema = z
   .object({
+    ...memoryValidityFields,
     summary: z.string().max(500).optional(),
     content: jsonValueSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
@@ -154,6 +166,7 @@ const memoryPatchSchema = z
   .strict();
 
 const memoryCandidateInputSchema = z.object({
+  ...memoryValidityFields,
   id: z.string().min(1),
   spaceId: z.string().trim().min(1).max(300).optional(),
   audience: z.enum(["personal", "workspace"]).optional(),
@@ -182,6 +195,7 @@ const recallScopeSchema = z.discriminatedUnion("kind", [
 const recallRequestSchema = z
   .object({
     scope: recallScopeSchema.optional(),
+    includeNeedsReview: z.boolean().optional(),
     tags: z.array(z.string().min(1)).optional(),
     sources: z.array(z.string().min(1)).optional(),
     projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
@@ -212,6 +226,8 @@ const reasoningRequestSchema = recallRequestSchema
     question: z.string().trim().min(1).max(2_000),
     actorId: z.string().trim().min(1).max(300).optional(),
     providerId: z.string().trim().min(1).max(300).optional(),
+    providerConfigRevision: z.string().trim().min(1).max(300).optional(),
+    memoryRefs: z.array(memoryRevisionRefSchema).min(1).max(10).optional(),
     memoryIds: z.array(z.string().trim().min(1).max(300)).min(1).max(10).optional(),
     limit: z.number().int().min(1).max(10).optional(),
   })
@@ -669,6 +685,8 @@ function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof TrajectoryTaskUnavailableError) {
     return new ApiHttpError(404, "trajectory_task_unavailable", "Trajectory task is unavailable");
   }
+  if (error instanceof Error && error.name === "EpistemicAccessError") return new ApiHttpError(403, "access_denied", "Memory write access denied");
+  if (error instanceof Error && error.name === "MemoryProjectionError") return new ApiHttpError(409, "fold_conflict", "Memory projection invariants would be violated");
   if (error instanceof FoldSdkAccessError) {
     return new ApiHttpError(403, "access_denied", "Capture scope access denied");
   }
@@ -778,7 +796,7 @@ function assertGenericAppendRoute(event: FoldEvent): void {
   if (
     event.kind.startsWith("intention.") ||
     event.kind.startsWith("transcript.") ||
-    event.kind.startsWith("memory.candidate-") ||
+    event.kind.startsWith("memory.") ||
     event.changes.some(
       (change) => "nodeKind" in change &&
         (change.nodeKind === INTENTION_EVENT_NODE_KIND ||
@@ -1043,6 +1061,7 @@ function parsedRecallRequest(input: unknown): RecallRequest {
   const parsed = recallRequestSchema.parse(input);
   return {
     ...(parsed.scope === undefined ? {} : { scope: parsed.scope }),
+    ...(parsed.includeNeedsReview === undefined ? {} : { includeNeedsReview: parsed.includeNeedsReview }),
     ...(parsed.tags === undefined ? {} : { tags: parsed.tags }),
     ...(parsed.sources === undefined ? {} : { sources: parsed.sources }),
     ...(parsed.projectIds === undefined ? {} : { projectIds: parsed.projectIds }),
@@ -1057,17 +1076,23 @@ function parsedRankedRecallRequest(input: unknown): RankedMemoryRecallRequest {
   return rankedRecallRequestSchema.parse(input) as RankedMemoryRecallRequest;
 }
 
+function parsedValidity(input: z.infer<typeof memoryPatchSchema>) {
+  return { ...(input.applicability === undefined ? {} : { applicability: input.applicability }), ...(input.sourceMemoryRefs === undefined ? {} : { sourceMemoryRefs: input.sourceMemoryRefs }), ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }), ...(input.contradicts === undefined ? {} : { contradicts: input.contradicts }) };
+}
+
 function parsedMemoryEvidence(input: z.infer<typeof memoryCandidateEvidenceSchema>) {
   return {
     eventId: input.eventId,
     ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
     ...(input.runId === undefined ? {} : { runId: input.runId }),
     ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+    ...(input.relation === undefined ? {} : { relation: input.relation }),
   };
 }
 
 function parsedMemoryInput(input: z.infer<typeof memoryInputSchema>): MemoryInput {
   return {
+    ...parsedValidity(input),
     id: input.id,
     source: input.source,
     ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
@@ -1087,6 +1112,7 @@ function parsedMemoryCandidateInput(input: z.infer<typeof memoryCandidateInputSc
 
 function parsedMemoryPatch(input: z.infer<typeof memoryPatchSchema>): MemoryRevisionPatch {
   return {
+    ...parsedValidity(input),
     ...(input.summary === undefined ? {} : { summary: input.summary }),
     ...(input.content === undefined ? {} : { content: input.content }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
@@ -1114,6 +1140,7 @@ function recallFromUrl(url: URL): RecallRequest {
   }
   const limit = finiteQueryNumber(url, "limit");
   return parsedRecallRequest({
+    ...(url.searchParams.has("includeNeedsReview") ? { includeNeedsReview: url.searchParams.get("includeNeedsReview") === "true" } : {}),
     ...(scope === undefined ? {} : { scope }),
     ...(url.searchParams.has("tag") ? { tags: url.searchParams.getAll("tag") } : {}),
     ...(url.searchParams.has("source") ? { sources: url.searchParams.getAll("source") } : {}),
@@ -1411,6 +1438,10 @@ async function handleRequest(
   if (access === undefined) {
     throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
   }
+  if (resource === "identity" && resourceSegments.length === 1 && method === "GET") {
+    sendJson(response, 200, { principalId: subject.principalId, organizationId: access.organizationId, workspaceId: access.workspaceId });
+    return;
+  }
   const tenant = { organizationId: access.organizationId, workspaceId };
   const sdk = await dependencies.sdks.sdkFor(tenant);
   if (access.platformDataAccess !== true) {
@@ -1594,6 +1625,10 @@ async function handleRequest(
         ...(cursor === undefined ? {} : { cursor }),
         ...(url.searchParams.has("kind") ? { kinds: url.searchParams.getAll("kind") } : {}),
       });
+      if (url.searchParams.has("eventId")) {
+        const ids = new Set(z.array(z.string().trim().min(1).max(500)).min(1).max(1000).parse(url.searchParams.getAll("eventId")));
+        entries = entries.filter(({ event }) => ids.has(event.id));
+      }
       const identityFilters = {
         sessionId: "session",
         runId: "run",
@@ -1888,10 +1923,13 @@ async function handleRequest(
   if (resource === "reasoning" && resourceId === "ask" && resourceSegments.length === 2) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const body = reasoningRequestSchema.parse(await readJsonBody(request, maxBodyBytes));
-    const explicitMemoryIds = body.memoryIds === undefined ? undefined : [...new Set(body.memoryIds)];
+    if (body.memoryIds !== undefined && body.memoryRefs !== undefined) throw new ApiHttpError(400, "invalid_request", "Use memoryRefs or memoryIds, not both");
+    if (body.memoryRefs !== undefined && new Set(body.memoryRefs.map(({ memoryId }) => memoryId)).size !== body.memoryRefs.length) throw new ApiHttpError(400, "invalid_request", "memoryRefs must name each memory once");
+    const explicitMemoryIds = body.memoryRefs?.map(({ memoryId }) => memoryId) ?? (body.memoryIds === undefined ? undefined : [...new Set(body.memoryIds)]);
     const ranked = explicitMemoryIds === undefined
       ? await sdk.rankMemories(access, {
           query: body.question,
+          ...(body.includeNeedsReview === undefined ? {} : { includeNeedsReview: body.includeNeedsReview }),
           ...(body.scope === undefined ? {} : { scope: body.scope }),
           ...(body.tags === undefined ? {} : { tags: body.tags }),
           ...(body.sources === undefined ? {} : { sources: body.sources }),
@@ -1901,10 +1939,11 @@ async function handleRequest(
           limit: body.limit ?? 5,
         }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker())
       : await (async () => {
-          const memories = await Promise.all(explicitMemoryIds.map((memoryId) => sdk.memoryById(access, memoryId)));
+          const memories = body.memoryRefs !== undefined ? await sdk.memoryRevisions(access, body.memoryRefs, body.includeNeedsReview === true) : await Promise.all(explicitMemoryIds.map((memoryId) => sdk.memoryById(access, memoryId)));
           if (memories.some((memory) => memory === undefined)) {
             throw new ApiHttpError(404, "reasoning_memory_unavailable", "One or more reasoning memories are unavailable");
           }
+          if (body.includeNeedsReview !== true && memories.some((memory) => memory?.currentness?.status !== "current")) throw new ApiHttpError(409, "memory_needs_review", "Reasoning requires current memory revisions");
           return {
             memories: memories.map((memory) => ({ memory: memory!, score: undefined })),
             ranking: { id: "explicit-memory-set-v1", kind: "explicit" as const, corpusSize: memories.length },
@@ -1912,6 +1951,7 @@ async function handleRequest(
         })();
     const evidence = ranked.memories.map(({ memory, score }) => ({
       memoryId: memory.id,
+      revision: memory.revision,
       source: memory.source,
       summary: memory.summary,
       content: memory.content,
@@ -1932,20 +1972,26 @@ async function handleRequest(
     } catch (error) {
       throw new ApiHttpError(400, "reasoning_provider_unavailable", error instanceof Error ? error.message : "Reasoning provider is unavailable");
     }
-    const result = validateReasoningResult(
-      await reasoner.answer({
-        question: body.question,
-        evidence,
-        ...(steering === undefined ? {} : { steering }),
-      }),
-      evidence,
-    );
+    if (body.providerConfigRevision !== undefined && reasoner.descriptor.configRevision !== body.providerConfigRevision) throw new ApiHttpError(409, "reasoning_config_changed", "Reasoning provider configuration changed");
+    const providerController = new AbortController();
+    const abortProvider = () => { if (!response.writableEnded) providerController.abort(new Error("reasoning caller disconnected")); };
+    response.once("close", abortProvider);
+    if (response.destroyed) abortProvider();
+    let result;
+    try {
+      result = validateReasoningResult(await reasoner.answer({ question: body.question, evidence, signal: providerController.signal, ...(steering === undefined ? {} : { steering }) }), evidence);
+    } finally { response.removeListener("close", abortProvider); }
+    const freshAccess = organizationId === undefined ? await dependencies.memberships.resolveLegacyAccess(subject, workspaceId) : await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
+    if (freshAccess === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+    await sdk.memoryRevisions(freshAccess, evidence.map(({ memoryId, revision }) => ({ memoryId, revision })), body.includeNeedsReview === true);
     sendJson(response, 200, {
       ...result,
+      citationRefs: result.citations.map((memoryId) => ({ memoryId, revision: evidence.find((item) => item.memoryId === memoryId)!.revision })),
       provider: reasoner.descriptor,
       ranking: ranked.ranking,
-      evidence: evidence.map(({ memoryId, source, summary, score }) => ({
+      evidence: evidence.map(({ memoryId, revision, source, summary, score }) => ({
         memoryId,
+        revision,
         source,
         summary,
         ...(score === undefined ? {} : { score }),
@@ -2092,9 +2138,7 @@ async function handleRequest(
         throw new ApiHttpError(400, "candidate_batch_scope_mismatch", "Every candidate must match the batch audience and space");
       }
     }
-    if (body.audience === "workspace" && !canSteer(access)) {
-      throw new ApiHttpError(403, "shared_memory_review_access_denied", "Workspace memory review requires an owner or admin role");
-    }
+    if (body.audience === "workspace" && !canSteer(access)) throw new ApiHttpError(403, "shared_memory_review_access_denied", "Workspace memory review requires an owner or admin role");
     const accepted = await sdk.acceptMemoryCandidates(
       memoryContext(subject, access, body.spaceId, body.audience),
       body.acceptances.map((acceptance) => ({
@@ -2111,22 +2155,20 @@ async function handleRequest(
   if (resource === "memory-candidates" && resourceId !== undefined && resourceSegments.length === 3) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const action = decodeSegment(resourceSegments[2]!, "candidate action");
-    if (action !== "accept" && action !== "reject") {
+    if (action !== "accept" && action !== "reject" && action !== "evidence") {
       throw new ApiHttpError(404, "not_found", "Route not found");
     }
     const view = (await sdk.memoryCandidates(access)).find(({ candidate }) => candidate.id === resourceId);
     if (view === undefined) {
       throw new ApiHttpError(404, "memory_candidate_unavailable", "Memory candidate is unavailable");
     }
-    if (view.candidate.audience === "workspace" && !canSteer(access)) {
-      throw new ApiHttpError(
-        403,
-        "shared_memory_review_access_denied",
-        "Workspace memory review requires an owner or admin role",
-      );
-    }
+    if (action !== "evidence" && view.candidate.audience === "workspace" && !canSteer(access)) throw new ApiHttpError(403, "shared_memory_review_access_denied", "Workspace memory review requires an owner or admin role");
     const context = memoryContext(subject, access, view.candidate.spaceId, view.candidate.audience);
-    if (action === "accept") {
+    if (action === "evidence") {
+      const body = memoryContributionSchema.parse(await readJsonBody(request, maxBodyBytes));
+      if (body.input.expectedRevision !== undefined) throw new ApiHttpError(400, "invalid_request", "Pending candidate contributions do not accept a memory revision");
+      sendJson(response, 201, await sdk.contributeMemoryCandidateEvidence(context, body.stamp, resourceId, { evidence: body.input.evidence.map(parsedMemoryEvidence) }));
+    } else if (action === "accept") {
       const body = memoryCandidateAcceptSchema.parse(await readJsonBody(request, maxBodyBytes));
       sendJson(response, 201, await sdk.acceptMemoryCandidate(
         context,
@@ -2190,13 +2232,6 @@ async function handleRequest(
     if (method === "POST") {
       const body = memoryRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
       const input = parsedMemoryInput(body.input);
-      if (input.audience === "workspace" && !canSteer(access)) {
-        throw new ApiHttpError(
-          403,
-          "shared_memory_access_denied",
-          "Workspace memory writes require an owner or admin role",
-        );
-      }
       const result = await sdk.recordMemory(
         memoryContext(subject, access, input.spaceId, input.audience),
         body.stamp,
@@ -2211,6 +2246,19 @@ async function handleRequest(
 
   if (resource === "memories" && resourceId !== undefined && resourceSegments.length === 3) {
     const action = decodeSegment(resourceSegments[2]!, "memory action");
+    if (action === "evidence") {
+      if (method === "GET") {
+        const options = z.object({ revision: z.coerce.number().int().nonnegative().safe().optional(), offset: z.coerce.number().int().nonnegative().safe().optional(), limit: z.coerce.number().int().min(1).max(100).optional() }).strict().parse(Object.fromEntries(url.searchParams));
+        sendJson(response, 200, await sdk.memoryEvidencePage(access, resourceId, { ...(options.revision === undefined ? {} : { revision: options.revision }), ...(options.offset === undefined ? {} : { offset: options.offset }), ...(options.limit === undefined ? {} : { limit: options.limit }) }));
+        return;
+      }
+      if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+      const scope = await sdk.memoryMutationScope(access, resourceId);
+      if (scope === undefined) throw new PersonalMemoryUnavailableError(resourceId);
+      const body = memoryContributionSchema.parse(await readJsonBody(request, maxBodyBytes));
+      sendJson(response, 201, await sdk.contributeMemoryEvidence(memoryContext(subject, access, scope.spaceId, scope.audience), body.stamp, resourceId, { evidence: body.input.evidence.map(parsedMemoryEvidence), ...(body.input.expectedRevision === undefined ? {} : { expectedRevision: body.input.expectedRevision }) }));
+      return;
+    }
     if (action !== "feedback") throw new ApiHttpError(404, "not_found", "Route not found");
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const current = await sdk.memoryMutationScope(access, resourceId);
@@ -2238,9 +2286,6 @@ async function handleRequest(
     }
     const current = await sdk.memoryMutationScope(access, resourceId);
     if (current === undefined) throw new PersonalMemoryUnavailableError(resourceId);
-    if (current.audience === "workspace" && !canSteer(access)) {
-      throw new ApiHttpError(403, "shared_memory_access_denied", "Workspace memory changes require an owner or admin role");
-    }
     const context = memoryContext(subject, access, current.spaceId, current.audience);
     if (method === "PATCH") {
       const body = memoryRevisionSchema.parse(await readJsonBody(request, maxBodyBytes));

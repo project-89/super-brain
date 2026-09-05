@@ -150,6 +150,9 @@ importers:
       '@_89/fold-transcript':
         specifier: workspace:*
         version: link:../../packages/fold-transcript
+      '@_89/super-brain-capture-daemon':
+        specifier: workspace:*
+        version: link:../capture-daemon
       '@_89/super-brain-client':
         specifier: workspace:*
         version: link:../../packages/super-brain-client

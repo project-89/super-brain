@@ -50,7 +50,7 @@ describe("memory candidate evidence", () => {
   });
 
   it("rejects duplicate or conflicting decisions during replay", () => {
-    const eventContext = context({ audience: "workspace" });
+    const eventContext = context({ audience: "workspace", workspaceRole: "owner" });
     const proposed = makeMemoryCandidateProposedEvent(eventContext, stamp("candidate-event", 100), candidateInput);
     const candidate = rebuildMemoryCandidates([proposed]).candidates.get(MEMORY_A)!;
     const accepted = makeMemoryCandidateAcceptedEvent(eventContext, stamp("accepted-event", 110), candidate, MEMORY_B);

@@ -453,7 +453,10 @@ export class CaptureEngine {
     const eventTime = Math.max(Date.now(), this.state.lastEventTime + 1);
     this.state = { ...this.state, lastEventTime: eventTime };
     await this.saveState();
-    return this.vault.store(source, payload, eventTime, { ...(authority === undefined ? {} : { authority }) });
+    return this.vault.store(source, payload, eventTime, {
+      ...(this.receiptArtifact?.receiptId === undefined ? {} : { receiptId: this.receiptArtifact.receiptId }),
+      ...(authority === undefined ? {} : { authority }),
+    });
   }
 
   private context(session: CaptureSession): TerminalSensorContext {
@@ -1128,7 +1131,9 @@ export class CaptureEngine {
         record_count: delta.records.length,
         records: delta.records,
         summaries,
-      }, artifact.eventTime + nextIndex);
+      }, artifact.eventTime + nextIndex, {
+        ...(artifact.receiptId === undefined ? {} : { receiptId: artifact.receiptId }),
+      });
       if (this.config.reasoningTreePolicy === "summaries") {
         for (const summary of summaries) {
           next = await this.observe(next, artifact, nextIndex++, {

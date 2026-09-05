@@ -321,3 +321,10 @@ initialization. Basic event, memory-record and activity writes use fsynced atomi
 State-dependent commands require PostgreSQL's durable result receipts and fail closed with an
 explicit configuration error on the journal backend. Journal in-process retry caching does not
 claim PostgreSQL's cross-process/restart result guarantee. Existing canonical JSONL remains readable.
+
+Memory correction, evidence contributions, applicability, exact dependency
+revisions, and reasoning cancellation follow the
+[Phase 2 memory contract](../../docs/PHASE2_MEMORY_CONTRACT.md). In particular,
+legacy memories with no explicit applicability require review; empty project
+lists no longer imply global applicability. Scoped writers may correct shared
+memory, while acceptance/rejection retains owner/admin review authority.

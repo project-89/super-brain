@@ -140,3 +140,12 @@ describe("transcript memory extraction", () => {
     await expect(readVaultMessages(vault, run, new Uint8Array(32))).rejects.toThrow(/authentication/);
   });
 });
+
+it("examines the whole long session and retains the final correction beyond the proposal budget", () => {
+  const messages = Array.from({ length: 30 }, (_, index) => ({ role: "user" as const, turnId: `turn-${index}`,
+    text: `We decided that deployment policy number ${index} must preserve explicit evidence.` }));
+  messages.push({ role: "user", turnId: "turn-final", text: "We decided that the final correction must supersede the initial deployment assumption." });
+  const candidates = extractMemoryCandidates(run, "run-event", messages, 2);
+  expect(candidates).toHaveLength(31);
+  expect(candidates.at(-1)?.summary).toContain("final correction");
+});

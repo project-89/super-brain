@@ -16,6 +16,40 @@ function client(fetchMock: typeof fetch) {
 }
 
 describe("SuperBrainClient", () => {
+  it("resolves explicit event IDs without sending an oversized request URL", async () => {
+    const ids = Array.from({ length: 100 }, (_, i) => `${i.toString().padStart(3, "0")}-${"x".repeat(100)}`);
+    const urls: string[] = [];
+    const api = client(async (input) => {
+      const url = new URL(String(input)); urls.push(url.toString());
+      return jsonResponse({ entries: url.searchParams.getAll("eventId").map((id) => ({ event: { id, at: { t: 1 } }, status: "canon" })) });
+    });
+    expect((await api.listEvents({ eventIds: ids })).map(({ event }) => event.id)).toEqual(ids);
+    expect(urls.length).toBeGreaterThan(1);
+    expect(urls.every((url) => url.length < 7000)).toBe(true);
+  });
+
+  it("preserves caller-owned command identities and propagates a real reasoning deadline", async () => {
+    const requests: RequestInit[] = [];
+    const fetchMock: typeof fetch = async (_url, init) => {
+      requests.push(init!);
+      return jsonResponse({ event: {}, memory: {}, candidate: {} });
+    };
+    const api = client(fetchMock);
+    const stamp = { id: "durable-job", t: 1, worldDate: "2026-09-05" };
+    const input = { evidence: [{ eventId: "source", relation: "supports" as const }], expectedRevision: 0 };
+    await api.contributeMemoryEvidence("memory-a", input, { stamp });
+    await api.contributeMemoryEvidence("memory-a", input, { stamp });
+    expect(requests[0]?.body).toBe(requests[1]?.body);
+    expect(JSON.parse(String(requests[0]?.body))).toEqual({ stamp, input });
+    expect(() => api.recordMemory({ source: "test" }, undefined, { stamp })).toThrow("explicit memory ID");
+    let aborted = false;
+    const slow: typeof fetch = async (_url, init) => new Promise((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => { aborted = true; reject(init!.signal!.reason); }, { once: true });
+    });
+    await expect(client(slow).askReasoning({ question: "Slow question" }, { timeoutMs: 10 })).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(aborted).toBe(true);
+  });
+
   it("surfaces stream revocation as a terminal structured error", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('event: stream-error\ndata: {"status":403,"code":"stream_access_revoked","message":"Revoked"}\n\n', { status: 200 })) as unknown as typeof fetch;
     const read = async () => { for await (const _event of client(fetchMock).eventStream()) { /* no event expected */ } };

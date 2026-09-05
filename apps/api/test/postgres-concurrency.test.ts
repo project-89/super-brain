@@ -264,7 +264,7 @@ integrationDescribe("two-process PostgreSQL API correctness", () => {
     expect((await request(first, "/memory-candidates", {
       stamp: stamp("identical-proposal", 500),
       input: {
-        id: candidateId, audience: "workspace", source: "integration-fixture",
+        id: candidateId, audience: "workspace", applicability: { kind: "global" }, source: "integration-fixture",
         summary: "A retryable reviewed decision", content: { decision: "Keep stable receipt identity" },
         evidence: [{ eventId: "identical-evidence" }], confidence: 0.8, salience: 0.8,
         extractor: { kind: "human", id: "integration-review", version: "1" },
@@ -289,7 +289,7 @@ integrationDescribe("two-process PostgreSQL API correctness", () => {
       const bodies = [0, 1].map((side) => {
         const index = 10 + pair * 2 + side;
         return { stamp: stamp(`concurrent-memory-${index}`, 1_000 + index), input: {
-          id: memoryId(index), audience: "workspace", source: "integration-fixture",
+          id: memoryId(index), audience: "workspace", applicability: { kind: "global" }, source: "integration-fixture",
           summary: `Independent memory ${index}`, content: { index },
         } };
       });
@@ -307,7 +307,7 @@ integrationDescribe("two-process PostgreSQL API correctness", () => {
 
   it("rejects a reused command identity when nested application access data changes", async () => {
     const body = { stamp: stamp("nested-access-content", 2_000), input: {
-      id: memoryId(90), audience: "workspace", source: "integration-fixture",
+      id: memoryId(90), audience: "workspace", applicability: { kind: "global" }, source: "integration-fixture",
       summary: "Application access policy", content: { access: { mode: "read" } },
     } };
     expect((await request(first, "/memories", body)).status).toBe(201);
@@ -367,7 +367,7 @@ integrationDescribe("two-process PostgreSQL API correctness", () => {
   }, 25_000);
 
   it("rejects recording an existing memory ID under a new command without corrupting replay", async () => {
-    const input = { id: memoryId(99), audience: "workspace", source: "integration-fixture", summary: "Unique memory identity", content: { decision: "once" } };
+    const input = { id: memoryId(99), audience: "workspace", applicability: { kind: "global" }, source: "integration-fixture", summary: "Unique memory identity", content: { decision: "once" } };
     expect((await request(first, "/memories", { stamp: stamp("unique-memory-first", 7_000), input })).status).toBe(201);
     const duplicate = await request(second, "/memories", { stamp: stamp("unique-memory-duplicate", 7_100), input });
     expect(duplicate.status).toBe(409);
