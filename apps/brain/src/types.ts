@@ -697,7 +697,7 @@ export interface ReasoningResponse {
   readonly answer: string;
   readonly citations: readonly string[];
   readonly provider: ReasoningProviderStatus;
-  readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic"; readonly corpusSize: number };
+  readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic" | "explicit"; readonly corpusSize: number };
   readonly evidence: readonly {
     readonly memoryId: string;
     readonly source: string;

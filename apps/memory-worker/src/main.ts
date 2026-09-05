@@ -72,6 +72,7 @@ async function main(): Promise<void> {
     autoPromote,
     continuousCognition: command === "watch" && !args.includes("--no-continuous-cognition"),
     cognitionEveryEvents,
+    reportWarning: (message) => console.error(`[memory-worker] ${message}`),
     ...(vaultEncryptionKey === undefined ? {} : { vaultEncryptionKey }),
   });
   if (command === "watch") {

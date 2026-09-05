@@ -987,6 +987,46 @@ describe("Fold HTTP API", () => {
         },
       });
 
+      const explicit = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/reasoning/ask",
+        {
+          method: "POST",
+          token: "token-a",
+          body: { question: "Use this exact evidence", memoryIds: [MEMORY_A] },
+        },
+      );
+      expect(explicit).toMatchObject({
+        status: 200,
+        body: {
+          citations: [MEMORY_A],
+          ranking: { id: "explicit-memory-set-v1", kind: "explicit", corpusSize: 1 },
+          evidence: [{ memoryId: MEMORY_A }],
+        },
+      });
+
+      await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/memories", {
+        method: "POST",
+        token: "token-b",
+        body: {
+          stamp: { id: "private-memory-event", t: 102, worldDate: "2026-08-17" },
+          input: { id: MEMORY_B, source: "conversation", summary: "Private owner evidence" },
+        },
+      });
+      const hiddenExplicit = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/reasoning/ask",
+        {
+          method: "POST",
+          token: "token-a",
+          body: { question: "Reveal private evidence", memoryIds: [MEMORY_B] },
+        },
+      );
+      expect(hiddenExplicit).toMatchObject({
+        status: 404,
+        body: { error: { code: "reasoning_memory_unavailable" } },
+      });
+
       const providers = await apiRequest(
         api.baseUrl,
         "/v1/workspaces/workspace-1/reasoning/providers",

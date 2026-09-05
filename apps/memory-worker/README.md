@@ -18,6 +18,12 @@ pnpm --filter @_89/super-brain-memory-worker start -- install-service
 
 `scan` reports candidates without writes. `backfill` uses deterministic candidate IDs and batches up to 100 proposals. `watch` subscribes to transcript run events and commits its durable consumer offset only after extraction and proposal succeed.
 
+The watcher credential needs `events:read`, `consumers:read`,
+`consumers:write`, `transcripts:read`, `memories:read`, and `memories:write`.
+Add `reasoning:read` when continuous cognition is enabled. Missing optional
+reasoning access disables cognition for that worker process without blocking
+deterministic extraction or cursor progress.
+
 `--auto-promote` applies a deliberately narrow trusted policy. Structured
 Claude-Mem observations require confidence of at least `0.95` and a resolved
 project. Explicit project-scoped human decisions qualify immediately. Live
@@ -32,3 +38,8 @@ runs the durable watcher with automatic promotion. Pass `--no-auto-promote` to
 install a proposal-only watcher or `--replay-all` for an intentional full replay.
 
 The built-in `durable-transcript-memory` rule extractor recognizes structured Claude-Mem observations plus explicit durable decisions/preferences. Its ID and version are stored on every candidate. A model-backed extractor can be added under a different extractor identity without changing the event, review, or promotion contracts.
+
+Continuous cognition selects a small, project-diverse set of accepted memories
+with canonical evidence and sends those exact authorization-checked IDs to the
+configured central reasoner. Model output remains a reviewable proposal and is
+never silently promoted.

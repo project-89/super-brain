@@ -697,6 +697,29 @@ describe("capture daemon", () => {
     expect(retried.job.treeStamp.id < retried.job.runStamp.id).toBe(true);
   });
 
+  it("delivers a prompt-boundary trajectory before later equal-time observations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-prompt-order-"));
+    const spool = new DurableSpool(join(root, "state"));
+    const current = config(root);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "prompt-order", cwd: process.cwd() };
+    await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "First task" });
+    for (const pending of await spool.list()) await spool.complete(pending.path);
+
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Second task" });
+    const equalTime = (await spool.list()).filter(({ job }) =>
+      job.kind === "event" || job.kind === "trajectory"
+    );
+    expect(equalTime.map(({ job }) => job.kind)).toEqual(["trajectory", "event"]);
+    const [trajectory, observation] = equalTime.map(({ job }) => job);
+    if (trajectory?.kind !== "trajectory" || observation?.kind !== "event") throw new Error("unexpected spool jobs");
+    expect(trajectory.treeStamp.t).toBe(observation.event.at.t);
+    expect(trajectory.treeStamp.id < observation.event.id).toBe(true);
+    expect(trajectory.runStamp.id < observation.event.id).toBe(true);
+  });
+
   it("uses a dedicated read credential for canonical exports", async () => {
     const root = await mkdtemp(join(tmpdir(), "super-brain-capture-export-"));
     const current = config(root);

@@ -29,7 +29,8 @@ the narrowest set they need.
       "consumers:write",
       "transcripts:read",
       "memories:read",
-      "memories:write"
+      "memories:write",
+      "reasoning:read"
     ],
     "organizations": { "local": { "role": "admin", "workspaces": { "local-history": { "role": "admin" } } } }
   },
@@ -207,7 +208,7 @@ reissue it at a fresh timestamp while retaining its source ID:
 
 ```sh
 pnpm --filter @_89/super-brain-capture-daemon start -- retry-failed \
-  --rebase-events --confirm
+  --rebase-events --rebase-trajectories --confirm
 ```
 
 ## PostgreSQL Backup

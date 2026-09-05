@@ -142,6 +142,13 @@ function safeSource(source: HookSource): string {
   return source.replace(/[^a-z0-9-]/g, "-");
 }
 
+function spoolOrderStamp(job: SpoolJob): { readonly t: number; readonly id: string } {
+  if (job.kind === "event") return { t: job.event.at.t, id: job.event.id };
+  if (job.kind === "trajectory" || job.kind === "trajectory-tree") return job.treeStamp;
+  const createdAt = Date.parse(job.createdAt);
+  return { t: Number.isFinite(createdAt) ? createdAt : Number.MAX_SAFE_INTEGER, id: job.id };
+}
+
 export class StateStore {
   private readonly path: string;
 
@@ -547,7 +554,11 @@ export class DurableSpool {
       const path = join(this.pending, name);
       return { path, job: JSON.parse(await readFile(path, "utf8")) as SpoolJob };
     }));
-    return jobs;
+    return jobs.sort((left, right) => {
+      const leftStamp = spoolOrderStamp(left.job);
+      const rightStamp = spoolOrderStamp(right.job);
+      return leftStamp.t - rightStamp.t || leftStamp.id.localeCompare(rightStamp.id);
+    });
   }
 
   complete(path: string): Promise<void> {

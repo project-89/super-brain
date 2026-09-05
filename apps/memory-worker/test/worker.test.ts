@@ -1,5 +1,5 @@
 import type { MemoryCandidateView, PersonalMemory } from "@_89/fold-epistemic";
-import type { SuperBrainClient } from "@_89/super-brain-client";
+import { SuperBrainApiError, type SuperBrainClient } from "@_89/super-brain-client";
 import { describe, expect, it, vi } from "vitest";
 
 import { TranscriptMemoryWorker, type ExtractedCandidate } from "../src/index.js";
@@ -33,6 +33,25 @@ const candidate: MemoryCandidateView = {
     memoryId: "019c0000-0000-7000-8000-000000000002",
   },
 };
+
+const crossProjectCandidates: readonly MemoryCandidateView[] = ["a", "b"].map((suffix, index) => ({
+  candidate: {
+    ...candidate.candidate,
+    id: `019c0000-0000-7000-8000-00000000002${index}`,
+    projectIds: [`project-${suffix}`],
+    summary: `Evidence ${suffix}`,
+    proposedAt: 100 + index,
+  },
+  status: "accepted" as const,
+  decision: {
+    kind: "accepted" as const,
+    candidateId: `019c0000-0000-7000-8000-00000000002${index}`,
+    actorId: "worker-a",
+    atMs: 100 + index,
+    eventId: `accepted-cross-project-${index}`,
+    memoryId: `019c0000-0000-7000-8000-00000000000${index + 3}`,
+  },
+}));
 
 describe("live memory consolidation", () => {
   it("attaches repeated evidence to the accepted memory through a revision", async () => {
@@ -85,12 +104,31 @@ describe("live memory consolidation", () => {
       content: { statement: `Evidence ${suffix}` },
       tags: [],
       entities: [],
-      evidence: [{ eventId: `event-${suffix}`, projectId: `project-${suffix}` }],
+      ...(index === 0 ? {} : { evidence: [{ eventId: `event-${suffix}`, projectId: `project-${suffix}` }] }),
       createdAt: 100 + index,
       updatedAt: 100 + index,
       revision: 0,
     }));
     const proposeMemoryCandidates = vi.fn().mockResolvedValue({});
+    const accepted = memories.map((memory, index): MemoryCandidateView => ({
+      candidate: {
+        ...candidate.candidate,
+        id: `019c0000-0000-7000-8000-00000000001${index}`,
+        projectIds: memory.projectIds,
+        summary: memory.summary,
+        evidence: [{ eventId: `event-${index === 0 ? "a" : "b"}`, projectId: memory.projectIds[0]! }],
+        proposedAt: memory.createdAt,
+      },
+      status: "accepted",
+      decision: {
+        kind: "accepted",
+        candidateId: `019c0000-0000-7000-8000-00000000001${index}`,
+        actorId: "worker-a",
+        atMs: memory.createdAt,
+        eventId: `accepted-${index}`,
+        memoryId: memory.id,
+      },
+    }));
     const client = {
       askReasoning: vi.fn().mockResolvedValue({
         answer: "Use the same evidence-first release gate across both projects.",
@@ -98,7 +136,7 @@ describe("live memory consolidation", () => {
         provider: { id: "http-model:reasoner-1", kind: "model" },
       }),
       memoryById: vi.fn().mockImplementation((id) => memories.find((memory) => memory.id === id)),
-      memoryCandidates: vi.fn().mockResolvedValue([]),
+      memoryCandidates: vi.fn().mockImplementation(({ offset = 0 } = {}) => offset === 0 ? accepted : []),
       proposeMemoryCandidates,
     } as unknown as SuperBrainClient;
     const worker = new TranscriptMemoryWorker({
@@ -124,6 +162,10 @@ describe("live memory consolidation", () => {
         ],
       }),
     ], { audience: "workspace" });
+    expect(client.askReasoning).toHaveBeenCalledWith({
+      question: expect.any(String),
+      memoryIds: expect.arrayContaining(memories.map(({ id }) => id)),
+    });
   });
 
   it("does not relabel extractive fallback output as model cognition", async () => {
@@ -133,6 +175,7 @@ describe("live memory consolidation", () => {
         citations: [],
         provider: { id: "local-evidence-v1", kind: "extractive" },
       }),
+      memoryCandidates: vi.fn().mockResolvedValue(crossProjectCandidates),
     } as unknown as SuperBrainClient;
     const worker = new TranscriptMemoryWorker({
       client,
@@ -145,5 +188,35 @@ describe("live memory consolidation", () => {
       kind: "memory.recorded",
       at: { t: 200, worldDate: "2026-09-04" },
     })).resolves.toEqual({ proposed: 0, skippedReason: "model reasoning provider unavailable" });
+  });
+
+  it("disables optional cognition without stalling the consumer when reasoning scope is absent", async () => {
+    const askReasoning = vi.fn().mockRejectedValue(
+      new SuperBrainApiError(403, "credential_scope_denied", "Credential lacks reasoning:read"),
+    );
+    const reportWarning = vi.fn();
+    const worker = new TranscriptMemoryWorker({
+      client: { askReasoning, memoryCandidates: vi.fn().mockResolvedValue(crossProjectCandidates) } as unknown as SuperBrainClient,
+      vaultRoot: "/unused",
+      continuousCognition: true,
+      cognitionEveryEvents: 1,
+      reportWarning,
+    });
+    const event = {
+      id: "trigger-event",
+      kind: "memory.recorded",
+      at: { t: 200, worldDate: "2026-09-04" },
+    } as const;
+
+    await expect(worker.synthesizeAcrossProjects(event)).resolves.toEqual({
+      proposed: 0,
+      skippedReason: "reasoning access unavailable",
+    });
+    await expect(worker.synthesizeAcrossProjects(event)).resolves.toEqual({
+      proposed: 0,
+      skippedReason: "reasoning access unavailable",
+    });
+    expect(askReasoning).toHaveBeenCalledTimes(1);
+    expect(reportWarning).toHaveBeenCalledOnce();
   });
 });

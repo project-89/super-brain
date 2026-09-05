@@ -19,6 +19,7 @@ export interface WorkerOptions {
   readonly autoPromote?: boolean;
   readonly continuousCognition?: boolean;
   readonly cognitionEveryEvents?: number;
+  readonly reportWarning?: (message: string) => void;
 }
 
 const COGNITION_PROMPTS = [
@@ -38,6 +39,7 @@ export class TranscriptMemoryWorker {
   private readonly candidatesByKey = new Map<string, MemoryCandidateView>();
   private readonly acceptedCandidateIds = new Set<string>();
   private initialized = false;
+  private cognitionUnavailableReason: string | undefined;
   private projectRoots: Array<{ readonly root: string; readonly projectId: string }> = [];
 
   constructor(private readonly options: WorkerOptions) {}
@@ -258,20 +260,59 @@ export class TranscriptMemoryWorker {
     readonly skippedReason?: string;
   }> {
     if (this.options.continuousCognition !== true) return { proposed: 0, skippedReason: "continuous cognition disabled" };
+    if (this.cognitionUnavailableReason !== undefined) {
+      return { proposed: 0, skippedReason: this.cognitionUnavailableReason };
+    }
     const every = this.options.cognitionEveryEvents ?? 25;
     if (!Number.isInteger(every) || every < 1 || every > 100_000) {
       throw new TypeError("cognitionEveryEvents must be an integer within [1, 100000]");
     }
     if (digestInteger(event.id) % every !== 0) return { proposed: 0, skippedReason: "not selected by durable cadence" };
     const prompt = COGNITION_PROMPTS[digestInteger(`${event.id}:kind`) % COGNITION_PROMPTS.length]!;
-    const result = await this.options.client.askReasoning({ question: prompt.question, limit: 10 });
+    const accepted = [...await this.candidateViews("accepted")].sort((left, right) =>
+      right.candidate.salience - left.candidate.salience ||
+      right.candidate.confidence - left.candidate.confidence ||
+      right.candidate.proposedAt - left.candidate.proposedAt ||
+      left.candidate.id.localeCompare(right.candidate.id)
+    );
+    accepted.forEach((view) => this.rememberCandidate(view));
+    const acceptedByMemoryId = new Map(accepted.flatMap((view) =>
+      view.decision?.kind === "accepted" ? [[view.decision.memoryId, view] as const] : []
+    ));
+    const memoryByProject = new Map<string, string>();
+    for (const view of accepted) {
+      if (view.decision?.kind !== "accepted") continue;
+      for (const projectId of view.candidate.projectIds) {
+        if (!memoryByProject.has(projectId)) memoryByProject.set(projectId, view.decision.memoryId);
+      }
+    }
+    const memoryIds = [...new Map([...memoryByProject]
+      .sort(([left], [right]) => digestInteger(`${event.id}:${left}`) - digestInteger(`${event.id}:${right}`))
+      .map(([, memoryId]) => [memoryId, memoryId]))
+      .values()].slice(0, 10);
+    if (memoryByProject.size < 2 || memoryIds.length < 2) {
+      return { proposed: 0, skippedReason: "cross-project evidence unavailable" };
+    }
+    let result: Awaited<ReturnType<SuperBrainClient["askReasoning"]>>;
+    try {
+      result = await this.options.client.askReasoning({ question: prompt.question, memoryIds });
+    } catch (error) {
+      if (error instanceof SuperBrainApiError && error.status === 403 && error.code === "credential_scope_denied") {
+        this.cognitionUnavailableReason = "reasoning access unavailable";
+        this.options.reportWarning?.(
+          "Continuous cognition is disabled for this process because its credential lacks reasoning:read",
+        );
+        return { proposed: 0, skippedReason: this.cognitionUnavailableReason };
+      }
+      throw error;
+    }
     if (result.provider.kind !== "model") return { proposed: 0, skippedReason: "model reasoning provider unavailable" };
     const memories = (await Promise.all(result.citations.map((memoryId) => this.options.client.memoryById(memoryId))))
       .filter((memory): memory is PersonalMemory => memory !== undefined);
     const projectIds = [...new Set(memories.flatMap((memory) => memory.projectIds))].sort();
     if (projectIds.length < 2) return { proposed: 0, skippedReason: "cross-project evidence unavailable" };
     const evidence = [...new Map(memories
-      .flatMap((memory) => memory.evidence ?? [])
+      .flatMap((memory) => memory.evidence ?? acceptedByMemoryId.get(memory.id)?.candidate.evidence ?? [])
       .map((item) => [JSON.stringify([item.eventId, item.projectId ?? "", item.runId ?? "", item.turnId ?? ""]), item]))
       .values()].slice(0, 20);
     if (evidence.length === 0) return { proposed: 0, skippedReason: "canonical evidence unavailable" };

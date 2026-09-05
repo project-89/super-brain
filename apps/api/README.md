@@ -199,7 +199,7 @@ organization.
 | `GET` | `/:tenant/identity-audit-log` | Organization-visible identity provisioning audit |
 | `GET` | `/:tenant/steering` | Replayed per-actor candidates and intentions |
 | `GET`, `POST` | `/:tenant/steering/:actorId` | Actor state or owner/admin steering action |
-| `POST` | `/:tenant/reasoning/ask` | Noncanonical provider answer over authorized evidence |
+| `POST` | `/:tenant/reasoning/ask` | Noncanonical provider answer over ranked evidence or an explicit authorization-checked memory set |
 | `GET` | `/:tenant/reasoning/providers` | Configured/default reasoning providers and exact models |
 
 Event reads accept `include=canon|canon+draft`, paired `cursorT` and
@@ -247,7 +247,10 @@ server-side credentials are configured. Gemini is preferred by default;
 otherwise `local-evidence-v1` remains an explicitly labeled `extractive`
 fallback. A host may also inject a custom provider. Provider citations are
 restricted to the authorized evidence supplied for that request. Questions and
-answers are not appended to Fold implicitly.
+answers are not appended to Fold implicitly. Callers may provide up to ten
+`memoryIds` when a workflow needs an exact evidence set rather than ranked
+retrieval. Every ID is resolved through the caller's current memory access, and
+the whole request fails without revealing content when any item is unavailable.
 
 Human steering writes are restricted to workspace owners and admins. Actor,
 author, workspace, and capture identity are derived by the server, every

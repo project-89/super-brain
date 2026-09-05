@@ -212,6 +212,7 @@ const reasoningRequestSchema = recallRequestSchema
     question: z.string().trim().min(1).max(2_000),
     actorId: z.string().trim().min(1).max(300).optional(),
     providerId: z.string().trim().min(1).max(300).optional(),
+    memoryIds: z.array(z.string().trim().min(1).max(300)).min(1).max(10).optional(),
     limit: z.number().int().min(1).max(10).optional(),
   })
   .strict();
@@ -1891,16 +1892,28 @@ async function handleRequest(
   if (resource === "reasoning" && resourceId === "ask" && resourceSegments.length === 2) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const body = reasoningRequestSchema.parse(await readJsonBody(request, maxBodyBytes));
-    const ranked = await sdk.rankMemories(access, {
-      query: body.question,
-      ...(body.scope === undefined ? {} : { scope: body.scope }),
-      ...(body.tags === undefined ? {} : { tags: body.tags }),
-      ...(body.sources === undefined ? {} : { sources: body.sources }),
-      ...(body.projectIds === undefined ? {} : { projectIds: body.projectIds }),
-      ...(body.from === undefined ? {} : { from: body.from }),
-      ...(body.to === undefined ? {} : { to: body.to }),
-      limit: body.limit ?? 5,
-    }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker());
+    const explicitMemoryIds = body.memoryIds === undefined ? undefined : [...new Set(body.memoryIds)];
+    const ranked = explicitMemoryIds === undefined
+      ? await sdk.rankMemories(access, {
+          query: body.question,
+          ...(body.scope === undefined ? {} : { scope: body.scope }),
+          ...(body.tags === undefined ? {} : { tags: body.tags }),
+          ...(body.sources === undefined ? {} : { sources: body.sources }),
+          ...(body.projectIds === undefined ? {} : { projectIds: body.projectIds }),
+          ...(body.from === undefined ? {} : { from: body.from }),
+          ...(body.to === undefined ? {} : { to: body.to }),
+          limit: body.limit ?? 5,
+        }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker())
+      : await (async () => {
+          const memories = await Promise.all(explicitMemoryIds.map((memoryId) => sdk.memoryById(access, memoryId)));
+          if (memories.some((memory) => memory === undefined)) {
+            throw new ApiHttpError(404, "reasoning_memory_unavailable", "One or more reasoning memories are unavailable");
+          }
+          return {
+            memories: memories.map((memory) => ({ memory: memory!, score: undefined })),
+            ranking: { id: "explicit-memory-set-v1", kind: "explicit" as const, corpusSize: memories.length },
+          };
+        })();
     const evidence = ranked.memories.map(({ memory, score }) => ({
       memoryId: memory.id,
       source: memory.source,

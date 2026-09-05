@@ -50,10 +50,10 @@ features:
 
 The remaining execution order is:
 
-1. let normal capture reach at least 50 finalized evaluation units and run a
-   controlled same-task comparison across two materially different models;
-2. deploy real reasoning and optional embedding providers, then validate live
-   cited cognition and retrieval feedback;
+1. run a controlled same-task comparison across two materially different
+   models and export its reproducible evaluation dataset;
+2. retain the validated Gemini reasoning deployment and add an embedding
+   provider only when semantic retrieval quality justifies it;
 3. configure and drill the hosted PostgreSQL, Clerk, TLS, rate-limit,
    quarantine, backup, monitoring, object-storage, and KMS topology;
 4. select the project license before publishing packages or accepting reusable

@@ -57,7 +57,7 @@ from 3 to 30 while long-lived CLI sessions remained open.
 
 ### Empirical evaluation corpus
 
-Status: in progress; 30 of 50 finalized units are live.
+Status: in progress; 66 finalized units are live and the volume threshold is met.
 
 - Produce at least 50 finalized, annotated trajectories.
 - Run at least one comparable task through two materially different models.
@@ -77,7 +77,8 @@ Status: implementation complete; live adoption evidence accumulating.
 
 ### Continuous cognition
 
-Status: implementation complete; real provider deployment pending.
+Status: implementation complete; live local Gemini validation complete and
+hosted provider deployment pending.
 
 - Add a durable worker that consumes canonical events and proposes cited
   cross-project synthesis, contradiction, procedure, and investigation records.
@@ -89,8 +90,9 @@ Status: implementation complete; real provider deployment pending.
 
 Acceptance evidence: replayable worker and HTTP provider contract tests pass.
 The worker creates only reviewable, canonically cited cross-project proposals
-and skips honestly when the configured provider is extractive. A live cited
-proposal still requires deployment of a real model provider.
+and skips honestly when the configured provider is extractive. The local
+deployment has produced a real Gemini-backed `continuous-cognition` proposal
+from an explicit authorization-checked, project-diverse evidence set.
 
 ## P2: Hosted Multi-Tenant Product
 
@@ -169,9 +171,10 @@ evaluation or hosted-product milestones.
 
 ## Current Live Progress
 
-At the 2026-09-04 post-hardening check, capture reported 7,293 received hooks,
-four active sessions, 30 finalized prompt-to-response units, zero truncated
-steps, zero failed jobs, and one pending delivery. The pending delivery belongs
-to ongoing capture and is not quarantined failure. No production Clerk,
-reasoning, embedding, object-storage, TLS, monitoring, or backup environment is
-configured by this repository checkout.
+At the 2026-09-04 release-readiness check, capture reported more than 12,000
+received hooks, 66 finalized prompt-to-response units, zero truncated steps,
+zero failed jobs, and an empty delivery spool. The memory worker was caught up
+to the newest subscribed event and produced a live, cited, cross-project
+proposal through Gemini. No production Clerk, embedding, object-storage, TLS,
+monitoring, or scheduled off-host backup environment is configured by this
+repository checkout.

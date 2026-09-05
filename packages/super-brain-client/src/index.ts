@@ -64,7 +64,7 @@ export interface ReasoningResponse {
   readonly answer: string;
   readonly citations: readonly string[];
   readonly provider: { readonly id: string; readonly kind: "extractive" | "model" };
-  readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic"; readonly corpusSize: number };
+  readonly ranking: { readonly id: string; readonly kind: "lexical" | "semantic" | "explicit"; readonly corpusSize: number };
   readonly evidence: readonly {
     readonly memoryId: string;
     readonly source: string;
@@ -339,6 +339,8 @@ export class SuperBrainClient {
   async askReasoning(request: Omit<RecallRequest, "candidates"> & {
     readonly question: string;
     readonly actorId?: string;
+    readonly providerId?: string;
+    readonly memoryIds?: readonly string[];
   }): Promise<ReasoningResponse> {
     const result = await this.request<ReasoningResponse>(
       this.workspacePath("reasoning/ask"),
