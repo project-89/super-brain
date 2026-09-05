@@ -21,6 +21,8 @@ import type {
 } from "@_89/fold-epistemic";
 import type { TranscriptProjectSummary, TranscriptRunDetail, MemoryCandidateAcceptanceResult, FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
 import type { TranscriptEvidenceOrigin } from "@_89/fold-sdk";
+import type { EvaluationSourceSelectionRequest, EvaluationSourceSelection } from "@_89/fold-sdk";
+export type { EvaluationSourceSelectionRequest, EvaluationSourceSelection, EvaluationSourceReference } from "@_89/fold-sdk";
 import type { TranscriptRun, TranscriptSource } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
@@ -507,6 +509,11 @@ export class SuperBrainClient {
   memoryEvidencePage(memoryId: string, options: RequestOptions & { readonly revision?: number; readonly offset?: number; readonly limit?: number; readonly contributionOffset?: number } = {}): Promise<{ readonly memoryId: string; readonly revision: number; readonly evidence: readonly MemoryCandidateEvidence[]; readonly contributions: readonly { readonly eventId: string; readonly contributorId: string; readonly contributedAt: number; readonly evidenceCount: number }[]; readonly contributionTotal: number; readonly nextContributionOffset?: number; readonly total: number; readonly nextOffset?: number }> {
     const params = new URLSearchParams(Object.entries(options).filter(([key, value]) => ["revision", "offset", "limit", "contributionOffset"].includes(key) && value !== undefined).map(([key, value]) => [key, String(value)]));
     return this.request(`${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/evidence${params.size ? `?${params}` : ""}`, {}, options);
+  }
+
+  /** Local reviewed source selection. Keep the returned authenticated subject out of artifact bundles. */
+  selectEvaluationSources(request: EvaluationSourceSelectionRequest, options: RequestOptions = {}): Promise<EvaluationSourceSelection> {
+    return this.request(this.workspacePath("evaluation-sources/selection"), { method: "POST", body: JSON.stringify(request) }, options);
   }
 
   recallMemories(request: Omit<RecallRequest, "candidates"> = {}, options: RequestOptions = {}): Promise<{ readonly memories: readonly RecalledMemory[]; readonly provenance: RecallProvenance }> { return this.recallMemoryPacket(request, options); }

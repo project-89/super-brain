@@ -45,3 +45,5 @@ exact source revisions, and currentness. Direct lookup supports review; default
 recall omits unresolved, superseded, or otherwise stale claims. New contribution
 and revision events are validated in canonical order at the atomic command
 boundary, including source authorization and audience containment.
+
+`selectEvaluationSources` resolves explicitly reviewed exact memory revisions and immutable canonical task evidence under current access. Forgotten, denied, stale, unreviewed and invalid dependent sources receive explicit exclusions. It supports local reviewed selection only; the authenticated receipt stays private and the selected content still requires byte-level redaction review. See the [evaluation selection contract](../../docs/PHASE5_SELECTED_EVALUATION_CONTRACTS.md).

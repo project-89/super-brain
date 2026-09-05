@@ -1,0 +1,1063 @@
+[
+  {
+    "id": "empty-initial",
+    "group": "continuation",
+    "description": "An empty initial batch preserves zero.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "0",
+        "events": []
+      }
+    }
+  },
+  {
+    "id": "empty-canonical-order",
+    "group": "ordering",
+    "description": "An empty batch still orders retained events by time then ordinary ID.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"8\",\"events\":[{\"id\":\"C\",\"t\":20,\"payload\":{\"v\":3}},{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}},{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "8",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "id": "C",
+            "t": 20,
+            "payload": {
+              "v": 3
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "delayed-backdated",
+    "group": "ordering",
+    "description": "A later ingestion may precede every retained event in event time.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"40\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"41\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "41",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "exact-large-sequence",
+    "group": "positions",
+    "description": "Adjacent positions above Number.MAX_SAFE_INTEGER remain distinct.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9007199254740992\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"9007199254740993\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "9007199254740993",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "signed-bigint-upper-bound",
+    "group": "positions",
+    "description": "The largest allowed ingestion position is exact.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9223372036854775806\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"9223372036854775807\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "9223372036854775807",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "unordered-decimal-batch",
+    "group": "positions",
+    "description": "Input arrival order and string lexical order do not determine progress.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"10\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"2\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}},{\"sequence\":\"11\",\"event\":{\"id\":\"C\",\"t\":20,\"payload\":{\"v\":3}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "11",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "id": "C",
+            "t": 20,
+            "payload": {
+              "v": 3
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "higher-retry-advances",
+    "group": "identity",
+    "description": "An exact event retry advances position without creating another occurrence.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"40\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"42\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"41\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "42",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "equal-payload-distinct-ids",
+    "group": "identity",
+    "description": "Equal payload and time do not collapse distinct IDs.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"different-id\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"2\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "2",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "id": "different-id",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "key-order-irrelevant",
+    "group": "json-equality",
+    "description": "Nested object property order does not change immutable content.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"2\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"y\":[true,null,\"text\"],\"x\":1}}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "2",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "array-exact-retry",
+    "group": "json-equality",
+    "description": "Arrays preserve element order while nested object key order is irrelevant.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"array\",\"t\":1,\"payload\":[{\"b\":2,\"a\":1},[null,false],3]}]},\"arrivals\":[{\"sequence\":\"2\",\"event\":{\"id\":\"array\",\"t\":1,\"payload\":[{\"a\":1,\"b\":2},[null,false],3]}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "2",
+        "events": [
+          {
+            "id": "array",
+            "t": 1,
+            "payload": [
+              {
+                "b": 2,
+                "a": 1
+              },
+              [
+                null,
+                false
+              ],
+              3
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "state-exact-duplicates",
+    "group": "identity",
+    "description": "Exact duplicate retained IDs represent one logical occurrence.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}},{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"y\":[true,null,\"text\"],\"x\":1}}}]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "9",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "conflicting-payload",
+    "group": "conflicts",
+    "description": "A retained ID cannot change nested payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"2\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":9}}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "conflicting-time",
+    "group": "conflicts",
+    "description": "Event time is part of immutable content.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"2\",\"event\":{\"id\":\"A\",\"t\":21,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "array-order-conflict",
+    "group": "json-equality",
+    "description": "Reordered array elements change immutable content.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"array\",\"t\":1,\"payload\":[{\"b\":2,\"a\":1},[null,false],3]}]},\"arrivals\":[{\"sequence\":\"2\",\"event\":{\"id\":\"array\",\"t\":1,\"payload\":[3,[null,false],{\"b\":2,\"a\":1}]}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "duplicate-position-exact",
+    "group": "conflicts",
+    "description": "Exact retries of one sequence within a batch are valid.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"1\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"y\":[true,null,\"text\"],\"x\":1}}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "1",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "duplicate-position-different-id",
+    "group": "conflicts",
+    "description": "A reused sequence must include the identical immutable event including ID.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"1\",\"event\":{\"id\":\"different-id\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "duplicate-position-changed-payload",
+    "group": "conflicts",
+    "description": "A changed event at one sequence is invalid.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"1\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "older-conflict-validated",
+    "group": "conflicts",
+    "description": "Checkpoint filtering does not bypass older immutable-ID validation.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"2\",\"event\":{\"id\":\"A\",\"t\":0,\"payload\":{}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "older-new-id-filtered",
+    "group": "continuation",
+    "description": "An unknown event at/below the checkpoint is validated but not retained.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"8\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}},{\"sequence\":\"9\",\"event\":{\"id\":\"C\",\"t\":20,\"payload\":{\"v\":3}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "9",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "batch-old-new-id-conflict",
+    "group": "conflicts",
+    "description": "Even filtered older arrivals must agree with later arrivals sharing their ID.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9\",\"events\":[]},\"arrivals\":[{\"sequence\":\"8\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"10\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "retained-id-conflict",
+    "group": "conflicts",
+    "description": "Conflicting retained duplicates fail even for an empty batch.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9\",\"events\":[{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}},{\"id\":\"A\",\"t\":20,\"payload\":{}}]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "nested-payload-nonmutation",
+    "group": "mutation",
+    "description": "Retained and arrived nested objects/arrays remain unchanged.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"array\",\"t\":1,\"payload\":[{\"b\":2,\"a\":1},[null,false],3]}]},\"arrivals\":[{\"sequence\":\"3\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"2\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "3",
+        "events": [
+          {
+            "id": "array",
+            "t": 1,
+            "payload": [
+              {
+                "b": 2,
+                "a": 1
+              },
+              [
+                null,
+                false
+              ],
+              3
+            ]
+          },
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "ordinary-id-order",
+    "group": "ordering",
+    "description": "Use UTF16 string ordering, not locale comparison.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"a\",\"t\":0,\"payload\":{\"n\":0}}},{\"sequence\":\"2\",\"event\":{\"id\":\"ä\",\"t\":0,\"payload\":{\"n\":1}}},{\"sequence\":\"3\",\"event\":{\"id\":\"Z\",\"t\":0,\"payload\":{\"n\":2}}},{\"sequence\":\"4\",\"event\":{\"id\":\"A\",\"t\":0,\"payload\":{\"n\":3}}},{\"sequence\":\"5\",\"event\":{\"id\":\"😀\",\"t\":0,\"payload\":{\"n\":4}}},{\"sequence\":\"6\",\"event\":{\"id\":\"é\",\"t\":0,\"payload\":{\"n\":5}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "6",
+        "events": [
+          {
+            "id": "A",
+            "t": 0,
+            "payload": {
+              "n": 3
+            }
+          },
+          {
+            "id": "Z",
+            "t": 0,
+            "payload": {
+              "n": 2
+            }
+          },
+          {
+            "id": "a",
+            "t": 0,
+            "payload": {
+              "n": 0
+            }
+          },
+          {
+            "id": "ä",
+            "t": 0,
+            "payload": {
+              "n": 1
+            }
+          },
+          {
+            "id": "é",
+            "t": 0,
+            "payload": {
+              "n": 5
+            }
+          },
+          {
+            "id": "😀",
+            "t": 0,
+            "payload": {
+              "n": 4
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "json-primitives-and-special-keys",
+    "group": "json-equality",
+    "description": "All JSON primitive values and ordinary special-looking keys remain data.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"p0\",\"t\":0,\"payload\":null}},{\"sequence\":\"2\",\"event\":{\"id\":\"p1\",\"t\":1,\"payload\":false}},{\"sequence\":\"3\",\"event\":{\"id\":\"p2\",\"t\":2,\"payload\":true}},{\"sequence\":\"4\",\"event\":{\"id\":\"p3\",\"t\":3,\"payload\":0}},{\"sequence\":\"5\",\"event\":{\"id\":\"p4\",\"t\":4,\"payload\":-1}},{\"sequence\":\"6\",\"event\":{\"id\":\"p5\",\"t\":5,\"payload\":1.5}},{\"sequence\":\"7\",\"event\":{\"id\":\"p6\",\"t\":6,\"payload\":\"\"}},{\"sequence\":\"8\",\"event\":{\"id\":\"p7\",\"t\":7,\"payload\":{\"__proto__\":{\"x\":1},\"constructor\":\"data\"}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "8",
+        "events": [
+          {
+            "id": "p0",
+            "t": 0,
+            "payload": null
+          },
+          {
+            "id": "p1",
+            "t": 1,
+            "payload": false
+          },
+          {
+            "id": "p2",
+            "t": 2,
+            "payload": true
+          },
+          {
+            "id": "p3",
+            "t": 3,
+            "payload": 0
+          },
+          {
+            "id": "p4",
+            "t": 4,
+            "payload": -1
+          },
+          {
+            "id": "p5",
+            "t": 5,
+            "payload": 1.5
+          },
+          {
+            "id": "p6",
+            "t": 6,
+            "payload": ""
+          },
+          {
+            "id": "p7",
+            "t": 7,
+            "payload": {
+              "__proto__": {
+                "x": 1
+              },
+              "constructor": "data"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "safe-time-upper-bound",
+    "group": "ordering",
+    "description": "Times may reach Number.MAX_SAFE_INTEGER.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"late\",\"t\":9007199254740991,\"payload\":null}},{\"sequence\":\"2\",\"event\":{\"id\":\"early\",\"t\":0,\"payload\":null}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "2",
+        "events": [
+          {
+            "id": "early",
+            "t": 0,
+            "payload": null
+          },
+          {
+            "id": "late",
+            "t": 9007199254740991,
+            "payload": null
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "continuation-second-batch",
+    "group": "continuation",
+    "description": "Continue from a canonical retained state with retry, backdated arrival and old skipped event.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"10\",\"events\":[{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}},{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}]},\"arrivals\":[{\"sequence\":\"9\",\"event\":{\"id\":\"skip\",\"t\":0,\"payload\":null}},{\"sequence\":\"12\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"11\",\"event\":{\"id\":\"new\",\"t\":2,\"payload\":{\"v\":4}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "12",
+        "events": [
+          {
+            "id": "new",
+            "t": 2,
+            "payload": {
+              "v": 4
+            }
+          },
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "invalid-position-negative",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"-1\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-plus",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"+1\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-space",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\" 1\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-leading-zero",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"01\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-decimal",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1.0\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-empty",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-exponent",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1e2\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-overflow",
+    "group": "validation",
+    "description": "Reject a noncanonical or out-of-range ingestion position.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"9223372036854775808\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "arrival-zero",
+    "group": "validation",
+    "description": "Arrival positions start at one.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"0\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "numeric-position",
+    "group": "validation",
+    "description": "Position type is a decimal string.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":1,\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-checkpoint",
+    "group": "validation",
+    "description": "The supplied checkpoint is validated even on empty input.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"00\",\"events\":[]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "overflow-checkpoint",
+    "group": "validation",
+    "description": "Checkpoint range is bounded by signed bigint.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"9223372036854775808\",\"events\":[]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "numeric-checkpoint",
+    "group": "validation",
+    "description": "A numeric checkpoint is invalid.",
+    "inputJson": "{\"state\":{\"checkpoint\":0,\"events\":[]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "older-malformed-event",
+    "group": "validation",
+    "description": "Older arrivals still need a complete event.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"99\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":0}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-empty-id",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"\",\"t\":0,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-numeric-id",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":1,\"t\":0,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-negative-time",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":-1,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-fractional-time",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":1.5,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-unsafe-time",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":9007199254740992,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-string-time",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":\"1\",\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-event-missing-payload",
+    "group": "validation",
+    "description": "Reject invalid immutable event metadata or missing JSON payload.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":0}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "nonfinite-payload",
+    "group": "validation",
+    "description": "Finite numbers are required recursively inside payloads.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":0,\"payload\":{\"x\":1e309}}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "nonfinite-time",
+    "group": "validation",
+    "description": "Nonfinite event time is invalid.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"bad\",\"t\":1e309,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "null-state",
+    "group": "validation",
+    "description": "State must be an object with checkpoint and retained events.",
+    "inputJson": "{\"state\":null,\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "missing-events",
+    "group": "validation",
+    "description": "Retained events must be supplied.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\"},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "nonarray-events",
+    "group": "validation",
+    "description": "Retained events must be an array.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":{}},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "nonarray-arrivals",
+    "group": "validation",
+    "description": "Arrivals must be an array.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":{}}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "null-arrival",
+    "group": "validation",
+    "description": "Each arrival has position and event fields.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[null]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-retained-event",
+    "group": "validation",
+    "description": "Validate retained events even on empty batches.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"1\",\"events\":[{\"id\":\"bad\",\"t\":-1,\"payload\":null}]},\"arrivals\":[]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "permuted-batch",
+    "group": "ordering",
+    "description": "A permutation of an unordered valid batch has the same result.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"11\",\"event\":{\"id\":\"C\",\"t\":20,\"payload\":{\"v\":3}}},{\"sequence\":\"10\",\"event\":{\"id\":\"A\",\"t\":20,\"payload\":{\"nested\":{\"x\":1,\"y\":[true,null,\"text\"]}}}},{\"sequence\":\"2\",\"event\":{\"id\":\"B\",\"t\":5,\"payload\":{\"v\":2}}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "11",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "id": "C",
+            "t": 20,
+            "payload": {
+              "v": 3
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "invalid-position-trailing-newline",
+    "group": "validation",
+    "description": "Canonical decimal positions contain no trailing whitespace, including a final newline.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\\n\",\"event\":{\"id\":\"A\",\"t\":0,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "invalid-position-trailing-space",
+    "group": "validation",
+    "description": "Canonical decimal positions contain no trailing whitespace, including a final newline.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1 \",\"event\":{\"id\":\"A\",\"t\":0,\"payload\":null}}]}",
+    "expected": {
+      "kind": "throw"
+    }
+  },
+  {
+    "id": "utf16-id-order",
+    "group": "ordering",
+    "description": "Ordinary JavaScript ordering compares UTF16 code units, not Unicode code points.",
+    "inputJson": "{\"state\":{\"checkpoint\":\"0\",\"events\":[]},\"arrivals\":[{\"sequence\":\"1\",\"event\":{\"id\":\"\",\"t\":0,\"payload\":null}},{\"sequence\":\"2\",\"event\":{\"id\":\"😀\",\"t\":0,\"payload\":null}}]}",
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "2",
+        "events": [
+          {
+            "id": "😀",
+            "t": 0,
+            "payload": null
+          },
+          {
+            "id": "",
+            "t": 0,
+            "payload": null
+          }
+        ]
+      }
+    }
+  }
+]

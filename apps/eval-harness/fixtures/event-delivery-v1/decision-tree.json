@@ -1,0 +1,146 @@
+{
+  "taskId": "synthetic-event-delivery-v1",
+  "rootNodeId": "delivery-vs-presentation",
+  "nodes": [
+    {
+      "id": "delivery-vs-presentation",
+      "kind": "decision",
+      "label": "Separate ingestion progress from event-time presentation"
+    },
+    {
+      "id": "exact-sequences",
+      "kind": "decision",
+      "label": "Compare canonical sequence strings without precision loss"
+    },
+    {
+      "id": "bigint",
+      "kind": "action",
+      "label": "Use validated BigInt arithmetic"
+    },
+    {
+      "id": "decimal-comparison",
+      "kind": "action",
+      "label": "Use exact canonical decimal length/lexicographic comparison"
+    },
+    {
+      "id": "occurrence-identity",
+      "kind": "decision",
+      "label": "Preserve logical occurrence identity by immutable event ID"
+    },
+    {
+      "id": "retry-validation",
+      "kind": "decision",
+      "label": "Validate immutable IDs and duplicate positions including older arrivals"
+    },
+    {
+      "id": "stable-serialization",
+      "kind": "action",
+      "label": "Compare recursively canonical JSON representations"
+    },
+    {
+      "id": "recursive-equality",
+      "kind": "action",
+      "label": "Compare JSON recursively with unordered object keys and ordered arrays"
+    },
+    {
+      "id": "input-preservation",
+      "kind": "action",
+      "label": "Validate without mutating inputs and return a fresh state"
+    },
+    {
+      "id": "canonical-order",
+      "kind": "action",
+      "label": "Present numeric event-time and ordinary ID order"
+    },
+    {
+      "id": "continuation-checks",
+      "kind": "observation",
+      "label": "Observe delayed arrival, exact retry, conflict and continuation checks"
+    },
+    {
+      "id": "automated-result",
+      "kind": "outcome",
+      "label": "Report completed automated checks or explicit unavailable evidence"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-1",
+      "sourceId": "delivery-vs-presentation",
+      "targetId": "exact-sequences",
+      "label": "Represent delivery positions"
+    },
+    {
+      "id": "edge-2",
+      "sourceId": "exact-sequences",
+      "targetId": "bigint",
+      "label": "Exact arithmetic alternative"
+    },
+    {
+      "id": "edge-3",
+      "sourceId": "exact-sequences",
+      "targetId": "decimal-comparison",
+      "label": "Exact string comparison alternative"
+    },
+    {
+      "id": "edge-4",
+      "sourceId": "bigint",
+      "targetId": "occurrence-identity",
+      "label": "Retain occurrences"
+    },
+    {
+      "id": "edge-5",
+      "sourceId": "decimal-comparison",
+      "targetId": "occurrence-identity",
+      "label": "Retain occurrences"
+    },
+    {
+      "id": "edge-6",
+      "sourceId": "occurrence-identity",
+      "targetId": "retry-validation",
+      "label": "Check immutable identity"
+    },
+    {
+      "id": "edge-7",
+      "sourceId": "retry-validation",
+      "targetId": "stable-serialization",
+      "label": "Equality alternative"
+    },
+    {
+      "id": "edge-8",
+      "sourceId": "retry-validation",
+      "targetId": "recursive-equality",
+      "label": "Equality alternative"
+    },
+    {
+      "id": "edge-9",
+      "sourceId": "stable-serialization",
+      "targetId": "input-preservation",
+      "label": "Protect inputs"
+    },
+    {
+      "id": "edge-10",
+      "sourceId": "recursive-equality",
+      "targetId": "input-preservation",
+      "label": "Protect inputs"
+    },
+    {
+      "id": "edge-11",
+      "sourceId": "input-preservation",
+      "targetId": "canonical-order",
+      "label": "Construct canonical retained state"
+    },
+    {
+      "id": "edge-12",
+      "sourceId": "canonical-order",
+      "targetId": "continuation-checks",
+      "label": "Observe executable behavior"
+    },
+    {
+      "id": "edge-13",
+      "sourceId": "continuation-checks",
+      "targetId": "automated-result",
+      "label": "Keep acceptance provenance"
+    }
+  ]
+}

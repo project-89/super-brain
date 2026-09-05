@@ -1,0 +1,231 @@
+[
+  {
+    "id": "empty-initial",
+    "input": {
+      "state": {
+        "checkpoint": "0",
+        "events": []
+      },
+      "arrivals": []
+    },
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "0",
+        "events": []
+      }
+    }
+  },
+  {
+    "id": "delayed-backdated",
+    "input": {
+      "state": {
+        "checkpoint": "40",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "arrivals": [
+        {
+          "sequence": "41",
+          "event": {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "41",
+        "events": [
+          {
+            "id": "B",
+            "t": 5,
+            "payload": {
+              "v": 2
+            }
+          },
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "higher-retry-advances",
+    "input": {
+      "state": {
+        "checkpoint": "40",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "arrivals": [
+        {
+          "sequence": "42",
+          "event": {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "sequence": "41",
+          "event": {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "42",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "key-order-irrelevant",
+    "input": {
+      "state": {
+        "checkpoint": "1",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "arrivals": [
+        {
+          "sequence": "2",
+          "event": {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ],
+                "x": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "kind": "return",
+      "value": {
+        "checkpoint": "2",
+        "events": [
+          {
+            "id": "A",
+            "t": 20,
+            "payload": {
+              "nested": {
+                "x": 1,
+                "y": [
+                  true,
+                  null,
+                  "text"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+]

@@ -139,6 +139,30 @@ importers:
         specifier: workspace:*
         version: link:../importer
 
+  apps/eval-harness:
+    dependencies:
+      '@_89/fold':
+        specifier: workspace:*
+        version: link:../../packages/fold
+      '@_89/fold-eval':
+        specifier: workspace:*
+        version: link:../../packages/fold-eval
+      '@_89/fold-sdk':
+        specifier: workspace:*
+        version: link:../../packages/fold-sdk
+      '@_89/fold-trace':
+        specifier: workspace:*
+        version: link:../../packages/fold-trace
+      '@_89/fold-trajectory':
+        specifier: workspace:*
+        version: link:../../packages/fold-trajectory
+      '@_89/super-brain-api':
+        specifier: workspace:*
+        version: link:../api
+      '@_89/super-brain-client':
+        specifier: workspace:*
+        version: link:../../packages/super-brain-client
+
   apps/importer:
     dependencies:
       '@_89/fold-transcript':

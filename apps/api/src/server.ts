@@ -271,6 +271,11 @@ const memoryFeedbackInputSchema = z.unknown().transform((input, context) => {
 const memoryFeedbackSchema = z.object({ stamp: stampSchema, input: memoryFeedbackInputSchema, ...causedByField }).strict();
 const feedbackSubjectSchema = z.object({ organizationId: z.string().min(1).max(500), workspaceId: z.string().min(1).max(500), principalId: z.string().min(1).max(500) }).strict();
 const memoryFeedbackBatchSchema = z.object({ stamp: stampSchema, expectedSubject: feedbackSubjectSchema, items: z.array(z.object({ stamp: stampSchema, memoryId: z.string().uuid(), input: memoryFeedbackInputSchema }).strict()).min(1).max(100) }).strict();
+const evaluationSourceReferenceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("memory"), memoryId: z.string().min(1).max(300), revision: z.number().int().nonnegative().safe() }).strict(),
+  z.object({ kind: z.literal("event"), eventId: z.string().min(1).max(300) }).strict(),
+]);
+const evaluationSourceSelectionSchema = z.object({ selectionId: z.string().min(1).max(300), audience: z.literal("local-reviewed"), redactionVersion: z.string().min(1).max(300), expectedSubject: feedbackSubjectSchema, references: z.array(evaluationSourceReferenceSchema).max(100), reviewedReferences: z.array(evaluationSourceReferenceSchema).max(100) }).strict();
 
 const memoryCandidateProposalSchema = z.object({
   stamp: stampSchema,
@@ -1272,6 +1277,7 @@ function routeCapability(resource: string | undefined, resourceId: string | unde
   if (resource === "steering") return method === "GET" ? "steering:read" : "steering:write";
   if (resource === "reasoning") return "reasoning:read";
   if (resource === "memory-feedback-batches" || (resource === "memories" && subresource === "feedback" && method === "POST")) return "feedback:write";
+  if (resource === "evaluation-sources") return "memories:read";
   if (resource === "memories" && (resourceId === "recall" || resourceId === "search")) return "memories:read";
   if (resource === "memories" || resource?.startsWith("memory-candidate") === true) {
     return method === "GET" ? "memories:read" : "memories:write";
@@ -1454,6 +1460,20 @@ async function handleRequest(
   const sdk = await dependencies.sdks.sdkFor(tenant);
   if (access.platformDataAccess !== true) {
     assertCredentialCapability(subject, routeCapability(resource, resourceId, method, resourceSegments[2]));
+  }
+  if (resource === "evaluation-sources" && resourceId === "selection" && resourceSegments.length === 2) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = evaluationSourceSelectionSchema.parse(await readJsonBody(request, maxBodyBytes));
+    if (body.references.some((reference) => reference.kind === "event")) assertCredentialCapability(subject, "trajectories:read");
+    const freshAccess = organizationId === undefined ? await dependencies.memberships.resolveLegacyAccess(subject, workspaceId) : await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
+    if (freshAccess === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+    if (body.expectedSubject.principalId !== subject.principalId || body.expectedSubject.organizationId !== freshAccess.organizationId || body.expectedSubject.workspaceId !== freshAccess.workspaceId) throw new ApiHttpError(409, "evaluation_subject_changed", "Evaluation sources belong to a different authenticated account");
+    const selection = await sdk.selectEvaluationSources(freshAccess, body);
+    const responseAccess = organizationId === undefined ? await dependencies.memberships.resolveLegacyAccess(subject, workspaceId) : await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
+    if (responseAccess === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+    if (projectionAccessKey(responseAccess, "canon") !== projectionAccessKey(freshAccess, "canon")) throw new ApiHttpError(403, "evaluation_access_changed", "Evaluation source access changed while reading; select sources again");
+    sendJson(response, 200, selection);
+    return;
   }
   if (resource === "identity-bindings") {
     if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {

@@ -16,6 +16,16 @@ function client(fetchMock: typeof fetch) {
 }
 
 describe("SuperBrainClient", () => {
+  it("sends a reviewed exact evaluation selection with original subject and canonical cancellation", async () => {
+    const received: { url: string; init: RequestInit }[] = [];
+    const api = client(async (url, init) => { received.push({url:String(url),init:init!}); return jsonResponse({eligible:[],excluded:[]}); });
+    const reference = {kind:"memory" as const,memoryId:"synthetic",revision:0};
+    const request = {selectionId:"selection",audience:"local-reviewed" as const,redactionVersion:"v1",expectedSubject:{organizationId:"local",workspaceId:"workspace/one",principalId:"synthetic"},references:[reference],reviewedReferences:[reference]};
+    await api.selectEvaluationSources(request, {timeoutMs:1000});
+    expect(received[0]?.url).toBe("https://brain.example/v1/workspaces/workspace%2Fone/evaluation-sources/selection");
+    expect(JSON.parse(String(received[0]?.init.body))).toEqual(request);
+    expect(received[0]?.init.signal).toBeInstanceOf(AbortSignal);
+  });
   it("resolves explicit event IDs without sending an oversized request URL", async () => {
     const ids = Array.from({ length: 100 }, (_, i) => `${i.toString().padStart(3, "0")}-${"x".repeat(100)}`);
     const urls: string[] = [];

@@ -68,11 +68,13 @@ import {
   type TrajectoryTreeRecord,
   taskEvidenceRecordsFromEvent, makeTaskEvidenceEvent, rebuildTaskEvidence, TASK_EVIDENCE_KINDS,
   taskVersionKey,
+  TaskEvidenceError,
   assertTaskAcceptanceSource,
   type TaskEvidenceInput, type TaskEvidenceMutationResult, type TaskEvidenceAuthority, type TaskOutcomeInput, type TaskInterventionInput,
   type TaskManifest, type AttemptManifest, type AttemptContext, type TaskAcceptanceRef,
 } from "@_89/fold-trajectory";
 import { isAdditiveTreeRevision } from "@_89/fold-trace";
+import type { EvaluationSourceSelectionRequest, EvaluationSourceSelection } from "./evaluation.js";
 import {
   eventFromTerminalManagerSignal,
   validateActivityEventEnvelope,
@@ -1475,6 +1477,62 @@ export class FoldSdk {
         if (memory.revision !== ref.revision || (!includeNeedsReview && memory.currentness?.status !== "current")) throw new FoldSdkConflictError("memory revision is stale or requires review");
         return memory;
       });
+    });
+  }
+
+  selectEvaluationSources(access: FoldSdkAccessContext, request: EvaluationSourceSelectionRequest): Promise<EvaluationSourceSelection> {
+    return this.enqueue(async () => {
+      validateAccessContext(access);
+      if (access.platformDataAccess === true) throw new FoldSdkAccessError("platform inspection does not authorize evaluation export");
+      const subject = request.expectedSubject;
+      if (subject.principalId !== access.principalId || subject.organizationId !== access.organizationId || subject.workspaceId !== access.workspaceId) throw new FoldSdkAccessError("evaluation selection subject changed");
+      if (request.audience !== "local-reviewed" || !request.selectionId?.trim() || request.selectionId.length > 300 || !request.redactionVersion?.trim() || request.redactionVersion.length > 300 || !Array.isArray(request.references) || request.references.length > 100 || !Array.isArray(request.reviewedReferences) || request.reviewedReferences.length > 100) throw new FoldSdkError("invalid bounded evaluation selection");
+      const key = (reference: EvaluationSourceSelectionRequest["references"][number]) => {
+        if (reference.kind === "memory" && typeof reference.memoryId === "string" && reference.memoryId.length > 0 && reference.memoryId.length <= 300 && Number.isSafeInteger(reference.revision) && reference.revision >= 0) return `memory:${reference.memoryId}:${reference.revision}`;
+        if (reference.kind === "event" && typeof reference.eventId === "string" && reference.eventId.length > 0 && reference.eventId.length <= 300) return `event:${reference.eventId}`;
+        throw new FoldSdkError("invalid exact evaluation source reference");
+      };
+      const selected = new Set(request.references.map(key));
+      const reviewed = new Set(request.reviewedReferences.map(key));
+      if (selected.size !== request.references.length || reviewed.size !== request.reviewedReferences.length || [...reviewed].some((reference) => !selected.has(reference))) throw new FoldSdkError("evaluation review must name distinct selected references");
+      const { projection, events } = await this.memoryProjection(access);
+      const eventIndex = new Map(events.map((event) => [event.id, event]));
+      let taskState: ReturnType<typeof rebuildTaskEvidence> | undefined;
+      if (request.references.some((reference) => reference.kind === "event")) {
+        try { taskState = rebuildTaskEvidence(events); }
+        catch (error) { if (!(error instanceof TaskEvidenceError)) throw error; }
+      }
+      const eligible: EvaluationSourceSelection["eligible"][number][] = [];
+      const excluded: EvaluationSourceSelection["excluded"][number][] = [];
+      const current = (ref: MemoryRevisionRef): EvaluationSourceSelection["excluded"][number]["reason"] | undefined => {
+        const memory = recallProjectedMemoryById(projection, access, ref.memoryId);
+        if (memory === undefined) return "unavailable-or-denied";
+        if (memory.revision !== ref.revision) return "stale-revision";
+        if (memory.currentness?.status !== "current" || memory.applicability?.kind === "unresolved") return "needs-review";
+        return undefined;
+      };
+      for (const reference of request.references) {
+        if (!reviewed.has(key(reference))) { excluded.push({ reference, reason: "unreviewed" }); continue; }
+        if (reference.kind === "memory") {
+          const reason = current(reference);
+          if (reason !== undefined) { excluded.push({ reference, reason }); continue; }
+          const memory = recallProjectedMemoryById(projection, access, reference.memoryId)!;
+          eligible.push({ reference, eligibility: "current-authorized", updatedAt: memory.updatedAt, snapshot: { memoryId: memory.id, revision: memory.revision, summary: memory.summary, content: memory.content } });
+          continue;
+        }
+        const event = eventIndex.get(reference.eventId);
+        if (event === undefined) { excluded.push({ reference, reason: "unavailable-or-denied" }); continue; }
+        const record = taskEvidenceRecordsFromEvent(event)[0];
+        if (record === undefined) { excluded.push({ reference, reason: "unsupported-source" }); continue; }
+        if (taskState === undefined) { excluded.push({ reference, reason: "unavailable-or-denied" }); continue; }
+        // Immutable evidence remains historical. Its dependent memory claims must still be eligible now.
+        const attempt = record.recordType === "task-manifest" ? undefined : record.recordType === "attempt-manifest" ? record.input : taskState.attempts.get(record.input.attemptId);
+        if ((record.recordType !== "task-manifest" && attempt === undefined) || !taskState.tasks.has(taskVersionKey(record.input.taskId, record.recordType === "task-manifest" ? record.input.taskVersion : attempt!.taskVersion))) { excluded.push({ reference, reason: "unavailable-or-denied" }); continue; }
+        const reason = (attempt?.context?.memoryRefs ?? []).map(current).find((value) => value !== undefined);
+        if (reason !== undefined) { excluded.push({ reference, reason }); continue; }
+        eligible.push({ reference, eligibility: "current-authorized", updatedAt: event.at.t, snapshot: JSON.parse(JSON.stringify({ recordType: record.recordType, input: record.input, ...(record.recordType === "outcome" || record.recordType === "intervention" ? { authorityKind: record.authority.kind } : {}) })) as import("@_89/fold").JsonValue });
+      }
+      return { selectionId: request.selectionId, audience: request.audience, redactionVersion: request.redactionVersion, subject, eligible, excluded };
     });
   }
 

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "taskId": "synthetic-event-delivery-v1",
+  "taskVersion": "event-delivery-v1:f37f9b4c3da7469cb1af0e366f90f444a00dfd3545eaa88c71be6d2ec0509a71",
+  "frozenAt": "2026-09-05T07:44:55.291Z",
+  "files": {
+    "public-task.md": "9aba1d5623fb4042c8e9a862885ab478ec169427f9ab379cae89a8ab50319d86",
+    "initial.mjs": "53cff86405fce06c0976d3404b3b4a4ed124e69a60653970d806285dfa42ab7a",
+    "public-examples.json": "2e6123249dbea1075b1e44a076a2b38e3fed7c5450f817b954a1764927d0d140",
+    "hidden-cases.json": "54101e958eb3d24addefd2da0e9feb170faab43cbc291b0497d68286c87cf48f",
+    "decision-tree.json": "45c6d2e3940700bce080f30de0b9ed69419fd0f22ca0fad3074812a3d96a2c82",
+    "annotation-rubric.md": "3f5dc7d3108f16b73cc4e42c8ccb08aaf9024a92fa4047e5f762ea1665742fa5",
+    "oracle-source.ts": "80c3220af3f9aa3b6760ad643e78baeb0284ceb28f903197899b8b2cc57b9bad",
+    "snapshot-source.ts": "ccd53deb39a75c26898e7b48d055ce24d8c4466cd8279a0498bf1a3890db19dc",
+    "synthetic-memory.md": "32698cec12089df8eee51e83a1f92604ebad9876192990e18fe89552867d54a5",
+    "driver-source.mjs": "79ede1ef6e2a7d00ece901adf7ae39bccb45f69f97a9f881b6899fc7de667f39",
+    "runtime-contract.json": "b3f019a97f1afb2754416e3065cd0ea1cf83fa29cef0f3ae3818b296f6ee19a7"
+  },
+  "suiteSha256": "f37f9b4c3da7469cb1af0e366f90f444a00dfd3545eaa88c71be6d2ec0509a71",
+  "oracleModuleSha256": [
+    "80c3220af3f9aa3b6760ad643e78baeb0284ceb28f903197899b8b2cc57b9bad",
+    "a4dcbec08ead58261d0f383d763739f4b063366f51c01e60e9f53e4864c14c47"
+  ]
+}

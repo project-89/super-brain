@@ -348,3 +348,5 @@ Static human operator credentials explicitly configure
 human authority from the resolved user; Clerk machine/API-key tokens do not.
 
 The Phase 4 [feedback and transport contract](../../docs/PHASE4_FEEDBACK_TRANSPORT.md) documents exact revision feedback, the narrow `feedback:write` capability, atomic `/memory-feedback-batches`, inventory/recall provenance, account-bound delivery, and optimistic correction revisions. Existing stored unversioned feedback remains readable; new writes use version 2.
+
+`POST /evaluation-sources/selection` selects up to 100 explicitly reviewed exact memory revisions or immutable canonical task/attempt/outcome/intervention event IDs for a local evaluation. It re-resolves current membership, checks `expectedSubject`, requires memory read access (plus trajectory read access for event refs), and excludes unavailable, stale or unreviewed sources. See the [selected evaluation contract](../../docs/PHASE5_SELECTED_EVALUATION_CONTRACTS.md); this route does not publish content or certify private artifact bytes.
