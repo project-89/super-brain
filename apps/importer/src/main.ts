@@ -2,7 +2,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { deliverTranscriptBundle, listDeliveredTranscriptRunIds } from "./delivery.js";
+import { deliverTranscriptBundle, listDeliveredTranscriptRunIds, readDeliveredTranscriptBundle } from "./delivery.js";
+import { reinterpretStoredTranscript } from "./reinterpret.js";
 import { storeRedactedArtifact } from "./redact.js";
 import { ensureVaultKey, readVaultKey } from "./encryption.js";
 import { RecordAnonymizer, type AnonymizationPolicy } from "./privacy.js";
@@ -35,8 +36,29 @@ function sourceRoots(source: string | undefined) {
 
 async function main(): Promise<void> {
   const command = args[0] ?? "scan";
+  if (command === "reinterpret") {
+    if (args.includes("--token")) throw new TypeError("use FOLD_API_TOKEN instead of a command-line token");
+    const apiUrl = option("--api-url") ?? process.env.FOLD_API_URL;
+    const organizationId = option("--organization") ?? process.env.FOLD_API_ORGANIZATION ?? "local";
+    const workspaceId = option("--workspace") ?? process.env.FOLD_API_WORKSPACE;
+    const bearerToken = process.env.FOLD_API_TOKEN;
+    const vaultRoot = option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT;
+    const runId = option("--run");
+    const parserVersion = option("--parser-version");
+    if (!apiUrl || !workspaceId || !bearerToken || !vaultRoot || !runId) throw new TypeError("reinterpret requires API URL, workspace, token environment variable, vault and explicit --run");
+    if (parserVersion !== "2") throw new TypeError("reinterpret requires explicit --parser-version 2");
+    const keyPath = option("--vault-key") ?? process.env.FOLD_TRANSCRIPT_VAULT_KEY_FILE;
+    const delivery = { apiUrl, organizationId, workspaceId, bearerToken };
+    const previous = await readDeliveredTranscriptBundle(runId, delivery);
+    const result = await reinterpretStoredTranscript(previous, { vaultRoot, parserVersion,
+      ...(keyPath === undefined ? {} : { encryptionKey: await readVaultKey(keyPath) }) });
+    const imported = hasFlag("--confirm") && result.report.recomputed ? await deliverTranscriptBundle(result.bundle, delivery) : undefined;
+    process.stdout.write(`${JSON.stringify({ mode: hasFlag("--confirm") ? "reinterpret" : "reinterpret-preview", ...result.report,
+      ...(imported === undefined ? {} : { imported: imported.imported, eventCount: imported.eventCount }) }, null, 2)}\n`);
+    return;
+  }
   if (command !== "scan" && command !== "import") {
-    throw new TypeError("supported commands: scan, import");
+    throw new TypeError("supported commands: scan, import, reinterpret");
   }
   let delivery: {
     readonly apiUrl: string;

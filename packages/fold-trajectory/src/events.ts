@@ -121,7 +121,9 @@ export function makeTrajectoryRecordedEvent(
     outcome: parsed.outcome,
     capture: context.capture,
     steps: parsed.steps,
+    ...(parsed.manifest === undefined ? {} : { manifest: parsed.manifest }),
   };
+  if (trajectory.manifest !== undefined && trajectory.manifest.task.taskId !== trajectory.taskId) throw new TrajectoryEventError("trajectory task must match manifest task");
   projectTrajectory(trajectory, tree, parsed.assignments);
   const record: TrajectoryRunRecord = {
     recordType: "trajectory",

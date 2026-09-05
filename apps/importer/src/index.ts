@@ -8,3 +8,5 @@ export * from "./redact.js";
 export * from "./scan.js";
 export * from "./types.js";
 export * from "./native.js";
+export * from "./stored.js";
+export * from "./reinterpret.js";

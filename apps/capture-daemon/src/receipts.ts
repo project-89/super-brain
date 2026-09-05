@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { decryptVaultLine, encryptVaultLine, ensureVaultKey, readVaultKey, redactJsonValue } from "@_89/super-brain-importer";
-import { secureDirectory, syncPrivateDirectory } from "./storage.js";
+import { readBoundedPrivateText, secureDirectory, syncPrivateDirectory } from "./storage.js";
+import { trajectoryInputSchema } from "@_89/fold-trajectory";
 import type { CaptureEngine } from "./capture.js";
 import type { CaptureConfig, CaptureState, HookAuthority, HookSource, SpoolJob, VaultArtifact } from "./types.js";
 
@@ -17,13 +18,17 @@ export interface HookOccurrence {
 export interface CaptureReceipt {
   readonly version: 1;
   readonly occurrence: HookOccurrence;
-  readonly tenant?: { readonly organizationId: string; readonly workspaceId: string };
+  readonly tenant?: { readonly organizationId: string; readonly workspaceId: string; readonly sensorId?: string };
   readonly fingerprint: string;
   readonly receivedAt: string;
   readonly artifact: VaultArtifact;
   readonly authority?: HookAuthority;
   readonly status: "accepted" | "prepared" | "completed" | "rejected";
   readonly eventDigests?: Readonly<Record<string, string>>;
+  readonly trajectoryWitnesses?: Readonly<Record<string, {
+    readonly digest: string;
+    readonly privateRevisionBinding?: Extract<SpoolJob, { kind: "trajectory" }>["privateRevisionBinding"];
+  }>>;
   readonly prepared?: { readonly state: CaptureState; readonly jobs: readonly SpoolJob[] };
   readonly failure?: { readonly attempts: number; readonly lastAttemptAt: string; readonly message: string };
 }
@@ -54,6 +59,10 @@ async function writeProtected(path: string, value: unknown, key: Uint8Array, exc
 export function capturedEventDigest(value: unknown): string {
   return hash(JSON.stringify(value, (_key, item: unknown) => item !== null && typeof item === "object" && !Array.isArray(item)
     ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right))) : item));
+}
+
+export function capturedTrajectoryCommandDigest(command: { readonly input: unknown; readonly captureIdentity: Readonly<Record<string, string>>; readonly runStamp: Extract<SpoolJob, { kind: "trajectory" }>["runStamp"] }): string {
+  return capturedEventDigest({ input: trajectoryInputSchema.parse(command.input), captureIdentity: command.captureIdentity, runStamp: command.runStamp });
 }
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -157,7 +166,7 @@ export class CaptureReceiptQueue {
       const receivedAt = new Date().toISOString();
       this.lastEventTime = Math.max(Date.now(), this.lastEventTime + 1, this.engine.eventWatermark() + 1);
       const artifact = await this.engine.vault.store(occurrence.source, protectedPayload, this.lastEventTime, { receiptId: occurrence.id, ...(authority === undefined ? {} : { authority }) });
-      const receipt: CaptureReceipt = { version: 1, tenant: { organizationId: this.engine.config.organizationId, workspaceId: this.engine.config.workspaceId }, occurrence: { ...occurrence, payload: protectedPayload }, fingerprint,
+      const receipt: CaptureReceipt = { version: 1, tenant: { organizationId: this.engine.config.organizationId, workspaceId: this.engine.config.workspaceId, sensorId: this.engine.config.sensorId }, occurrence: { ...occurrence, payload: protectedPayload }, fingerprint,
         receivedAt, artifact, status: "accepted", ...(authority === undefined ? {} : { authority }) };
       await writeProtected(this.path(occurrence.id), receipt, this.key, true);
       return { accepted: true as const, receiptId: occurrence.id, artifactId: artifact.id };
@@ -189,8 +198,11 @@ export class CaptureReceiptQueue {
     const latest = receipt.prepared === undefined ? await this.read(receipt.occurrence.id) ?? receipt : receipt;
     const { prepared, failure: _failure, ...completed } = latest;
     const eventDigests = Object.fromEntries((prepared?.jobs ?? []).flatMap((job) => job.kind === "event" ? [[job.event.id, capturedEventDigest(job.event)]] : []));
+    const trajectoryWitnesses = Object.fromEntries((prepared?.jobs ?? []).flatMap((job) => job.kind === "trajectory" ? [[job.runStamp.id, {
+      digest: capturedTrajectoryCommandDigest(job), ...(job.privateRevisionBinding === undefined ? {} : { privateRevisionBinding: job.privateRevisionBinding }),
+    }]] : []));
     await writeProtected(join(this.root, "completed", filename(receipt.occurrence.id)), {
-      ...completed, eventDigests, occurrence: { ...completed.occurrence, payload: {} }, status: "completed",
+      ...completed, eventDigests, trajectoryWitnesses, occurrence: { ...completed.occurrence, payload: {} }, status: "completed",
     }, this.key);
     await unlink(this.path(receipt.occurrence.id));
     await syncPrivateDirectory(this.root);
@@ -231,7 +243,7 @@ export async function readCompletedCaptureReceipt(options: {
   readonly encryptionKey: Uint8Array;
 }): Promise<CaptureReceipt | undefined> {
   let encrypted: string;
-  try { encrypted = (await readFile(join(options.stateRoot, "receipts", "receiver", "completed", filename(options.receiptId)), "utf8")).trim(); }
+  try { encrypted = (await readBoundedPrivateText(join(options.stateRoot, "receipts", "receiver", "completed", filename(options.receiptId)), 16 * 1024 * 1024)).trim(); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   const envelope = JSON.parse(encrypted) as { $superBrainEncrypted?: unknown };
   if (envelope.$superBrainEncrypted !== 1) throw new TypeError("capture witness is not authenticated encrypted evidence");

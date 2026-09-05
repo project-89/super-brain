@@ -46,7 +46,7 @@ Implementation ownership: domain/SDK/API/client contracts; worker scheduling/ext
 
 Verification: full `pnpm verify` passed under Node **24.20.0** with the disposable restricted PostgreSQL role: **534 tests across 85 files**, all workspace typechecks and both verification builds passed. Worker coverage includes 46 tests across seven files, including five actual HTTP integration cases. API coverage includes 72 tests with seven real two-process PostgreSQL regressions. Independent cross-review resolved forged approval reuse, corrected-claim support races, supersession reactivation through evidence/tag edits, slow model lane blocking, actual request cancellation, exhausted/manual retry behavior, shutdown/lease recovery races, streamed artifact size bounds, immutable checksum migration, and clock-skewed source timestamps. Source timestamps are resolved before persisting first-dispatch stamps; retries retain the exact command. See `PHASE2_MEMORY_CONTRACT.md`, `PHASE2_EVIDENCE_HANDOFF.md`, and the worker README. Trajectory checkpoint promotion retains its explicit Phase 3 attestation dependency.
 
-## Phase 3 — task evidence and reproducible attempt data
+## Phase 3 — task evidence and reproducible attempt data (verified)
 
 Add a backward-compatible versioned task/attempt manifest and event path: goal/acceptance specification, task version/input state, attempt/parent/condition, starting commit and consent-scoped dirty patch/untracked artifact references, fingerprint availability, per-turn provider/model/settings/tool/runtime/config metadata, available usage/time/cost, exact memory/context revisions and compaction/handoff lineage. Capture typed authenticated human interventions and delayed check/PR/CI/merge/revert outcomes through an authenticated integration boundary, linked to attempt/revision.
 
@@ -59,6 +59,10 @@ Verification: old trajectory replay; every manifest field survives event constru
 Phase 2 established a deliberate dependency: authenticated human-decision claims may be promoted only with their exact private receipt witness. Trajectory checkpoint promotion remains deferred until Phase 3 also verifies the recorded trajectory, matching task/attempt/revision, referenced acceptance and checkpoint. A genuine approval event linked from an arbitrary caller-authored trajectory is insufficient. Add a protected witness for the exact finalized trajectory payload, preserving the existing server-owned canonical identity and distinguishing the private source revision from its privacy-projected public identifier.
 
 Implementation ownership for Phase 3: platform owns trace/trajectory schemas, event construction, SDK/API/client task and outcome contracts; capture owns repository snapshots, session/runtime capture and finalized-trajectory attestation; processing owns explicit transcript reinterpretation and worker consumption of the attested attempt contract. Agree additive exported types first, then keep edits disjoint. Preserve old source occurrence IDs and original parser interpretations, and ensure reinterpreted copies cannot raise independent-evidence counts. Repository snapshots need NUL-delimited Git path parsing, exact binary bytes and file modes, explicit consent bounds, and a synthetic reconstruction drill. A bare fingerprint cannot be described as reconstructible input.
+
+Verification: full `pnpm verify` passed under Node **24.20.0**, using the disposable restricted PostgreSQL role: **566 tests across 92 files and 21 packages**, with no skipped tests, all workspace typechecks and both verification builds passed. Capture has 62 tests, importer 28, worker 48, SDK 57 and API 76, including seven real two-process PostgreSQL regressions. Independent cross-review and actual CLI/capture/API/worker tests verified immutable reinterpretation, original and later-correction citation retention, exact finalized receipt/acceptance/checkpoint promotion after restart, and authenticated external CI delivery with stable retries. Source-family counts conservatively coalesce equal original transcript bytes even under renamed artifact/path aliases; they do not prove independent real-world observations.
+
+The synthetic repository reconstruction drill preserves separate index/worktree edits, binary bytes, modes, deletions, renames and consented untracked paths, then verifies the restored fingerprint. Missing base commits remain an explicit dependency. Partial/redacted snapshots refuse original reconstruction. Unsupported checkout semantics (including hidden tracked-file flags and unsupported index modes) make fingerprints unavailable and cannot preserve earlier acceptance authority. Review also resolved symlinked destination/private-root exclusions, bounded encrypted witness reads, usage duplication, cross-space task identity collisions, stale authority, and exact human acceptance source joins. Missing oracle evidence now has unavailable/null confidence; legacy review text remains self-reported. See `PHASE3_ATTEMPT_CONTRACTS.md` and `PHASE3_CAPTURE_HANDOFF.md`. The full verification log is `/tmp/super-brain-phase3-verify-node24.log`.
 
 ## Phase 4 — shared client, feedback, context and operator product
 
@@ -95,20 +99,22 @@ After implementation, delegate verification, anti-pattern checks and code-qualit
 - Prepare a private beta on one server with local private-artifact workers. Keep the existing private/UNLICENSED distribution status unless the owner chooses a license. Public provisioning and external backup delivery require actual destination configuration; neither is implied by a local test.
 - Phase 1 independent review resolved exact-retry API prechecks, concurrent schema initialization, overly broad command-request normalization, repeated memory identity validation, trajectory ordering, receipt publication durability, retry ordering, restart timestamps, and stale acceptance fingerprints. The full Node 24/PostgreSQL gate passed after these changes.
 - Phase 1 is committed and pushed as `0a9fd0b38aeb2e06e570ade2410412c3ef4bf7c8` on `codex/address-architectural-findings`. Phase 2 proceeds from that reviewed baseline; no merge or deployed-service change has occurred.
+- Phase 2 is committed and pushed as `e429af0d3bff6a57a23717b9f59cc0130073cc59`, after the full 534-test Node 24/PostgreSQL gate. Phase 3 begins from that verified baseline using `PHASE3_ATTEMPT_CONTRACTS.md`; the original checkout and live services remain untouched.
 - Parser/normalizer version changes must include migration coverage for previously imported immutable artifacts and canonical turn citations. Receipt occurrence identity, artifact content identity, parser interpretation identity, canonical event order, and ingestion delivery order are separate concepts.
 - Phase 6 measurement must include the new memory-validity graph: index event IDs and incoming supersession/contradiction relations rather than repeatedly scanning all events and memories for every result. Compare optimized output with complete canonical replay, including late arrivals and evidence-only revisions.
 - Real model experiments must run on synthetic frozen tasks with integrations and capture hooks isolated from the live installation. Retain observed provider/model identity and original output; disable unrelated MCP connections and automatic hook delivery for the experiment. Do not reuse a private working corpus as evaluation input.
+- Phase 5 runtime discovery (read-only; no empirical model run yet): the bundled `/Applications/ChatGPT.app/Contents/Resources/codex` is version `0.153.3` and its local help supports `exec --ignore-user-config --ephemeral --json`; the older Homebrew Codex binary exited 137 even for help. Claude Code `2.1.246` supports `--safe-mode`, `--no-session-persistence`, strict empty MCP configuration and explicit tool selection. Use the bundled working runtime rather than modifying the installed Homebrew binary. Official [non-interactive guidance](https://learn.chatgpt.com/docs/non-interactive-mode) and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) confirm ephemeral sessions and the explicit hooks/memory feature controls; verify effective isolation before an actual run. Authentication and real model availability remain untested.
 
 ## Finding coverage ledger
 
 | Finding family | Planned coverage | Status |
 | --- | --- | --- |
 | E1 receipt loss/ambiguous retries | Phase 1 capture receipts and reconciliation | verified Phase 1 |
-| E2 outcome overstatement/historical result loss | Phase 1 tri-state evidence + Phase 3 acceptance contract | Phase 1 verified; Phase 3 pending |
-| E3 semantic mapping proof | Phases 3 and 5 independent annotations/experiment | pending |
-| E4 task/model/context/usage provenance | Phase 3 attempt manifest | pending |
-| E5 replayable repository state | Phase 3 private patch/artifact capture | pending |
-| E6 human authority/interventions | Phases 1, 3, 4 | Phase 1 verified; Phases 3–4 pending |
+| E2 outcome overstatement/historical result loss | Phase 1 tri-state evidence + Phase 3 acceptance contract | verified Phases 1 and 3 |
+| E3 semantic mapping proof | Phases 3 and 5 independent annotations/experiment | Phase 3 honest mapping/oracle labels verified; empirical Phase 5 pending |
+| E4 task/model/context/usage provenance | Phase 3 attempt manifest | verified Phase 3 |
+| E5 replayable repository state | Phase 3 private patch/artifact capture | verified Phase 3; original base commit remains explicit dependency |
+| E6 human authority/interventions | Phases 1, 3, 4 | Phases 1 and 3 verified; Phase 4 UI pending |
 | E7 lifecycle silence | Phase 1 explicit unknown policy | verified Phase 1 |
 | E8 selected consent-aware evaluation export | Phase 5 | pending |
 | P1 late-event cursor loss | Phase 1 ingestion positions and migration | verified Phase 1 |
@@ -119,14 +125,14 @@ After implementation, delegate verification, anti-pattern checks and code-qualit
 | P7 operations/readiness/restore | Phase 6 | pending |
 | Missing artifacts/failed cognition halt work | Phase 2 durable independent jobs | verified Phase 2 |
 | Extraction cap/tool evidence/turn identity | Phases 1 and 2 | verified Phases 1–2 |
-| Evidence references/promotion provenance | Phase 2; finalized trajectory witness in Phase 3 | Phase 2 verified; trajectory dependency pending |
+| Evidence references/promotion provenance | Phase 2; finalized trajectory witness in Phase 3 | verified Phases 2 and 3 |
 | Dedup support loss/scope collisions | Phase 2 | verified Phase 2 |
 | Shared correction/creator replay mismatch | Phase 2 | verified Phase 2 |
 | Forgotten/revised sources, derivative invalidation | Phase 2 | verified Phase 2 |
 | Feedback permission/failure/revision/meaning | Phase 4 | pending |
 | Browser/client/retry duplication | Phase 4 | pending |
 | Context adoption and practical task evidence UI | Phase 4 | pending |
-| Outcome-bearing PR/CI/merge/revert integration | Phase 3 authenticated outcome boundary | pending |
+| Outcome-bearing PR/CI/merge/revert integration | Phase 3 authenticated outcome boundary | verified Phase 3; real provider enrollment remains operated configuration |
 | Provider deadlines/background current embeddings | Phase 6 | pending |
 | Useful retrieval/real two-model evidence | Phase 5 | pending |
 | External deployment destination and license | Concrete preparation in Phase 6; actual decisions required before public release | pending |

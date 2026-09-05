@@ -257,7 +257,7 @@ export function TrajectoriesPage({
                           <dl>
                             <div><dt>Projection</dt><dd>{divergence?.kind ?? "indeterminate"}</dd></div>
                             <div><dt>Review</dt><dd>{evaluation?.review.verdict ?? "unmarked"}</dd></div>
-                            <div><dt>Confidence</dt><dd>{evaluation === undefined ? "-" : percent(evaluation.oracle.confidence)}</dd></div>
+                            <div><dt>Confidence</dt><dd>{evaluation === undefined || evaluation.oracle.confidence === null ? "Unknown" : percent(evaluation.oracle.confidence)}</dd></div>
                           </dl>
                         </header>
                         <ol className="trajectory-steps">

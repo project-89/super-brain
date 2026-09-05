@@ -154,13 +154,14 @@ describe("durable memory processing", () => {
     const merged = consolidateCandidateEvidence([candidate(1), candidate(2), candidate(3, { spaceId: "space-b" })], { principalId: "worker", audience: "workspace" });
     expect(merged).toHaveLength(2); expect(merged[0]!.evidence).toHaveLength(2);
   });
-  it("keeps same-summary claims with different content separate and avoids counting one source twice", async () => {
+  it("keeps same-summary claims with different content separate and retains distinct canonical source citations", async () => {
     const fixture = clientFixture(); const { instance } = await worker(fixture);
     await instance.propose([candidate(1), candidate(2, { content: { statement: "SQLite remains canonical" } })]);
     expect(fixture.views).toHaveLength(2);
     await instance.propose([candidate(3, { evidence: [{ ...candidate(1).evidence[0]!, eventId: "replayed-import" }] })]);
-    expect(fixture.views[0]!.candidate.evidence).toHaveLength(1);
-    expect(fixture.client.contributeMemoryCandidateEvidence).not.toHaveBeenCalled();
+    expect(fixture.views.find(({ candidate: value }) => value.id === id(1))!.candidate.evidence).toHaveLength(2);
+    expect(fixture.views.find(({ candidate: value }) => value.id === id(2))!.candidate.evidence).toHaveLength(1);
+    expect(fixture.client.contributeMemoryCandidateEvidence).toHaveBeenCalledOnce();
     const repeated = consolidateCandidateEvidence([
       candidate(4, { extractor: RULE_EXTRACTOR, content: { statement: "Same claim", role: "user", runId: "a", turnId: "one" } }),
       candidate(5, { extractor: RULE_EXTRACTOR, content: { statement: "Same claim", role: "user", runId: "b", turnId: "two" } }),

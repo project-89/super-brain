@@ -63,6 +63,7 @@ describe("Clerk authentication", () => {
       externalOrganizationId: "org_external",
       organizationRole: "org:admin",
     });
+    await expect(new ClerkAuthenticator(verifier, identityResolver()).authenticate("session-token")).resolves.toMatchObject({ taskEvidenceAuthority: { kind: "human", principalId: "principal-user" } });
   });
 
   it("maps signed organization membership webhooks to deterministic tenant provisioning", async () => {

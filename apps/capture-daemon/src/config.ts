@@ -6,6 +6,8 @@ import { chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/prom
 import type { AnonymizationPolicy } from "@_89/super-brain-importer";
 import type { CaptureConfig, ReasoningPolicy, ReasoningTreePolicy } from "./types.js";
 import { ensureVaultKey } from "@_89/super-brain-importer";
+import { DEFAULT_REPOSITORY_CAPTURE } from "./repository-snapshot.js";
+import type { RepositoryCapturePolicy } from "./types.js";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -44,6 +46,22 @@ export function defaultConfigPath(): string {
   return resolve(process.env.SUPER_BRAIN_CAPTURE_CONFIG ?? `${homedir()}/.config/super-brain/capture.json`);
 }
 
+export function parseRepositoryCapturePolicy(value: unknown): RepositoryCapturePolicy {
+  if (value === undefined) return DEFAULT_REPOSITORY_CAPTURE;
+  const input = record(value);
+  const allowed = new Set(["mode", "roots", "maxBytes", "maxFiles", "includeUntracked", "includeBinary"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) throw new TypeError("unknown repository capture policy field");
+  if (input.mode !== "metadata-only" && input.mode !== "snapshot") throw new TypeError("repository capture mode must be metadata-only or snapshot");
+  if (!Array.isArray(input.roots) || input.roots.length > 100) throw new TypeError("repository capture requires at most 100 explicit consent roots");
+  const roots = input.roots.map((root) => expandedPath(root, "repositoryCapture.roots"));
+  if (input.mode === "snapshot" && roots.length === 0) throw new TypeError("repository snapshots require explicit consent roots");
+  const maxBytes = positiveInteger(input.maxBytes ?? DEFAULT_REPOSITORY_CAPTURE.maxBytes, "repositoryCapture.maxBytes");
+  const maxFiles = positiveInteger(input.maxFiles ?? DEFAULT_REPOSITORY_CAPTURE.maxFiles, "repositoryCapture.maxFiles");
+  if (maxBytes > 64 * 1024 * 1024 || maxFiles > 10_000) throw new TypeError("repository snapshot bounds exceed 64 MiB or 10000 paths");
+  for (const key of ["includeUntracked", "includeBinary"] as const) if (input[key] !== undefined && typeof input[key] !== "boolean") throw new TypeError(`repositoryCapture.${key} must be boolean`);
+  return { mode: input.mode, roots, maxBytes, maxFiles, includeUntracked: input.includeUntracked === true, includeBinary: input.includeBinary === true };
+}
+
 export function parseCaptureConfig(value: unknown): CaptureConfig {
   const input = record(value);
   const apiUrl = requiredString(input.apiUrl, "apiUrl").replace(/\/+$/, "");
@@ -80,6 +98,8 @@ export function parseCaptureConfig(value: unknown): CaptureConfig {
     throw new TypeError("pseudonymous and strict anonymization require anonymizationKeyPath");
   }
   const sensorId = requiredString(input.sensorId, "sensorId");
+  const repositoryCapture = parseRepositoryCapturePolicy(input.repositoryCapture);
+  if (repositoryCapture.mode === "snapshot" && input.vaultKeyPath === undefined) throw new TypeError("repository snapshots require configured vault encryption");
   if (!/^urn:sensor:[^\s]+$/.test(sensorId)) {
     throw new TypeError("capture configuration sensorId must be a stable urn:sensor:* identifier");
   }
@@ -104,6 +124,7 @@ export function parseCaptureConfig(value: unknown): CaptureConfig {
     reasoningTreePolicy,
     treeSnapshotEveryEvents: nonNegativeInteger(input.treeSnapshotEveryEvents ?? 25, "treeSnapshotEveryEvents"),
     anonymizationPolicy,
+    repositoryCapture,
     ...(anonymizationKeyPath === undefined ? {} : { anonymizationKeyPath }),
   };
 }
@@ -211,6 +232,7 @@ export async function updateCaptureConfig(
     | "treeSnapshotEveryEvents"
     | "anonymizationPolicy"
     | "anonymizationKeyPath"
+    | "repositoryCapture"
   >> = {},
 ): Promise<{ readonly path: string; readonly config: CaptureConfig }> {
   const path = resolve(pathInput);

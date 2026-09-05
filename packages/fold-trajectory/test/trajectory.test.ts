@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseEvent } from "@_89/fold";
 
 import {
   TrajectoryProjectionError,
@@ -9,6 +10,10 @@ import {
   trajectoryLogRecordsFromEvent,
   type TrajectoryEventContext,
   type TrajectoryInput,
+  type TrajectoryManifest,
+  trajectoryInputSchema,
+  makeTaskEvidenceEvent,
+  type TaskAcceptanceRef,
 } from "../src/index.js";
 
 const context: TrajectoryEventContext = {
@@ -47,6 +52,13 @@ const tree = {
   ],
 };
 
+function approvalEvent(acceptance: TaskAcceptanceRef, t: number) {
+  return parseEvent({ specVersion: "0.7", id: acceptance.eventId, kind: "terminal.observation", title: "Observed approval", at: { t, worldDate: "2026-09-05", granularity: "session" },
+    author: context.author, participants: [context.access.principalId], capture: context.capture,
+    changes: [{ verb: "create", subject: `approval:${acceptance.eventId}`, nodeKind: "x.fold.activity-observation", after: { observation: "human_decision", data: { acceptance: JSON.parse(JSON.stringify(acceptance)) } } }],
+  });
+}
+
 function input(
   id: string,
   model: string,
@@ -78,6 +90,43 @@ function input(
 }
 
 describe("Fold trajectory lifecycle", () => {
+  it("round-trips the complete attempt manifest, runtime observations and structural basis through events and projections", async () => {
+    const manifest: TrajectoryManifest = { version: 1,
+      task: { version: 1, taskId: tree.taskId, taskVersion: "spec-v1", goal: "Refresh an expired token", acceptanceCriteria: [{ id: "test", description: "Original request succeeds" }], specification: { artifactId: "spec", kind: "task-spec" }, inputs: [{ artifactId: "input", kind: "input", sha256: "a".repeat(64), byteLength: 0 }] },
+      attempt: { version: 1, attemptId: "attempt-a", taskId: tree.taskId, taskVersion: "spec-v1", conditionId: "memory", startedAt: "2026-09-05T00:00:00Z",
+        startRevision: { fingerprintStatus: "available", revisionId: "opaque-before", snapshot: { artifactId: "before", kind: "repository-snapshot" }, reconstruction: "complete" },
+        finalRevision: { fingerprintStatus: "available", revisionId: "opaque-after", snapshot: { artifactId: "after", kind: "repository-snapshot" }, reconstruction: "complete" },
+        context: { memoryRefs: [{ memoryId: "memory", revision: 2 }], artifacts: [{ artifactId: "context", kind: "context" }], lineage: [{ kind: "compaction", eventId: "compaction", previousTurnId: "previous-turn" }] },
+        acceptance: { version: 1, taskId: tree.taskId, attemptId: "attempt-a", revisionId: "opaque-after", verdict: "success", eventId: "approved", artifactId: "approval", criterionIds: ["test"] },
+      },
+    };
+    const base = input("full", "observed-model", "success", ["observe-401", "token-expiry", "patch-refresh", "pass"], "VERDICT: approve");
+    const captured: TrajectoryInput = { ...base, manifest, steps: base.steps.map((step) => ({ ...step, runtime: { provenance: "native", providerId: "observed-provider", modelId: "observed-model", modelVersion: "v1", harness: { id: "harness", version: "2" }, configurationId: "config-hash", settings: { temperature: 0, topP: 1, maxOutputTokens: 100, reasoningEffort: "high" }, tools: [{ name: "test", version: "1" }], permissionMode: "read-only", usage: { inputTokens: 0, outputTokens: 5, cachedInputTokens: 0, reasoningTokens: 0, durationMs: 12, cost: { amount: 0, currency: "USD" } } }, context: manifest.attempt.context })),
+      assignments: Object.fromEntries(Object.entries(base.assignments).map(([id, assignment]) => [id, { ...assignment, method: { ...assignment.method, basis: "structural" } }])) };
+    const treeEvent = makeTrajectoryTreeRecordedEvent(context, { id: "tree", t: 1, worldDate: "2026-09-05" }, tree);
+    const runEvent = makeTrajectoryRecordedEvent(context, { id: "full", t: 2, worldDate: "2026-09-05" }, tree, captured);
+    const record = trajectoryLogRecordsFromEvent(runEvent)[0];
+    expect(record).toMatchObject({ recordType: "trajectory", trajectory: { manifest, steps: captured.steps }, assignments: captured.assignments });
+    const report = await analyzeTrajectoryTask(rebuildTrajectories([runEvent, treeEvent, approvalEvent(manifest.attempt.acceptance!, 1.5)]), tree.taskId);
+    expect(report?.projected[0]?.manifest).toEqual(manifest);
+    expect(report).toMatchObject({ comparison: { status: "compatible", taskVersions: ["spec-v1"] }, projectionBasis: "structural", evidenceAvailability: "reference-only", acceptanceSummary: [] });
+    expect(trajectoryInputSchema.safeParse({ ...captured, manifest: { ...manifest, attempt: { ...manifest.attempt, finalRevision: { fingerprintStatus: "unavailable" } } } }).success).toBe(false);
+  });
+
+  it("keeps authenticated delayed acceptance separate from historical labels and incompatible comparisons", async () => {
+    const treeEvent = makeTrajectoryTreeRecordedEvent(context, { id: "tree", t: 1, worldDate: "2026-09-05" }, tree);
+    const makeRun = (id: string, version: string, revisionId: string, t: number) => makeTrajectoryRecordedEvent(context, { id, t, worldDate: "2026-09-05" }, tree, {
+      ...input(id, "model", "failure", ["observe-401", "network", "retry", "fail"], "VERDICT: reject\nCONFIDENCE: 1"),
+      manifest: { version: 1, task: { version: 1, taskId: tree.taskId, taskVersion: version }, attempt: { version: 1, attemptId: id, taskId: tree.taskId, taskVersion: version, startRevision: { fingerprintStatus: "available", revisionId } } },
+    });
+    const first = makeRun("a", "v1", "before", 2); const second = makeRun("b", "v2", "other-input", 3);
+    const outcome = makeTaskEvidenceEvent(context, { id: "outcome", t: 4, worldDate: "2026-09-05" }, { recordType: "outcome", authority: { kind: "human", principalId: context.access.principalId }, input: { version: 1, id: "outcome", taskId: tree.taskId, attemptId: "a", revisionId: "before", kind: "acceptance", result: "success", observedAt: "2026-09-05T00:00:00Z", sourceEventId: "approved", acceptance: { version: 1, taskId: tree.taskId, attemptId: "a", revisionId: "before", verdict: "success", eventId: "approved", artifactId: "approval" } } });
+    const source = approvalEvent({ version: 1, taskId: tree.taskId, attemptId: "a", revisionId: "before", verdict: "success", eventId: "approved", artifactId: "approval" }, 3.5);
+    const report = await analyzeTrajectoryTask(rebuildTrajectories([outcome, second, first, treeEvent, source]), tree.taskId);
+    expect(report?.records[0]?.trajectory.outcome).toBe("failure");
+    expect(report).toMatchObject({ comparison: { status: "incompatible" }, analysis: { traceCount: 0 }, acceptanceSummary: [{ attemptId: "a", revisionId: "before", verdict: "success", authority: "authenticated-human", outcomeIds: ["outcome"] }] });
+  });
+
   it("records server-scoped trees and runs as canonical Fold records", () => {
     const treeEvent = makeTrajectoryTreeRecordedEvent(
       context,
@@ -129,10 +178,11 @@ describe("Fold trajectory lifecycle", () => {
       { trajectoryId: "run-a", divergence: { kind: "aligned", comparedEdges: 3 } },
       expect.objectContaining({ trajectoryId: "run-b", divergence: expect.objectContaining({ kind: "divergent", edgeIndex: 0 }) }),
     ]);
-    expect(report?.evaluations.map(({ review, oracle }) => [review.verdict, oracle.confidence])).toEqual([
-      ["approve", 0.92],
-      ["reject", 0.18],
+    expect(report?.evaluations.map(({ review, oracle, reviewProvenance }) => [review.verdict, oracle.confidence, reviewProvenance])).toEqual([
+      ["approve", null, "legacy-self-reported"],
+      ["reject", null, "legacy-self-reported"],
     ]);
+    expect(report?.evaluations.every(({ oracle }) => oracle.availability === "unavailable" && oracle.executions.length === 0)).toBe(true);
   });
 
   it("fails replay when a run precedes its shared task tree", () => {

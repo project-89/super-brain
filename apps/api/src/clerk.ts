@@ -202,7 +202,7 @@ export class ClerkAuthenticator implements Authenticator {
       principalId,
       author,
       ...(verified.tokenType === "session_token"
-        ? { organizationRoleLimit: organizationRoleLimit(verified.organizationRole) }
+        ? { organizationRoleLimit: organizationRoleLimit(verified.organizationRole), taskEvidenceAuthority: { kind: "human" as const, principalId } }
         : { capabilities: capabilities(verified.scopes) ?? [] }),
       identityProvider: "clerk",
       organizationId,

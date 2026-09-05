@@ -160,7 +160,7 @@ describe("capture daemon", () => {
     const trajectory = jobs.find(({ job }) => job.kind === "trajectory")?.job;
     expect(trajectory).toMatchObject({
       kind: "trajectory",
-      input: { outcome: "unknown", model: { id: "codex" } },
+      input: { outcome: "unknown", model: { id: "unreported" } },
       captureIdentity: { agent: "codex", session, project: "super-brain" },
     });
     if (trajectory?.kind !== "trajectory") throw new Error("missing trajectory job");
@@ -386,7 +386,7 @@ describe("capture daemon", () => {
     const trajectory = jobs.find((job) => job.kind === "trajectory");
     expect(trajectory).toMatchObject({
       kind: "trajectory",
-      input: { outcome: "unknown", model: { id: "hermes" } },
+      input: { outcome: "unknown", model: { id: "unreported" } },
       captureIdentity: { runtime: "hermes" },
     });
     if (trajectory?.kind !== "trajectory") throw new Error("missing Hermes trajectory");

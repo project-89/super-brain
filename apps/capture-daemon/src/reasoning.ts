@@ -14,6 +14,7 @@ export interface ExposedReasoningDelta {
   readonly cursor: number;
   readonly records: readonly unknown[];
   readonly items: readonly ExposedReasoningItem[];
+  readonly malformedRecords?: number;
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -94,6 +95,7 @@ export async function readExposedReasoningDelta(
   let consumed = 0;
   const records: unknown[] = [];
   const items: ExposedReasoningItem[] = [];
+  let malformedRecords = 0;
   for await (const chunk of createReadStream(path, { start, ...(end === undefined ? {} : { end }) })) {
     const input = Buffer.concat([carry, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     let lineStart = 0;
@@ -108,6 +110,7 @@ export async function readExposedReasoningDelta(
           const item = itemFor(parsed, source, lineOffset);
           if (item !== undefined) items.push(item);
         } catch {
+          malformedRecords += 1;
           // A malformed complete producer record is skipped without losing the
           // cursor position for later valid records.
         }
@@ -117,5 +120,5 @@ export async function readExposedReasoningDelta(
     consumed += lineStart;
     carry = input.subarray(lineStart);
   }
-  return { startCursor: start, cursor: start + consumed, records, items };
+  return { startCursor: start, cursor: start + consumed, records, items, ...(malformedRecords === 0 ? {} : { malformedRecords }) };
 }

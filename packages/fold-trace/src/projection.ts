@@ -172,6 +172,7 @@ export function projectTrajectory(
     model: trajectory.model,
     outcome: trajectory.outcome,
     capture: trajectory.capture,
+    ...(trajectory.manifest === undefined ? {} : { manifest: trajectory.manifest }),
     steps,
   };
 }

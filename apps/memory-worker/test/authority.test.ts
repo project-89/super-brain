@@ -34,7 +34,9 @@ async function fixture(includeReasoning = false) {
   const common = { session_id: "acceptance", cwd: repository };
   await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "review", task_key: "fixed" });
   const session = Object.values((await state.load()).sessions)[0]!;
-  const expected = { taskId: `capture-task-v2:${session.project.id}:${session.comparisonKey}`, attemptId: "trajectory:codex:acceptance:unit-1", revisionId: repositoryRevisionId(session.project)! };
+  const context = await engine.acceptanceContext("codex", "acceptance");
+  if (context.revisionId === undefined) throw new Error("fixture revision unavailable");
+  const expected = { taskId: context.taskId, attemptId: context.attemptId, revisionId: context.revisionId };
   const receiptId = "human-approval";
   const acceptance = { version: 1, ...expected, verdict: "success" };
   const authority = { kind: "local-operator" as const, principalId: "operator:urn:sensor:test", authenticatedAt: new Date().toISOString() };

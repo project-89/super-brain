@@ -54,6 +54,9 @@ import {
   trajectoryInputSchema,
   type TrajectoryEventContext,
   type TrajectoryInput,
+  taskManifestSchema, attemptManifestSchema, taskOutcomeInputSchema, taskInterventionInputSchema, TASK_EVIDENCE_NODE_KIND,
+  TaskEvidenceError,
+  type TaskManifest, type AttemptManifest,
 } from "@_89/fold-trajectory";
 import { z, ZodError } from "zod";
 import {
@@ -708,6 +711,7 @@ function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof JournalError) {
     return new ApiHttpError(500, "storage_error", "Fold storage operation failed");
   }
+  if (error instanceof TaskEvidenceError) return new ApiHttpError(409, "task_evidence_conflict", error.message);
   if (
     error instanceof FoldSdkError ||
     error instanceof TypeError ||
@@ -797,11 +801,13 @@ function assertGenericAppendRoute(event: FoldEvent): void {
     event.kind.startsWith("intention.") ||
     event.kind.startsWith("transcript.") ||
     event.kind.startsWith("memory.") ||
+    event.kind.startsWith("trajectory.") ||
     event.changes.some(
       (change) => "nodeKind" in change &&
         (change.nodeKind === INTENTION_EVENT_NODE_KIND ||
           change.nodeKind === MEMORY_CANDIDATE_NODE_KIND ||
           change.nodeKind === MEMORY_CANDIDATE_DECISION_NODE_KIND ||
+          change.nodeKind === TASK_EVIDENCE_NODE_KIND ||
           transcriptNodeKinds.has(change.nodeKind)),
     )
   ) {
@@ -844,7 +850,7 @@ function cursorFromUrl(url: URL): FoldSdkCursor | undefined {
   return { t, eventId };
 }
 
-type PageCursorKind = "memory" | "candidate" | "run" | "trajectory" | "trajectory-run" | "event" | "state";
+type PageCursorKind = "memory" | "candidate" | "run" | "trajectory" | "trajectory-run" | "task-evidence" | "event" | "state";
 
 interface PageCursor {
   readonly kind: PageCursorKind;
@@ -853,7 +859,7 @@ interface PageCursor {
 }
 
 const pageCursorSchema = z.object({
-  kind: z.enum(["memory", "candidate", "run", "trajectory", "trajectory-run", "event", "state"]),
+  kind: z.enum(["memory", "candidate", "run", "trajectory", "trajectory-run", "task-evidence", "event", "state"]),
   key: z.union([z.string(), z.number().finite()]),
   id: z.string().trim().min(1).max(10_000),
 }).strict();
@@ -1253,15 +1259,15 @@ async function authenticate(
   return subject;
 }
 
-function routeCapability(resource: string | undefined, resourceId: string | undefined, method: string): ApiCapability | undefined {
+function routeCapability(resource: string | undefined, resourceId: string | undefined, method: string, subresource?: string): ApiCapability | undefined {
   if (resource === "repository-enrollments" || resource === "audit-log" || resource === "identity-bindings" || resource === "identity-audit-log") return "organization:admin";
   if (resource === "event-stream" || resource === "projection") return "events:read";
   if (resource === "events") return method === "GET" ? "events:read" : "events:write";
   if (resource === "consumers") return method === "GET" ? "consumers:read" : "consumers:write";
-  if (resource === "trajectory-tasks") return method === "GET" ? "trajectories:read" : "trajectories:write";
+  if (resource === "trajectory-tasks") return method === "GET" ? "trajectories:read" : subresource === "outcomes" ? "task-outcomes:write" : subresource === "interventions" ? "task-interventions:write" : "trajectories:write";
   if (resource === "trajectories") return "trajectories:write";
   if (resource === "fleet") return "fleet:read";
-  if (resource === "transcript-projects" || resource === "transcript-runs") return "transcripts:read";
+  if (resource === "transcript-projects" || resource === "transcript-runs" || resource === "transcript-evidence-origins") return "transcripts:read";
   if (resource === "transcript-imports") return "transcripts:write";
   if (resource === "steering") return method === "GET" ? "steering:read" : "steering:write";
   if (resource === "reasoning") return "reasoning:read";
@@ -1445,7 +1451,7 @@ async function handleRequest(
   const tenant = { organizationId: access.organizationId, workspaceId };
   const sdk = await dependencies.sdks.sdkFor(tenant);
   if (access.platformDataAccess !== true) {
-    assertCredentialCapability(subject, routeCapability(resource, resourceId, method));
+    assertCredentialCapability(subject, routeCapability(resource, resourceId, method, resourceSegments[2]));
   }
   if (resource === "identity-bindings") {
     if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
@@ -1757,6 +1763,44 @@ async function handleRequest(
     return;
   }
 
+  if (resource === "transcript-evidence-origins" && resourceId === undefined) {
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const body = z.object({ references: z.array(memoryCandidateEvidenceSchema).max(100) }).strict().parse(await readJsonBody(request, maxBodyBytes));
+    sendJson(response, 200, { origins: await sdk.transcriptEvidenceOrigins(access, body.references.map(parsedMemoryEvidence)) });
+    return;
+  }
+  if (resource === "trajectory-tasks" && resourceId !== undefined && resourceSegments.length === 3) {
+    const operation = resourceSegments[2];
+    if (operation === "evidence" && method === "GET") {
+      const state = await sdk.taskEvidence(access, resourceId);
+      const items = [
+        ...[...state.tasks.values()].map((task) => ({ id: `task:${task.taskVersion}`, kind: "task" as const, task })),
+        ...[...state.attempts.values()].map((attempt) => ({ id: `attempt:${attempt.attemptId}`, kind: "attempt" as const, attempt })),
+        ...state.records.flatMap((record) => record.recordType === "outcome" || record.recordType === "intervention" ? [{ id: `${record.recordType}:${record.input.id}`, kind: "evidence" as const, record }] : []),
+      ].sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+      const page = pagedNewestFirst(items, "task-evidence", positiveIntegerQuery(url, "limit", 1_000) ?? 100, pageCursorFromUrl(url, "task-evidence"), () => 0, (item) => item.id);
+      sendJson(response, 200, { ...page, evidenceAvailability: "reference-only" }); return;
+    }
+    if (method !== "POST" || !["manifests", "attempts", "outcomes", "interventions"].includes(operation!)) throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const inputSchema = operation === "manifests" ? taskManifestSchema : operation === "attempts" ? attemptManifestSchema : operation === "outcomes" ? taskOutcomeInputSchema : taskInterventionInputSchema;
+    const body = z.object({ stamp: stampSchema, spaceId: z.string().trim().min(1).max(500).optional(), captureIdentity: trajectoryCaptureIdentitySchema.optional(), input: inputSchema }).strict().parse(await readJsonBody(request, maxBodyBytes));
+    if (body.input.taskId !== resourceId) throw new ApiHttpError(400, "invalid_task", "Task path must match input task");
+    const context = trajectoryContext(subject, access, body.spaceId, body.captureIdentity);
+    if (body.spaceId !== undefined && access.spaceRoles[body.spaceId] !== "writer" && access.spaceRoles[body.spaceId] !== "admin") throw new ApiHttpError(403, "task_write_denied", "Task writes require space writer access");
+    let result;
+    if (operation === "manifests") result = await sdk.recordTaskManifest(context, body.stamp, taskManifestSchema.parse(body.input) as TaskManifest);
+    else if (operation === "attempts") result = await sdk.recordAttemptManifest(context, body.stamp, attemptManifestSchema.parse(body.input) as AttemptManifest);
+    else {
+      const evidenceAuthority = subject.taskEvidenceAuthority;
+      if (evidenceAuthority === undefined || (operation === "interventions" && evidenceAuthority.kind !== "human")) throw new ApiHttpError(403, "task_evidence_authority_required", "This credential is not configured for this evidence authority");
+      if (operation === "outcomes") {
+        const input = taskOutcomeInputSchema.parse(body.input);
+        if (input.kind === "acceptance" && evidenceAuthority.kind !== "human") throw new ApiHttpError(403, "human_acceptance_required", "Machine reporters cannot assert human acceptance");
+        result = await sdk.recordTaskOutcome({ ...context, evidenceAuthority }, body.stamp, input);
+      } else result = await sdk.recordTaskIntervention({ ...context, evidenceAuthority }, body.stamp, taskInterventionInputSchema.parse(body.input));
+    }
+    sendJson(response, 201, result); return;
+  }
   if (resource === "trajectory-tasks" && resourceId === undefined) {
     if (method === "GET") {
       const tasks = await sdk.trajectoryTasks(access);

@@ -9,6 +9,7 @@ import type {
   EpistemicEventStamp,
   ForgottenMemory,
   MemoryCandidate,
+  MemoryCandidateEvidence,
   MemoryCandidateDecision,
   MemoryCandidateView,
   MemoryFeedbackRecord,
@@ -42,6 +43,15 @@ import type {
 } from "@_89/fold-transcript";
 
 export type FoldSdkAccessContext = EpistemicAccessContext;
+
+export interface TranscriptEvidenceOrigin {
+  readonly reference: MemoryCandidateEvidence;
+  readonly sourceOccurrenceId: string;
+  readonly recordRanges?: readonly { readonly start: number; readonly end: number }[];
+  readonly independenceKey: string;
+  /** Canonical source equivalence is verified; descriptive ranges are not private-byte attestation. */
+  readonly verified: boolean;
+}
 
 /** Delivery order is independent of canonical event time. Decimal strings preserve bigint precision. */
 export interface FoldDeliveryCursor {

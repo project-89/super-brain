@@ -18,6 +18,7 @@ import { CaptureHttpServer } from "./server.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
 import { exportCaptureData, pruneHookArtifacts, verifyCaptureExport } from "./maintenance.js";
 import { DurableSpool, HookVault, recordRelayFailure, StateStore } from "./storage.js";
+import { DEFAULT_REPOSITORY_CAPTURE, reconstructRepositorySnapshot } from "./repository-snapshot.js";
 import type { HookSource, ReasoningPolicy, ReasoningTreePolicy } from "./types.js";
 import { readVaultKey, RecordAnonymizer, type AnonymizationPolicy } from "@_89/super-brain-importer";
 
@@ -146,6 +147,24 @@ async function main(): Promise<void> {
     await relay(args, "/decision");
     return;
   }
+  if (command === "acceptance-context") {
+    const config = await readCaptureConfig(configPath(args));
+    const sessionId = option(args, "--session"); const source = option(args, "--source");
+    if (sessionId === undefined || source === undefined) throw new TypeError("acceptance-context requires --session ID and --source SOURCE");
+    const query = new URLSearchParams({ sessionId, source });
+    const result = await fetch(`http://${config.bindHost}:${config.port}/acceptance-context?${query}`, { headers: { "x-super-brain-operator-token": config.operatorToken }, signal: AbortSignal.timeout(30_000) });
+    if (!result.ok) throw new Error(`acceptance context unavailable: HTTP ${result.status}`);
+    process.stdout.write(`${JSON.stringify(await result.json(), null, 2)}\n`);
+    return;
+  }
+  if (command === "reconstruct-snapshot") {
+    const config = await readCaptureConfig(configPath(args));
+    const artifactId = option(args, "--artifact"); const sourceRepository = option(args, "--source-repository"); const destination = option(args, "--destination");
+    if (artifactId === undefined || sourceRepository === undefined || destination === undefined || config.vaultKeyPath === undefined) throw new TypeError("reconstruct-snapshot requires --artifact ID --source-repository PATH --destination NEW_PATH and configured vault encryption");
+    const result = await reconstructRepositorySnapshot({ vaultRoot: config.vaultRoot, artifactId, encryptionKey: await readVaultKey(config.vaultKeyPath), sourceRepository, destination });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "run") {
     await run(args);
     return;
@@ -211,6 +230,15 @@ async function main(): Promise<void> {
       throw new TypeError("--encrypted-reasoning must be retain or exclude");
     }
     const treeEvery = option(args, "--tree-every");
+    const repositoryMode = option(args, "--repository-capture");
+    const repositoryRoots = args.flatMap((arg, index) => arg === "--repository-root" && args[index + 1] !== undefined ? [args[index + 1]!] : []);
+    const untracked = option(args, "--snapshot-untracked"); const binary = option(args, "--snapshot-binary");
+    if ([untracked, binary].some((value) => value !== undefined && value !== "include" && value !== "exclude")) throw new TypeError("snapshot content options must be include or exclude");
+    const repositoryCapture = repositoryMode === undefined && repositoryRoots.length === 0 && untracked === undefined && binary === undefined && option(args, "--snapshot-max-bytes") === undefined && option(args, "--snapshot-max-files") === undefined ? undefined : {
+      ...(current.repositoryCapture ?? DEFAULT_REPOSITORY_CAPTURE), ...(repositoryMode === undefined ? {} : { mode: repositoryMode as "metadata-only" | "snapshot" }),
+      ...(repositoryRoots.length === 0 ? {} : { roots: repositoryRoots }), ...(untracked === undefined ? {} : { includeUntracked: untracked === "include" }), ...(binary === undefined ? {} : { includeBinary: binary === "include" }),
+      ...(option(args, "--snapshot-max-bytes") === undefined ? {} : { maxBytes: Number(option(args, "--snapshot-max-bytes")) }), ...(option(args, "--snapshot-max-files") === undefined ? {} : { maxFiles: Number(option(args, "--snapshot-max-files")) }),
+    };
     if (anonymization !== undefined && anonymization !== current.anonymizationPolicy) {
       const state = await new StateStore(current.stateRoot).load();
       if (Object.values(state.sessions).some((session) => !session.finalized)) {
@@ -218,6 +246,7 @@ async function main(): Promise<void> {
       }
     }
     const result = await updateCaptureConfig(configPath(args), {
+      ...(repositoryCapture === undefined ? {} : { repositoryCapture }),
       ...(reasoning === undefined ? {} : { reasoningPolicy: reasoning }),
       ...(encryptedReasoning === undefined ? {} : { retainEncryptedReasoning: encryptedReasoning === "retain" }),
       ...(reasoningTrees === undefined
@@ -329,7 +358,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "help") {
-    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed|resolve-failed> [--config PATH]\n");
+    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|acceptance-context|reconstruct-snapshot|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed|resolve-failed> [--config PATH]\n");
     return;
   }
   throw new Error(`unknown command: ${command}`);

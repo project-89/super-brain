@@ -63,8 +63,31 @@ and native/run identity before returning `interpretation: "retained-existing"`.
 This acknowledges retained history and does not claim that version 2 metadata
 was committed. Changed source bytes still conflict. Historical text consumers
 must use the **catalog artifact's** parser version; version 1 compatibility
-preserves its Claude implicit-turn identity. A separate explicit reinterpretation
-migration is required to publish revised canonical historical metadata.
+preserves its Claude implicit-turn identity.
+
+Use `reinterpret` to explicitly reprocess one catalog run from its retained local
+vault bytes. It never scans native history directories. Preview recomputes the
+new metadata and reports old/new turn correspondence and coverage without
+publishing; add `--confirm` to publish it:
+
+```sh
+FOLD_API_TOKEN=... pnpm --filter @_89/super-brain-importer start -- reinterpret \
+  --api-url http://127.0.0.1:3000 --organization local --workspace local-history \
+  --run RUN_ID --parser-version 2 --vault ~/.super-brain/transcript-vault
+```
+
+Encrypted vaults require `FOLD_TRANSCRIPT_VAULT_KEY_FILE`. Missing, malformed,
+changed, or identity-mismatched artifacts stop the operation. Only retained
+records can be reprocessed; the report identifies records unavailable from the
+original import. Legacy bytes without stored-byte attestations remain explicitly
+unverified. Existing privacy projections are preserved, and native identifiers
+recovered from private pseudonymous/strict vaults are omitted from new metadata.
+
+Publishing creates new immutable run, artifact, and turn identities linked to the
+original source occurrence and immediate predecessor. Original events and vault
+bytes remain unchanged. Repeating the same operation is idempotent. Canonical
+citations retain the actual interpretation and turn, while all interpretations
+of one source occurrence share one conservative corroboration identity.
 
 Encryption keys are published atomically so concurrent first-use relay processes
 cannot read partially written keys. New key directories and vault materialization

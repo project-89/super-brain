@@ -246,6 +246,7 @@ export function extractLiveMemoryCandidates(event: FoldEvent): ExtractedCandidat
     };
     candidates.push({
       id: deterministicCandidateId(event.at.t, `${LIVE_EXTRACTOR.version}\0${observation}\0${event.id}`),
+      ...(event.capture.scope.space === undefined ? {} : { spaceId: event.capture.scope.space }),
       projectIds: projectId === undefined ? [] : [projectId],
       source,
       summary: summary.slice(0, 500),

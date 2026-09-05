@@ -1,5 +1,6 @@
 import { captureEnvelopeSchema } from "@_89/fold";
 import { z } from "zod";
+import { attemptContextSchema, traceRuntimeObservationSchema, trajectoryManifestSchema } from "./manifests.js";
 
 const nonEmpty = z.string().min(1);
 
@@ -14,6 +15,8 @@ export const traceStepSchema = z.object({
   turnId: nonEmpty.optional(),
   startedAt: z.string().datetime({ offset: true }).optional(),
   durationMs: z.number().finite().nonnegative().optional(),
+  runtime: traceRuntimeObservationSchema.optional(),
+  context: attemptContextSchema.optional(),
 }).strict();
 
 export const sharedNodeSchema = z.object({
@@ -40,6 +43,7 @@ const projectionMethodSchema = z.object({
   kind: z.enum(["manual", "rule", "model"]),
   id: nonEmpty,
   confidence: z.number().finite().min(0).max(1).optional(),
+  basis: z.enum(["structural", "semantic"]).optional(),
 }).strict();
 
 export const projectionAssignmentSchema = z.discriminatedUnion("kind", [
@@ -64,6 +68,7 @@ export const rawTrajectorySchema = z.object({
   outcome: z.enum(["success", "failure", "unknown"]),
   capture: captureEnvelopeSchema,
   steps: z.array(traceStepSchema).min(1),
+  manifest: trajectoryManifestSchema.optional(),
 }).strict();
 
 export const trajectoryInputSchema = rawTrajectorySchema.omit({ capture: true }).extend({

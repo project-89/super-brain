@@ -80,6 +80,61 @@ const bundle: TranscriptImportBundle = {
   chunks: [chunk],
 };
 
+function reinterpreted(): TranscriptImportBundle {
+  const nextRunId = "codex:run-a:interpretation-2";
+  return {
+    ...bundle,
+    artifact: { ...artifact, id: "artifact-a:interpretation-2", parser: { ...artifact.parser, version: "2" } },
+    run: { ...run, id: nextRunId, artifactId: "artifact-a:interpretation-2", interpretation: { version: 1, sourceOccurrenceId: artifact.id, sourceArtifactId: artifact.id, previousRunId: run.id, parser: { ...artifact.parser, version: "2" } } },
+    chunks: [{ ...chunk, runId: nextRunId, turns: chunk.turns.map((turn) => ({ ...turn, id: `${turn.id}:v2`, origin: { sourceOccurrenceId: artifact.id, recordRanges: [{ start: 0, end: 4 }] } })), actions: [] }],
+  };
+}
+
+describe("immutable transcript reinterpretation", () => {
+  it("keeps original catalogs and collapses all interpretations to one canonical source family", async () => {
+    const sdk = new FoldSdk(new MemoryStore()); const currentContext = context();
+    const original = await sdk.importTranscript(currentContext, bundle, { importId: "original", importedAt: 100 });
+    const next = reinterpreted();
+    const nextContext = { ...currentContext, capture: { ...currentContext.capture, identity: { ...currentContext.capture.identity, run: next.run.id } } };
+    const interpreted = await sdk.importTranscript(nextContext, next, { importId: "reinterpret", importedAt: 200 });
+    expect((await sdk.transcriptRun(currentContext.access, run.id))?.run).toEqual(run);
+    expect((await sdk.transcriptRun(currentContext.access, next.run.id))?.chunks[0]?.turns[0]?.origin).toEqual({ sourceOccurrenceId: artifact.id, recordRanges: [{ start: 0, end: 4 }] });
+    const references = [
+      { eventId: original.events.at(-1)!.id, runId: run.id, turnId: chunk.turns[0]!.id },
+      { eventId: interpreted.events.at(-1)!.id, runId: next.run.id, turnId: next.chunks[0]!.turns[0]!.id },
+    ];
+    const origins = await sdk.transcriptEvidenceOrigins(currentContext.access, references);
+    expect(origins).toHaveLength(2);
+    expect(new Set(origins.map(({ independenceKey }) => independenceKey)).size).toBe(1);
+    expect(origins[0]).not.toHaveProperty("recordRanges");
+    expect(origins[1]).toMatchObject({ verified: true, sourceOccurrenceId: artifact.id, recordRanges: [{ start: 0, end: 4 }] });
+    expect(await sdk.transcriptEvidenceOrigins(currentContext.access, [{ ...references[1]!, eventId: "unavailable" }])).toEqual([]);
+    expect(await sdk.importTranscript(nextContext, next, { importId: "reinterpret", importedAt: 200 })).toEqual(interpreted);
+    const alias: TranscriptImportBundle = { ...bundle, artifact: { ...artifact, id: "renamed-artifact", sourcePathHash: "d".repeat(64) },
+      run: { ...run, id: "renamed-run", artifactId: "renamed-artifact" },
+      chunks: [{ ...chunk, runId: "renamed-run", turns: chunk.turns.map((turn) => ({ ...turn, id: `${turn.id}:alias` })), actions: chunk.actions.map((action) => ({ ...action, id: `${action.id}:alias`, turnId: `${action.turnId}:alias` })) }],
+    };
+    const aliasContext = { ...currentContext, capture: { ...currentContext.capture, identity: { ...currentContext.capture.identity, run: alias.run.id } } };
+    const aliasImport = await sdk.importTranscript(aliasContext, alias, { importId: "renamed", importedAt: 300 });
+    const aliasOrigins = await sdk.transcriptEvidenceOrigins(currentContext.access, [...references, { eventId: aliasImport.events.at(-1)!.id, runId: alias.run.id, turnId: alias.chunks[0]!.turns[0]!.id }]);
+    expect(aliasOrigins).toHaveLength(3);
+    expect(new Set(aliasOrigins.map(({ independenceKey }) => independenceKey)).size).toBe(1);
+    expect(aliasOrigins[2]?.sourceOccurrenceId).toBe("renamed-artifact");
+  });
+
+  it("rejects forged root bytes, predecessors, range bounds and scope broadening before append", async () => {
+    const store = new MemoryStore(); const sdk = new FoldSdk(store); const baseContext = context(); const currentContext = { ...baseContext, access: { ...baseContext.access, spaceRoles: { "space-a": "writer" as const } } };
+    const scoped = { ...currentContext, capture: { ...currentContext.capture, scope: { ...currentContext.capture.scope, space: "space-a" } } };
+    await sdk.importTranscript(scoped, bundle, { importId: "original", importedAt: 100 });
+    const next = reinterpreted(); const baseline = store.entries.length;
+    await expect(sdk.importTranscript(currentContext, next, { importId: "broaden", importedAt: 200 })).rejects.toThrow(/source|predecessor/);
+    await expect(sdk.importTranscript(scoped, { ...next, artifact: { ...next.artifact, sha256: "d".repeat(64) } }, { importId: "bytes", importedAt: 200 })).rejects.toThrow(/bytes/);
+    await expect(sdk.importTranscript(scoped, { ...next, run: { ...next.run, interpretation: { ...next.run.interpretation!, previousRunId: "other" } } }, { importId: "previous", importedAt: 200 })).rejects.toThrow(/predecessor/);
+    await expect(sdk.importTranscript(scoped, { ...next, chunks: [{ ...next.chunks[0]!, turns: [{ ...next.chunks[0]!.turns[0]!, origin: { sourceOccurrenceId: artifact.id, recordRanges: [{ start: 0, end: 5 }] } }] }] }, { importId: "range", importedAt: 200 })).rejects.toThrow(/bounds/);
+    expect(store.entries.length).toBe(baseline);
+  });
+});
+
 function context(workspaceId = "workspace-1"): FoldSdkTranscriptContext {
   const currentAccess = access({ workspaceId, workspaceRole: "owner" });
   return {

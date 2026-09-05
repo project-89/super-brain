@@ -16,12 +16,14 @@ import type {
   RecalledMemory,
 } from "@_89/fold-epistemic";
 import type { TranscriptRunDetail, MemoryCandidateAcceptanceResult, FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
+import type { TranscriptEvidenceOrigin } from "@_89/fold-sdk";
 import type { TranscriptRun } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
   TrajectoryMutationResult,
   TrajectoryTreeMutationResult,
   TrajectoryTreeRecord,
+  TaskManifest, AttemptManifest, TaskOutcomeInput, TaskInterventionInput, TaskEvidenceMutationResult, TaskEvidenceRecord,
 } from "@_89/fold-trajectory";
 
 export interface SuperBrainClientOptions {
@@ -35,6 +37,14 @@ export interface SuperBrainClientOptions {
     readonly taskId?: string;
     readonly detail?: string;
   };
+}
+
+export interface TrajectoryWriteOptions { readonly spaceId?: string; readonly captureIdentity?: Readonly<Record<string, string>> }
+export interface TaskEvidencePage {
+  readonly items: readonly ({ readonly id: string; readonly kind: "task"; readonly task: TaskManifest } | { readonly id: string; readonly kind: "attempt"; readonly attempt: AttemptManifest } | { readonly id: string; readonly kind: "evidence"; readonly record: TaskEvidenceRecord })[];
+  readonly total: number;
+  readonly nextCursor?: string;
+  readonly evidenceAvailability: "reference-only";
 }
 
 export interface EventStamp {
@@ -321,6 +331,24 @@ export class SuperBrainClient {
         ...(options.captureIdentity === undefined ? {} : { captureIdentity: options.captureIdentity }),
       }),
     });
+  }
+
+  async transcriptEvidenceOrigins(references: readonly MemoryCandidateEvidence[]): Promise<readonly TranscriptEvidenceOrigin[]> {
+    if (references.length > 100) throw new TypeError("at most 100 evidence origins may be resolved");
+    const result = await this.request<{ readonly origins: readonly TranscriptEvidenceOrigin[] }>(this.workspacePath("transcript-evidence-origins"), { method: "POST", body: JSON.stringify({ references }) });
+    return result.origins;
+  }
+
+  private recordTaskEvidence(stamp: EventStamp, input: TaskManifest | AttemptManifest | TaskOutcomeInput | TaskInterventionInput, operation: string, options: TrajectoryWriteOptions): Promise<TaskEvidenceMutationResult> {
+    return this.request(this.workspacePath(`trajectory-tasks/${encodeURIComponent(input.taskId)}/${operation}`), { method: "POST", body: JSON.stringify({ stamp, input, ...options }) });
+  }
+  recordTaskManifest(stamp: EventStamp, input: TaskManifest, options: TrajectoryWriteOptions = {}): Promise<TaskEvidenceMutationResult> { return this.recordTaskEvidence(stamp, input, "manifests", options); }
+  recordAttemptManifest(stamp: EventStamp, input: AttemptManifest, options: TrajectoryWriteOptions = {}): Promise<TaskEvidenceMutationResult> { return this.recordTaskEvidence(stamp, input, "attempts", options); }
+  recordTaskOutcome(stamp: EventStamp, input: TaskOutcomeInput, options: TrajectoryWriteOptions = {}): Promise<TaskEvidenceMutationResult> { return this.recordTaskEvidence(stamp, input, "outcomes", options); }
+  recordTaskIntervention(stamp: EventStamp, input: TaskInterventionInput, options: TrajectoryWriteOptions = {}): Promise<TaskEvidenceMutationResult> { return this.recordTaskEvidence(stamp, input, "interventions", options); }
+  taskEvidence(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<TaskEvidencePage> {
+    const query = new URLSearchParams(); if (options.limit !== undefined) query.set("limit", String(options.limit)); if (options.cursor !== undefined) query.set("pageCursor", options.cursor);
+    return this.request(this.workspacePath(`trajectory-tasks/${encodeURIComponent(taskId)}/evidence`) + (query.size === 0 ? "" : `?${query}`));
   }
 
   async trajectoryTasks(): Promise<readonly TrajectoryTaskSummary[]> {

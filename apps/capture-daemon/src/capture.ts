@@ -9,11 +9,13 @@ import {
   type TerminalSensorContext,
 } from "@_89/fold-activity";
 import type { JsonValue } from "@_89/fold";
-import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
+import { trajectoryInputSchema, type AttemptRevisionRef, type TrajectoryInput, type TrajectoryTreeRecord } from "@_89/fold-trajectory";
 import { RecordAnonymizer, redactJsonValue } from "@_89/super-brain-importer";
 
 import { normalizeHookEvidence, normalizeTaskAcceptance, repositoryRevisionId } from "./evidence.js";
 import { refreshProject, resolveProject } from "./project.js";
+import { captureRepositorySnapshot } from "./repository-snapshot.js";
+import { captureAttemptContext, captureRuntimeObservation, nativeRuntimeObservation } from "./runtime.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
 import { mergeRecoveredSteps, recoverCapturedSteps } from "./recovery.js";
 import {
@@ -117,9 +119,10 @@ function eventStamp(artifact: VaultArtifact, index: number, label: string) {
 
 function stepFor(session: CaptureSession, input: Omit<CapturedStep, "id" | "stepNumber">): CaptureSession {
   const stepNumber = session.steps.length + 1;
+  const { usage: _usage, usageInterpretation: _interpretation, usageScope: _scope, ...runtime } = session.runtime ?? {};
   return {
     ...session,
-    steps: [...session.steps, { ...input, id: `step-${stepNumber}`, stepNumber }],
+    steps: [...session.steps, { ...(session.runtime === undefined ? {} : { runtime: runtime as NonNullable<CaptureSession["runtime"]> }), ...(session.context === undefined ? {} : { context: session.context }), ...input, id: `step-${stepNumber}`, stepNumber }],
   };
 }
 
@@ -135,6 +138,8 @@ function traceStep(step: CapturedStep, privacy: RecordAnonymizer): TrajectoryInp
     ...(step.turnId === undefined ? {} : { turnId: privacy.alias("turn", step.turnId) }),
     ...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
     ...(step.durationMs === undefined ? {} : { durationMs: step.durationMs }),
+    ...(step.runtime === undefined ? {} : { runtime: step.runtime }),
+    ...(step.context === undefined ? {} : { context: step.context }),
   };
 }
 
@@ -176,6 +181,8 @@ function completeCurrentUnit(session: CaptureSession): CaptureSession {
   const {
     currentUnitStartStepNumber: _start,
     currentUnitEndStepNumber: _end,
+    manifest: _manifest,
+    startSourceRevisionId: _startRevision,
     ...remaining
   } = session;
   return {
@@ -561,6 +568,8 @@ export class CaptureEngine {
     const observedHarnessVersion = text(payload.client_version) ?? text(payload.clientVersion) ?? text(payload.harness_version);
     const observedPermissionMode = text(payload.permission_mode) ?? text(payload.permissionMode);
     const observedTurnId = text(payload.turn_id) ?? text(payload.turnId);
+    const runtime = captureRuntimeObservation(source, payload);
+    const context = captureAttemptContext(payload);
     if (existing !== undefined) {
       const resumed = !existing.active && !existing.finalized;
       return {
@@ -571,6 +580,8 @@ export class CaptureEngine {
           ...existing,
           active: !existing.finalized,
           lastSeenAt: artifact.receivedAt,
+          runtime,
+          ...(context === undefined ? {} : { context }),
           ...(observedTranscriptPath === undefined ? {} : { transcriptPath: observedTranscriptPath }),
           ...(observedModel === undefined ? {} : { model: observedModel }),
           ...(observedHarnessVersion === undefined ? {} : { harnessVersion: observedHarnessVersion }),
@@ -586,6 +597,8 @@ export class CaptureEngine {
       agent: agentName(source),
       startedAt: artifact.receivedAt,
       project,
+      runtime,
+      ...(context === undefined ? {} : { context }),
       ...(observedTranscriptPath === undefined ? {} : { transcriptPath: observedTranscriptPath }),
       ...(observedModel === undefined ? {} : { model: observedModel }),
       ...(observedHarnessVersion === undefined ? {} : { harnessVersion: observedHarnessVersion }),
@@ -648,6 +661,10 @@ export class CaptureEngine {
     }
 
     const name = hookName(payload);
+    if (name !== "UserPromptSubmit" && session.manifest === undefined && !session.finalized && (session.currentUnitStartStepNumber !== undefined || (session.completedUnitCount ?? 0) === 0)) {
+      session = await this.beginAttempt(session, payload, artifact);
+    }
+    if (name !== "UserPromptSubmit" && session.runtime?.usage !== undefined) session = await this.captureReportedRuntime(session, artifact, index++);
     if (name === "UserPromptSubmit") {
       if (session.currentUnitStartStepNumber !== undefined && currentUnitSteps(session).length > 0) {
         const abandoned = withoutVerifiedOutcome(session);
@@ -669,6 +686,9 @@ export class CaptureEngine {
         taskKey: _taskKey,
         steeringIntentionIds: _steeringIntentionIds,
         currentUnitStartStepNumber: _currentUnitStart,
+        context: _context,
+        manifest: _manifest,
+        startSourceRevisionId: _startRevision,
         ...resetSession
       } = withoutVerifiedOutcome(session);
       session = {
@@ -676,7 +696,10 @@ export class CaptureEngine {
         currentUnitStartStepNumber: resetSession.steps.length + 1,
         ...(comparisonKey === undefined ? {} : { comparisonKey }),
         ...(explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
+        ...(captureAttemptContext(payload) === undefined ? {} : { context: captureAttemptContext(payload)! }),
       };
+      session = await this.beginAttempt(session, payload, artifact);
+      if (session.runtime?.usage !== undefined) session = await this.captureReportedRuntime(session, artifact, index++);
       session = await this.observe(session, artifact, index++, {
         kind: "prompt_submitted",
         data: {
@@ -910,11 +933,16 @@ export class CaptureEngine {
     } else if (name === "HumanDecision") {
       session = { ...session, project: await refreshProject(session.project) };
       const summary = text(payload.summary);
-      const acceptance = normalizeTaskAcceptance(payload.acceptance, authority, {
+      const suppliedAcceptance = object(payload.acceptance);
+      // Existing local operators may submit the private Git fingerprint; canonical joins use the projected ID.
+      const acceptanceInput = suppliedAcceptance !== undefined && suppliedAcceptance.revisionId === repositoryRevisionId(session.project)
+        ? { ...suppliedAcceptance, revisionId: this.publicRevisionId(session.project) } : suppliedAcceptance;
+      const acceptance = normalizeTaskAcceptance(acceptanceInput, authority, {
         taskId: trajectoryTaskId(session, this.privacy),
         attemptId: this.attemptId(session),
-        ...(repositoryRevisionId(session.project) === undefined ? {} : { revisionId: repositoryRevisionId(session.project)! }),
+        ...(this.publicRevisionId(session.project) === undefined ? {} : { revisionId: this.publicRevisionId(session.project)! }),
         artifactId: artifact.id,
+        ...(session.manifest?.task.acceptanceCriteria === undefined ? {} : { criterionIds: session.manifest.task.acceptanceCriteria.map(({ id }) => id) }),
       });
       const verdict = acceptance?.verdict;
       if (summary === undefined) throw new TypeError("human decision requires summary");
@@ -976,6 +1004,9 @@ export class CaptureEngine {
         steeringIntentionIds: [...new Set([...(session.steeringIntentionIds ?? []), ...intentionIds])],
       };
     } else if (name === "Stop" || name === "StopFailure") {
+      const runtime = await this.captureNativeRuntime(session, artifact, index);
+      session = runtime.session;
+      index = runtime.nextIndex;
       const reasoning = await this.captureExposedReasoning(session, artifact, index);
       session = reasoning.session;
       index = reasoning.nextIndex;
@@ -1047,6 +1078,11 @@ export class CaptureEngine {
       session = await this.observe(session, artifact, index++, { kind: "harness_event", data });
       const switchedModel = text(payload.new_model);
       if (name === "PostModelSwitch" && switchedModel !== undefined) session = { ...session, model: switchedModel };
+      if (name === "PreCompact" || name === "Handoff") {
+        const lineage = [...(session.context?.lineage ?? []), { kind: name === "PreCompact" ? "compaction" as const : "handoff" as const, eventId: session.lastEventId!, artifact: { artifactId: artifact.id, kind: "context" as const }, ...(session.currentTurnId === undefined ? {} : { previousTurnId: this.privacy.alias("turn", session.currentTurnId) }) }].slice(-100);
+        session = { ...session, context: { ...session.context, lineage } };
+        session = stepFor(session, { nodeKind: "observation", role: "decision", content: name === "PreCompact" ? "Harness context compaction observed" : "Harness handoff observed", artifactId: artifact.id, eventId: session.lastEventId! });
+      }
     }
 
     const eventsSinceSnapshot = (session.observedEventCount ?? 0) - (session.lastTreeSnapshotEventCount ?? 0);
@@ -1080,6 +1116,34 @@ export class CaptureEngine {
     };
     await this.saveState();
     return { artifactId: artifact.id };
+  }
+
+  private async captureReportedRuntime(session: CaptureSession, artifact: VaultArtifact, index: number): Promise<CaptureSession> {
+    const next = await this.observe(session, artifact, index, { kind: "harness_event", data: { hookEvent: "HookRuntime", artifactId: artifact.id, runtime: JSON.parse(JSON.stringify(session.runtime)) as JsonValue } });
+    return stepFor(next, { nodeKind: "observation", role: "decision", content: "Hook runtime usage reported", artifactId: artifact.id, eventId: next.lastEventId!, runtime: session.runtime!, ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }) });
+  }
+
+  private async captureNativeRuntime(session: CaptureSession, artifact: VaultArtifact, index: number): Promise<{ readonly session: CaptureSession; readonly nextIndex: number }> {
+    if (session.transcriptPath === undefined || !["codex", "claude-code"].includes(session.source)) return { session, nextIndex: index };
+    try {
+      const delta = await readExposedReasoningDelta(session.transcriptPath, session.source, session.runtimeCursor ?? 0, { maxBytes: TRANSCRIPT_DELTA_MAX_BYTES });
+      const observations = delta.records.flatMap((record) => { const value = nativeRuntimeObservation(session.source, record); return value === undefined ? [] : [value]; });
+      let next: CaptureSession = { ...session, runtimeCursor: delta.cursor }; let nextIndex = index;
+      for (const observed of observations.slice(0, 100)) {
+        const runtimeArtifact = await this.vault.store(session.source, { hook_event_name: "NativeRuntime", session_id: session.sessionId,
+          runtime: observed.runtime, ...(observed.turnId === undefined ? {} : { turn_id: observed.turnId }), startCursor: delta.startCursor, endCursor: delta.cursor,
+        }, artifact.eventTime, { ...(artifact.receiptId === undefined ? {} : { receiptId: artifact.receiptId }) });
+        next = { ...next, ...(observed.runtime.modelId === undefined ? {} : { model: observed.runtime.modelId }) };
+        next = await this.observe(next, artifact, nextIndex++, { kind: "harness_event", data: { hookEvent: "NativeRuntime", artifactId: runtimeArtifact.id, runtime: JSON.parse(JSON.stringify(observed.runtime)) as JsonValue } });
+        next = stepFor(next, { nodeKind: "observation", role: "decision", content: "Native runtime metadata observed", artifactId: runtimeArtifact.id, eventId: next.lastEventId!, runtime: observed.runtime, ...(observed.turnId === undefined ? {} : { turnId: observed.turnId }) });
+      }
+      if (observations.length > 100 || (delta.malformedRecords ?? 0) > 0) next = await this.observe(next, artifact, nextIndex++, { kind: "harness_event", data: { hookEvent: "NativeRuntimeCoverage", artifactId: artifact.id, excludedMetadataRecords: Math.max(0, observations.length - 100), malformedRecords: delta.malformedRecords ?? 0 } });
+      return { session: next, nextIndex };
+    } catch {
+      // A missing/changing native file cannot erase independently durable hook evidence.
+      const next = await this.observe(session, artifact, index, { kind: "harness_event", data: { hookEvent: "NativeRuntimeCoverage", artifactId: artifact.id, status: "unavailable" } });
+      return { session: next, nextIndex: index + 1 };
+    }
   }
 
   private async captureExposedReasoning(
@@ -1283,6 +1347,11 @@ export class CaptureEngine {
       project: this.privacy.alias("project-name", session.project.name),
       anonymization: this.config.anonymizationPolicy,
       reasoning: this.config.reasoningPolicy,
+      sensor: this.config.sensorId,
+      fingerprintStatus: session.project.fingerprintStatus ?? "unavailable",
+      ...(session.project.fingerprintReason === undefined ? {} : { fingerprintReason: session.project.fingerprintReason }),
+      ...(this.publicRevisionId(session.project) === undefined ? {} : { revision: this.publicRevisionId(session.project)! }),
+      ...(session.model === undefined ? { modelObservation: "unavailable" } : { modelObservation: "reported" }),
       ...(session.project.head === undefined
         ? {}
         : { gitHead: privateDigest(this.privacy, "git-head", session.project.head) }),
@@ -1364,6 +1433,58 @@ export class CaptureEngine {
     return `trajectory:${session.source}:${this.privacy.alias("session", session.sessionId)}:unit-${(session.completedUnitCount ?? 0) + 1}`;
   }
 
+  private publicRevisionId(project: CaptureSession["project"]): string | undefined {
+    const source = repositoryRevisionId(project);
+    return source === undefined ? undefined : `revision:${privateDigest(this.privacy, "repository-revision", source)}`;
+  }
+
+  /** Operator-visible canonical IDs, refreshed immediately before a revision-bound decision. */
+  acceptanceContext(source: HookSource, sessionId: string): Promise<{ readonly taskId: string; readonly attemptId: string; readonly revisionId?: string; readonly fingerprintStatus: "available" | "unavailable" }> {
+    return this.chain.then(async () => {
+      const session = this.state.sessions[sessionKey(source, sessionId)];
+      if (session === undefined || session.finalized) throw new TypeError("active capture session not found");
+      const project = await refreshProject(session.project); const revisionId = this.publicRevisionId(project);
+      return { taskId: trajectoryTaskId(session, this.privacy), attemptId: this.attemptId(session), fingerprintStatus: revisionId === undefined ? "unavailable" : "available", ...(revisionId === undefined ? {} : { revisionId }) };
+    });
+  }
+
+  private async revisionReference(session: CaptureSession, artifact: VaultArtifact): Promise<AttemptRevisionRef> {
+    const revisionId = this.publicRevisionId(session.project); const sourceRevisionId = repositoryRevisionId(session.project);
+    if (revisionId === undefined || sourceRevisionId === undefined) return { fingerprintStatus: "unavailable", reconstruction: "unavailable" };
+    const snapshot = await captureRepositorySnapshot(this.config, session.project, { sourceRevisionId, publicRevisionId: revisionId, capturedAt: artifact.receivedAt });
+    if (snapshot.reason === "repository-changing" || snapshot.reason === "repository-unavailable") return { fingerprintStatus: "unavailable", reconstruction: "unavailable" };
+    return { fingerprintStatus: "available", revisionId, reconstruction: snapshot.reconstruction,
+      ...(snapshot.artifactId === undefined ? {} : { snapshot: { artifactId: snapshot.artifactId, kind: "repository-snapshot" as const, ...(snapshot.byteLength === undefined ? {} : { byteLength: snapshot.byteLength }) } }) };
+  }
+
+  private async beginAttempt(session: CaptureSession, payload: Record<string, unknown>, artifact: VaultArtifact): Promise<CaptureSession> {
+    const project = await refreshProject(session.project); session = { ...session, project };
+    const taskId = trajectoryTaskId(session, this.privacy);
+    const criteria = Array.isArray(payload.acceptance_criteria) ? payload.acceptance_criteria.slice(0, 100).flatMap((item) => {
+      const criterion = object(item); const id = text(criterion?.id); const description = text(criterion?.description);
+      return id === undefined ? [] : [{ id: bounded(id, 500), ...(description === undefined ? {} : { description: this.privacy.text(bounded(description, 2_000)) }) }];
+    }) : undefined;
+    const inputs = Array.isArray(payload.inputs) ? payload.inputs.slice(0, 100).flatMap((value) => {
+      const id = text(object(value)?.artifactId); return id === undefined ? [] : [{ artifactId: bounded(id, 500), kind: "input" as const }];
+    }) : undefined;
+    const goal = text(payload.task_goal);
+    const specification = { prompt: text(payload.prompt) ?? text(payload.user_prompt), goal, acceptanceCriteria: criteria, inputs, sourceVersion: text(payload.task_version) };
+    const hasSpecification = Object.values(specification).some((value) => value !== undefined);
+    const stored = hasSpecification ? await this.vault.store("unknown", { hook_event_name: "TaskSpecification", ...specification }, artifact.eventTime) : undefined;
+    const taskVersion = `task-version:${privateDigest(this.privacy, "task-version", JSON.stringify(specification))}`;
+    const startRevision = await this.revisionReference(session, artifact);
+    const sourceRevisionId = repositoryRevisionId(project);
+    return { ...session, ...(sourceRevisionId === undefined ? {} : { startSourceRevisionId: sourceRevisionId }), manifest: {
+      version: 1, task: { version: 1, taskId, taskVersion,
+        ...(goal === undefined ? {} : { goal: this.privacy.text(bounded(goal, 2_000)) }), ...(criteria === undefined ? {} : { acceptanceCriteria: criteria }), ...(inputs === undefined ? {} : { inputs }),
+        ...(stored === undefined ? {} : { specification: { artifactId: stored.id, kind: "task-spec" } }) },
+      attempt: { version: 1, attemptId: this.attemptId(session), taskId, taskVersion, startedAt: artifact.receivedAt, startRevision,
+        ...(session.context === undefined ? {} : { context: session.context }),
+        ...(text(payload.parent_attempt_id) === undefined ? {} : { parentAttemptId: bounded(text(payload.parent_attempt_id)!, 500) }),
+        ...(text(payload.condition_id) === undefined ? {} : { conditionId: this.privacy.alias("condition", text(payload.condition_id)!) }) },
+    } };
+  }
+
   private async enqueueTrajectory(
     session: CaptureSession,
     artifact: VaultArtifact,
@@ -1372,10 +1493,12 @@ export class CaptureEngine {
   ): Promise<boolean> {
     const steps = currentUnitSteps(session);
     if (steps.length === 0) return false;
-    if (session.acceptance !== undefined) session = { ...session, project: await refreshProject(session.project) };
+    session = { ...session, project: await refreshProject(session.project) };
     const acceptance = session.acceptance;
+    const finalRevision = session.manifest === undefined ? undefined : await this.revisionReference(session, artifact);
+    const finalRevisionId = session.manifest === undefined ? this.publicRevisionId(session.project) : finalRevision?.revisionId;
     const outcome = acceptance !== undefined && acceptance.taskId === trajectoryTaskId(session, this.privacy) &&
-      acceptance.attemptId === this.attemptId(session) && acceptance.revisionId === repositoryRevisionId(session.project)
+      acceptance.attemptId === this.attemptId(session) && acceptance.revisionId === finalRevisionId
       ? acceptance.verdict : session.explicitOutcome === "failure" ? "failure" : "unknown";
     const tree = this.treeFor(session, outcome);
     const taskId = tree.taskId;
@@ -1397,21 +1520,27 @@ export class CaptureEngine {
       allSteps.map((step, stepIndex) => [step.id, {
         kind: "mapped" as const,
         nodeId: tree.nodes[stepIndex]!.id,
-        method: { kind: "rule" as const, id: "super-brain-capture/v1", confidence: 1 },
+        method: { kind: "rule" as const, id: "super-brain-capture/v1", basis: "structural" as const, confidence: 1 },
       }]),
     );
+    const manifest = session.manifest === undefined ? undefined : { ...session.manifest, attempt: { ...session.manifest.attempt,
+      ...(finalRevision === undefined ? {} : { finalRevision }), ...(session.context === undefined ? {} : { context: session.context }),
+      ...(acceptance === undefined || acceptance.eventId === undefined || acceptance.revisionId !== finalRevision?.revisionId ? {} : { acceptance: { version: 1 as const, taskId: acceptance.taskId, attemptId: acceptance.attemptId, revisionId: acceptance.revisionId, verdict: acceptance.verdict, eventId: acceptance.eventId, artifactId: acceptance.artifactId, ...(acceptance.criterionIds === undefined ? {} : { criterionIds: acceptance.criterionIds }) } }),
+    } };
     const input: TrajectoryInput = {
       id: this.attemptId(session),
       taskId,
       model: {
-        id: session.model ?? session.agent,
+        id: session.model ?? "unreported",
       },
       outcome,
       steps: allSteps,
       assignments,
+      ...(manifest === undefined ? {} : { manifest }),
       ...(outcome === "unknown" || session.reviewText === undefined ? {} : { reviewText: session.reviewText }),
     };
-    const captureIdentity = this.captureIdentity(session, finalizationReason);
+    trajectoryInputSchema.parse(input);
+    const captureIdentity = { ...this.captureIdentity(session, finalizationReason), ...(artifact.receiptId === undefined ? {} : { receiptId: artifact.receiptId }) };
     const job: SpoolJob = {
       version: 1,
       kind: "trajectory",
@@ -1422,6 +1551,12 @@ export class CaptureEngine {
       tree,
       input,
       captureIdentity,
+      ...(manifest === undefined ? {} : { privateRevisionBinding: {
+        ...(session.startSourceRevisionId === undefined ? {} : { startSourceRevisionId: session.startSourceRevisionId }),
+        ...(manifest.attempt.startRevision.revisionId === undefined ? {} : { startPublicRevisionId: manifest.attempt.startRevision.revisionId }),
+        ...(repositoryRevisionId(session.project) === undefined ? {} : { finalSourceRevisionId: repositoryRevisionId(session.project)! }),
+        ...(finalRevision?.revisionId === undefined ? {} : { finalPublicRevisionId: finalRevision.revisionId }),
+      } }),
     };
     await this.enqueueJob(job);
     return true;

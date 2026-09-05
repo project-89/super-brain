@@ -1,5 +1,5 @@
 import type { FoldEvent } from "@_89/fold";
-import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
+import type { TrajectoryInput, TrajectoryTreeRecord, TrajectoryManifest, TraceRuntimeObservation, AttemptContext } from "@_89/fold-trajectory";
 import type { EventStamp } from "@_89/super-brain-client";
 import type { AnonymizationPolicy } from "@_89/super-brain-importer";
 
@@ -7,6 +7,15 @@ export type HookSource = "claude-code" | "codex" | "hermes" | "unknown";
 export type ReasoningPolicy = "exclude" | "include";
 export type ReasoningTreePolicy = "exclude" | "summaries";
 export type TrajectoryFinalizationReason = "stop" | "prompt-boundary" | "session-end" | "orphan-timeout";
+
+export interface RepositoryCapturePolicy {
+  readonly mode: "metadata-only" | "snapshot";
+  readonly roots: readonly string[];
+  readonly maxBytes: number;
+  readonly maxFiles: number;
+  readonly includeUntracked: boolean;
+  readonly includeBinary: boolean;
+}
 
 export interface CaptureConfig {
   readonly apiUrl: string;
@@ -30,6 +39,7 @@ export interface CaptureConfig {
   readonly treeSnapshotEveryEvents: number;
   readonly anonymizationPolicy: AnonymizationPolicy;
   readonly anonymizationKeyPath?: string;
+  readonly repositoryCapture?: RepositoryCapturePolicy;
 }
 
 export interface CapturePolicySettings {
@@ -38,6 +48,7 @@ export interface CapturePolicySettings {
   readonly reasoningTreePolicy: ReasoningTreePolicy;
   readonly treeSnapshotEveryEvents: number;
   readonly anonymizationPolicy: AnonymizationPolicy;
+  readonly repositoryCapture?: RepositoryCapturePolicy;
 }
 
 export type CapturePolicyPatch = Partial<CapturePolicySettings>;
@@ -51,6 +62,7 @@ export interface ProjectIdentity {
   readonly head?: string;
   readonly worktreeDigest?: string;
   readonly fingerprintStatus?: "available" | "unavailable";
+  readonly fingerprintReason?: "git-or-file-unavailable" | "unsupported-checkout";
   readonly changedPaths?: readonly string[];
   readonly dirty?: boolean;
 }
@@ -67,6 +79,7 @@ export interface TaskAcceptanceEvidence {
   readonly attemptId: string;
   readonly revisionId: string;
   readonly verdict: "success" | "failure";
+  readonly criterionIds?: readonly string[];
   readonly artifactId: string;
   readonly eventId?: string;
   readonly authority: HookAuthority;
@@ -95,6 +108,11 @@ export interface CaptureSession {
   readonly harnessVersion?: string;
   readonly permissionMode?: string;
   readonly currentTurnId?: string;
+  readonly runtime?: TraceRuntimeObservation;
+  readonly context?: AttemptContext;
+  readonly manifest?: TrajectoryManifest;
+  /** Private, never copied into canonical trajectory metadata. */
+  readonly startSourceRevisionId?: string;
   readonly comparisonKey?: string;
   readonly taskKey?: string;
   readonly steeringIntentionIds?: readonly string[];
@@ -127,6 +145,7 @@ export interface CaptureSession {
   readonly observedEventCount?: number;
   readonly lastTreeSnapshotEventCount?: number;
   readonly reasoningCursor?: number;
+  readonly runtimeCursor?: number;
   readonly seenReasoningIds?: readonly string[];
 }
 
@@ -168,6 +187,12 @@ export type SpoolJob =
       readonly tree: TrajectoryTreeRecord["tree"];
       readonly input: TrajectoryInput;
       readonly captureIdentity: Readonly<Record<string, string>>;
+      readonly privateRevisionBinding?: {
+        readonly startSourceRevisionId?: string;
+        readonly startPublicRevisionId?: string;
+        readonly finalSourceRevisionId?: string;
+        readonly finalPublicRevisionId?: string;
+      };
     }
   | {
       readonly version: 1;

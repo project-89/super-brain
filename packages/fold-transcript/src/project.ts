@@ -19,6 +19,25 @@ export class TranscriptProjectionError extends Error {
   override readonly name = "TranscriptProjectionError";
 }
 
+/** Validates canonical equivalence only; private bytes and descriptive ranges require a local verifier. */
+export function validateTranscriptInterpretation(run: TranscriptRun, artifact: TranscriptArtifact, catalog: Pick<TranscriptCatalog, "runs" | "artifacts">): void {
+  const interpretation = run.interpretation;
+  if (interpretation === undefined) return;
+  const previous = catalog.runs.get(interpretation.previousRunId);
+  const rootId = previous?.interpretation?.sourceArtifactId ?? previous?.artifactId;
+  const root = rootId === undefined ? undefined : catalog.artifacts.get(rootId);
+  const priorArtifact = previous === undefined ? undefined : catalog.artifacts.get(previous.artifactId);
+  if (!previous || !root || !priorArtifact || previous.id === run.id || interpretation.sourceArtifactId !== root.id || interpretation.sourceOccurrenceId !== root.id ||
+    run.nativeId !== previous.nativeId || run.source !== previous.source || artifact.id === root.id || artifact.id === priorArtifact.id ||
+    interpretation.parser.id !== artifact.parser.id || interpretation.parser.version !== artifact.parser.version ||
+    (artifact.parser.id === priorArtifact.parser.id && artifact.parser.version === priorArtifact.parser.version)) {
+    throw new TranscriptProjectionError("reinterpretation source or parser identity does not match canonical predecessor");
+  }
+  for (const key of ["source", "sha256", "storedSha256", "sourcePathHash", "byteLength", "mediaType", "modifiedAt", "contentPolicy", "reasoningPolicy", "encryptedReasoningPolicy", "anonymizationPolicy", "stored", "redactionCount"] as const) {
+    if (artifact[key] !== root[key]) throw new TranscriptProjectionError("reinterpretation must retain original source bytes and privacy metadata");
+  }
+}
+
 function insertUnique<T>(map: Map<string, T>, id: string, value: T, label: string): void {
   const existing = map.get(id);
   if (existing === undefined) {
@@ -55,11 +74,14 @@ function projectTranscriptEvents(
         if (record.run.projectId !== undefined && !projects.has(record.run.projectId)) {
           throw new TranscriptProjectionError(`run ${record.run.id} references an unavailable project`);
         }
+        validateTranscriptInterpretation(record.run, artifacts.get(record.run.artifactId)!, { artifacts, runs });
         insertUnique(runs, record.run.id, record.run, "transcript run");
       } else {
         if (!runs.has(record.chunk.runId)) {
           throw new TranscriptProjectionError(`chunk references unavailable run ${record.chunk.runId}`);
         }
+        const run = runs.get(record.chunk.runId)!;
+        for (const turn of record.chunk.turns) if (turn.origin !== undefined && (turn.origin.sourceOccurrenceId !== (run.interpretation?.sourceOccurrenceId ?? run.artifactId) || turn.origin.recordRanges.some(({ end }) => end >= run.counts.records))) throw new TranscriptProjectionError("turn origin is outside canonical source bounds");
         const chunks = chunksByRun.get(record.chunk.runId) ?? [];
         const existing = chunks.find(({ sequence }) => sequence === record.chunk.sequence);
         if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(record.chunk)) {

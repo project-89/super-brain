@@ -51,7 +51,7 @@ export function repositoryRevisionId(project: ProjectIdentity): string | undefin
 export function normalizeTaskAcceptance(
   input: unknown,
   authority: HookAuthority | undefined,
-  expected: { readonly taskId: string; readonly attemptId: string; readonly revisionId?: string; readonly artifactId: string },
+  expected: { readonly taskId: string; readonly attemptId: string; readonly revisionId?: string; readonly artifactId: string; readonly criterionIds?: readonly string[] },
 ): TaskAcceptanceEvidence | undefined {
   const value = object(input);
   if (value === undefined || authority === undefined) return undefined;
@@ -59,6 +59,8 @@ export function normalizeTaskAcceptance(
   if (value.taskId !== expected.taskId || value.attemptId !== expected.attemptId || expected.revisionId === undefined || value.revisionId !== expected.revisionId) {
     throw new TypeError("acceptance must reference the active task, attempt and current repository revision");
   }
+  if (value.criterionIds !== undefined && (!Array.isArray(value.criterionIds) || value.criterionIds.length > 100 || value.criterionIds.some((id) => typeof id !== "string" || !expected.criterionIds?.includes(id)))) throw new TypeError("acceptance criteria must belong to the active task version");
   return { version: 1, taskId: expected.taskId, attemptId: expected.attemptId, revisionId: expected.revisionId,
-    verdict: value.verdict, artifactId: expected.artifactId, authority };
+    verdict: value.verdict, artifactId: expected.artifactId, authority,
+    ...(value.criterionIds === undefined ? {} : { criterionIds: [...new Set(value.criterionIds as string[])] }) };
 }

@@ -3,6 +3,7 @@ import { SuperBrainClient } from "@_89/super-brain-client";
 import { readVaultKey } from "@_89/super-brain-importer";
 import { fileURLToPath } from "node:url";
 import { createCapturedEventVerifier } from "./authority.js";
+import { createCapturedTrajectoryVerifier } from "@_89/super-brain-capture-daemon";
 
 import { installMemoryWorkerLaunchAgent } from "./install.js";
 import { TranscriptMemoryWorker } from "./worker.js";
@@ -70,10 +71,13 @@ async function main(): Promise<void> {
   const captureVaultRoot = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_VAULT_ROOT;
   const receiptKeyPath = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_RECEIPT_KEY_FILE;
   const captureKeyPath = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_VAULT_KEY_FILE;
+  const captureReceiptKey = receiptKeyPath === undefined ? undefined : await readVaultKey(receiptKeyPath);
   const verifyCapturedEvent = trustedSensorId && captureStateRoot && captureVaultRoot && receiptKeyPath
     ? createCapturedEventVerifier({ organizationId, workspaceId, trustedSensorId, stateRoot: captureStateRoot, vaultRoot: captureVaultRoot,
-      receiptEncryptionKey: await readVaultKey(receiptKeyPath),
+      receiptEncryptionKey: captureReceiptKey!,
       ...(captureKeyPath === undefined ? {} : { vaultEncryptionKey: await readVaultKey(captureKeyPath) }) }) : undefined;
+  const verifyCapturedTrajectory = trustedSensorId && captureStateRoot && captureReceiptKey
+    ? createCapturedTrajectoryVerifier({ organizationId, workspaceId, trustedSensorId, stateRoot: captureStateRoot, receiptEncryptionKey: captureReceiptKey }) : undefined;
   if (autoPromote && verifyCapturedEvent === undefined) console.error("[memory-worker] Promotion is disabled until an explicit capture witness verifier is configured");
   const stateRoot = option("--state-root") ?? process.env.SUPER_BRAIN_WORKER_STATE_ROOT;
   const spaceId = option("--space") ?? process.env.SUPER_BRAIN_WORKER_SPACE;
@@ -88,6 +92,7 @@ async function main(): Promise<void> {
     ...(stateRoot === undefined ? {} : { stateRoot }),
     ...(spaceId === undefined ? {} : { spaceId }),
     ...(verifyCapturedEvent === undefined ? {} : { verifyCapturedEvent }),
+    ...(verifyCapturedTrajectory === undefined ? {} : { verifyCapturedTrajectory }),
     ...(process.env.SUPER_BRAIN_COGNITION_PROVIDER === undefined ? {} : { cognitionProviderId: process.env.SUPER_BRAIN_COGNITION_PROVIDER }),
     reportWarning: (message) => console.error(`[memory-worker] ${message}`),
     ...(vaultEncryptionKey === undefined ? {} : { vaultEncryptionKey }),

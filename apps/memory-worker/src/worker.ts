@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { FoldEvent } from "@_89/fold";
 import type { MemoryCandidateEvidence, MemoryCandidateView, PersonalMemory } from "@_89/fold-epistemic";
 import { transcriptRecordsFromEvent, type TranscriptRun } from "@_89/fold-transcript";
+import { trajectoryLogRecordsFromEvent } from "@_89/fold-trajectory";
 import { SuperBrainApiError, SuperBrainClient, type EventStamp } from "@_89/super-brain-client";
 import { deterministicCandidateId, extractedClaimContent, extractLiveMemoryCandidates, extractMemoryCandidates, RULE_EXTRACTOR } from "./extractor.js";
 import { DurableWorkerJobs, jobDigest, type ProcessingCoverage, type WorkerJob, type WorkerJobState } from "./jobs.js";
@@ -26,6 +27,7 @@ export interface WorkerOptions {
   readonly modelTimeoutMs?: number;
   readonly maxModelAttempts?: number;
   readonly verifyCapturedEvent?: (event: FoldEvent) => Promise<boolean>;
+  readonly verifyCapturedTrajectory?: (event: FoldEvent) => Promise<boolean>;
   readonly retryBaseMs?: number;
   readonly pollIntervalMs?: number;
   readonly reconciliationIntervalMs?: number;
@@ -40,7 +42,7 @@ const PROMPTS = [
   { kind: "investigation", question: "What unresolved cross-project investigation is warranted by the supplied memories?" },
 ] as const;
 function evidenceKey(item: MemoryCandidateEvidence): string {
-  const source = item.runId !== undefined && item.turnId !== undefined ? [item.runId, item.turnId] : [item.eventId, item.turnId ?? ""];
+  const source = [item.eventId, item.runId ?? "", item.turnId ?? ""];
   return jobDigest([source, item.projectId ?? "", item.relation ?? "supports"]);
 }
 function uniqueEvidence(items: readonly MemoryCandidateEvidence[]): MemoryCandidateEvidence[] {
@@ -74,7 +76,7 @@ export function consolidateCandidateEvidence(inputs: readonly ExtractedCandidate
   }
   return [...grouped.values()];
 }
-interface ProposalPayload { readonly candidate: ExtractedCandidate; readonly witnessEvent?: FoldEvent; readonly stamps?: Readonly<Record<string, EventStamp>> }
+interface ProposalPayload { readonly candidate: ExtractedCandidate; readonly witnessEvent?: FoldEvent; readonly trajectoryEvent?: FoldEvent; readonly stamps?: Readonly<Record<string, EventStamp>> }
 interface RunPayload { readonly run: TranscriptRun; readonly eventId: string }
 interface TurnPayload extends RunPayload { readonly messages: readonly VaultMessage[] }
 interface SynthesisPayload {
@@ -98,6 +100,7 @@ export class TranscriptMemoryWorker {
   private background: Promise<unknown>[] = [];
   private projectRoots: Array<{ root: string; projectId: string }> = [];
   private readonly evidenceTimes = new Map<string, number>();
+  private readonly sourceOrigins = new Map<string, string>();
   private readonly now: () => number;
   constructor(private readonly options: WorkerOptions) {
     this.now = options.now ?? Date.now;
@@ -150,15 +153,15 @@ export class TranscriptMemoryWorker {
       views.push(...page); if (page.length < 1_000) return views;
     }
   }
-  private async enqueueCandidates(candidates: readonly ExtractedCandidate[], witnessEvent?: FoldEvent): Promise<void> {
+  private async enqueueCandidates(candidates: readonly ExtractedCandidate[], witnessEvent?: FoldEvent, trajectoryEvent?: FoldEvent): Promise<void> {
     const jobs = await this.jobs();
     const merged = consolidateCandidateEvidence(candidates.map((candidate) => this.resolveCandidate(candidate)), {
       principalId: this.principalId!, audience: this.options.audience ?? "workspace",
       ...(this.options.spaceId === undefined ? {} : { spaceId: this.options.spaceId }),
     });
     for (const candidate of merged) await jobs.enqueue("propose", [candidateKey(candidate, this.principalId!),
-      candidate.evidence.map(evidenceKey).sort(), candidate.extractor], {
-      candidate, ...(witnessEvent === undefined ? {} : { witnessEvent }),
+      candidate.evidence.map(evidenceKey).sort(), candidate.extractor, ...(trajectoryEvent === undefined ? [] : [trajectoryEvent.id])], {
+      candidate, ...(witnessEvent === undefined ? {} : { witnessEvent }), ...(trajectoryEvent === undefined ? {} : { trajectoryEvent }),
     } satisfies ProposalPayload, this.now());
   }
   async extractRun(run: TranscriptRun, runEventId: string): Promise<RunExtraction> {
@@ -187,10 +190,11 @@ export class TranscriptMemoryWorker {
     return stamp;
   }
   private async applyProposal(job: WorkerJob): Promise<{ proposed: number; promoted: number }> {
-    const { witnessEvent } = job.payload as ProposalPayload;
+    const { witnessEvent, trajectoryEvent } = job.payload as ProposalPayload;
     let { candidate } = job.payload as ProposalPayload;
     if (witnessEvent !== undefined) this.rememberEvidenceTime(witnessEvent.id, witnessEvent.at.t);
     const minimumSourceTime = await this.sourceTime(candidate);
+    candidate = { ...candidate, evidence: uniqueEvidence(candidate.evidence) };
     const identity = candidateKey(candidate, this.principalId!);
     const views = await this.candidateViews();
     let existing: MemoryCandidateView | undefined;
@@ -222,6 +226,9 @@ export class TranscriptMemoryWorker {
       if (candidateKey({ ...candidate, ...memory, extractor: candidate.extractor }, memory.creatorId) !== identity) throw new Error("accepted-memory-claim-changed");
       known = memory.evidence ?? [];
     }
+    const evidenceCoverage = await this.resolveEvidenceCoverage([...known, ...candidate.evidence]);
+    const jobs = await this.jobs(); const currentJob = (await jobs.get(job.id))!;
+    await jobs.put({ ...currentJob, payload: { ...currentJob.payload as ProposalPayload, evidenceCoverage }, updatedAt: this.now() });
     const keys = new Set(known.map(evidenceKey));
     const additions = candidate.evidence.filter((item) => !keys.has(evidenceKey(item)));
     for (let offset = 0; offset < additions.length; offset += 100) {
@@ -233,7 +240,7 @@ export class TranscriptMemoryWorker {
     let promoted = 0;
     if (existing.status === "proposed" && witnessEvent !== undefined &&
       jobDigest(existing.candidate.content) === jobDigest(candidate.content) &&
-      existing.candidate.id === candidate.id && await this.eligibleHumanWitness(candidate, witnessEvent)) {
+      existing.candidate.id === candidate.id && (trajectoryEvent === undefined ? await this.eligibleHumanWitness(candidate, witnessEvent) : await this.eligibleCheckpointWitness(candidate, witnessEvent, trajectoryEvent))) {
       const minimum = (existing.candidate.updatedAt ?? existing.candidate.proposedAt) + 1;
       const decisionStamp = await this.stamp(job, "accept", minimum);
       await this.options.client.acceptMemoryCandidate(existing.candidate.id, {
@@ -244,6 +251,24 @@ export class TranscriptMemoryWorker {
       promoted = 1;
     }
     return { proposed, promoted };
+  }
+  private async resolveEvidenceCoverage(input: readonly MemoryCandidateEvidence[]) {
+    const evidence = uniqueEvidence(input);
+    const pending = evidence.filter((ref) => ref.runId !== undefined && !this.sourceOrigins.has(evidenceKey(ref)));
+    if (pending.length > 0 && typeof this.options.client.transcriptEvidenceOrigins === "function") {
+      for (let offset = 0; offset < pending.length; offset += 100) {
+        for (const origin of await this.options.client.transcriptEvidenceOrigins(pending.slice(offset, offset + 100))) {
+          if (origin.verified) this.sourceOrigins.set(evidenceKey(origin.reference), origin.independenceKey);
+        }
+      }
+    }
+    const supports = new Set<string>(), opposes = new Set<string>(); let unresolvedOrigins = 0;
+    for (const item of evidence) {
+      const origin = item.runId === undefined ? `event:${item.eventId}` : this.sourceOrigins.get(evidenceKey(item));
+      if (origin === undefined) { unresolvedOrigins++; continue; }
+      (item.relation === "opposes" ? opposes : supports).add(origin);
+    }
+    return { citations: evidence.length, supportingSources: supports.size, opposingSources: opposes.size, unresolvedOrigins };
   }
   private async sourceTime(candidate: ExtractedCandidate): Promise<number> {
     let minimum = 0;
@@ -293,9 +318,71 @@ export class TranscriptMemoryWorker {
   async processLiveEvent(event: FoldEvent): Promise<{ proposed: number; promoted: number }> {
     await this.enqueueCandidates(extractLiveMemoryCandidates(event), event); return this.drainJobs();
   }
-  /** Phase 3 must attest the final trajectory revision as well as its acceptance join. */
-  async promoteSuccessfulTrajectoryEvidence(_event: FoldEvent): Promise<{ promoted: 0; deferredReason: string }> {
-    return { promoted: 0, deferredReason: "trajectory-revision-and-acceptance-attestation-required" };
+  async promoteSuccessfulTrajectoryEvidence(event: FoldEvent): Promise<{ promoted: number; deferredReason?: string }> {
+    const job = await (await this.jobs()).enqueue("verify-trajectory", [event.id, jobDigest(event), "attested-checkpoint-v1"], { event }, this.now());
+    const result = await this.drainJobs();
+    const current = await (await this.jobs()).get(job.id);
+    return { promoted: result.promoted, ...(current?.reason === undefined ? {} : { deferredReason: current.reason }) };
+  }
+  private async attestedTrajectory(event: FoldEvent) {
+    if (!this.options.autoPromote) throw new JobDisposition("excluded", "automatic-promotion-disabled");
+    if (this.options.verifyCapturedTrajectory === undefined || this.options.verifyCapturedEvent === undefined) throw new JobDisposition("waiting", "trajectory-verifier-unavailable");
+    if (!(await this.options.verifyCapturedTrajectory(event))) throw new JobDisposition("waiting", "trajectory-witness-unavailable");
+    const records = trajectoryLogRecordsFromEvent(event).filter((record) => record.recordType === "trajectory");
+    if (records.length !== 1) throw new JobDisposition("excluded", "trajectory-record-unavailable");
+    const trajectory = records[0]!.trajectory;
+    const manifest = trajectory.manifest;
+    const final = manifest?.attempt.finalRevision;
+    const acceptance = manifest?.attempt.acceptance;
+    if (manifest === undefined || final?.fingerprintStatus !== "available" || final.revisionId === undefined || acceptance === undefined) throw new JobDisposition("excluded", "trajectory-revision-and-acceptance-required");
+    if (trajectory.outcome !== "success" || acceptance.verdict !== "success" || acceptance.taskId !== trajectory.taskId || acceptance.attemptId !== trajectory.id || acceptance.revisionId !== final.revisionId ||
+      manifest.attempt.attemptId !== trajectory.id || manifest.attempt.taskId !== trajectory.taskId) throw new JobDisposition("excluded", "trajectory-acceptance-join-mismatch");
+    const acceptanceEvent = (await this.options.client.listEvents({ eventIds: [acceptance.eventId] }))[0]?.event;
+    if (acceptanceEvent === undefined) throw new JobDisposition("waiting", "trajectory-acceptance-event-unavailable");
+    const verified = await verifiedTaskAcceptance(acceptanceEvent, { taskId: trajectory.taskId, attemptId: trajectory.id, revisionId: final.revisionId }, this.options.verifyCapturedEvent);
+    if (verified?.verdict !== "success" || verified.artifactId !== acceptance.artifactId || acceptanceEvent.at.t > event.at.t ||
+      acceptanceEvent.capture.scope.workspace !== event.capture.scope.workspace || acceptanceEvent.capture.scope.space !== event.capture.scope.space ||
+      !trajectory.steps.some((step) => step.role === "decision" && step.eventId === acceptance.eventId && step.artifactId === acceptance.artifactId)) throw new JobDisposition("waiting", "trajectory-acceptance-unverified");
+    return { trajectory, acceptanceEvent };
+  }
+  private checkpointInTrajectory(candidate: ExtractedCandidate, event: FoldEvent, trajectoryEvent: FoldEvent,
+    attested: Awaited<ReturnType<TranscriptMemoryWorker["attestedTrajectory"]>>): boolean {
+    if (candidate.source !== "live-reasoning-checkpoint" || applicability(candidate).kind !== "projects" || event.at.t > attested.acceptanceEvent.at.t ||
+      event.capture.scope.workspace !== trajectoryEvent.capture.scope.workspace || event.capture.scope.space !== trajectoryEvent.capture.scope.space ||
+      event.capture.identity?.repo !== trajectoryEvent.capture.identity?.repo) return false;
+    const observations = event.changes.filter((change) => change.verb === "create" && change.nodeKind === "x.fold.activity-observation" && change.after.observation === "reasoning_checkpoint");
+    if (observations.length !== 1) return false;
+    const observation = observations[0]!;
+    if (observation.verb !== "create") return false;
+    const data = observation.after.data;
+    if (data === null || typeof data !== "object" || Array.isArray(data) || typeof data.summary !== "string" || typeof data.artifactId !== "string") return false;
+    return attested.trajectory.steps.some((step) => step.role === "model_thought" && step.eventId === event.id && step.artifactId === data.artifactId &&
+      step.content === data.summary && step.turnId === event.capture.identity?.turn) &&
+      extractLiveMemoryCandidates(event).some((exact) => jobDigest(exact.content) === jobDigest(candidate.content) && exact.summary === candidate.summary);
+  }
+  private async eligibleCheckpointWitness(candidate: ExtractedCandidate, event: FoldEvent, trajectoryEvent: FoldEvent): Promise<boolean> {
+    const attested = await this.attestedTrajectory(trajectoryEvent);
+    return this.checkpointInTrajectory(candidate, event, trajectoryEvent, attested) && await this.options.verifyCapturedEvent!(event);
+  }
+  private async queueTrajectoryCheckpoints(event: FoldEvent): Promise<void> {
+    const attested = await this.attestedTrajectory(event);
+    const ids = [...new Set(attested.trajectory.steps.filter((step) => step.role === "model_thought" && step.eventId !== undefined).map((step) => step.eventId!))];
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const requested = ids.slice(offset, offset + 100);
+      const events = new Map((await this.options.client.listEvents({ eventIds: requested })).map(({ event }) => [event.id, event]));
+      for (const id of requested) {
+        const checkpoint = events.get(id);
+        if (checkpoint === undefined) throw new JobDisposition("waiting", "trajectory-checkpoint-event-unavailable");
+        if (!(await this.options.verifyCapturedEvent!(checkpoint))) throw new JobDisposition("waiting", "trajectory-checkpoint-witness-unavailable");
+        const candidates = extractLiveMemoryCandidates(checkpoint).filter((candidate) => this.checkpointInTrajectory(candidate, checkpoint, event, attested)).map((candidate) => ({
+          ...candidate, evidence: uniqueEvidence([...candidate.evidence,
+            { eventId: event.id, ...(checkpoint.capture.identity?.repo === undefined ? {} : { projectId: checkpoint.capture.identity.repo }) },
+            { eventId: attested.acceptanceEvent.id, ...(checkpoint.capture.identity?.repo === undefined ? {} : { projectId: checkpoint.capture.identity.repo }) },
+          ]),
+        }));
+        if (candidates.length > 0) await this.enqueueCandidates(candidates, checkpoint, event);
+      }
+    }
   }
   private async activeMemories(): Promise<PersonalMemory[]> {
     const memories: PersonalMemory[] = [];
@@ -402,7 +489,7 @@ export class TranscriptMemoryWorker {
   private async drain(): Promise<{ proposed: number; promoted: number }> {
     const jobs = await this.jobs();
     let proposed = 0, promoted = 0;
-    for (const kind of ["extract-run", "extract-turn", "propose"] as const) {
+    for (const kind of ["extract-run", "extract-turn", "verify-trajectory", "propose"] as const) {
       const pending = (await jobs.active()).filter((job) => job.kind === kind && job.nextAttemptAt <= this.now()).slice(0, this.options.maxCandidatesPerRun ?? 25);
       for (const job of pending) {
         if (this.closing) break;
@@ -425,12 +512,12 @@ export class TranscriptMemoryWorker {
             await jobs.put({ ...job, payload: { ...job.payload as RunPayload, coverage: result.coverage }, updatedAt: this.now() });
           } else if (kind === "extract-turn") {
             const { run, eventId, messages } = job.payload as TurnPayload; await this.enqueueCandidates(extractMemoryCandidates(run, eventId, messages));
-          }
+          } else if (kind === "verify-trajectory") await this.queueTrajectoryCheckpoints((job.payload as { event: FoldEvent }).event);
           else { const result = await this.applyProposal(job); proposed += result.proposed; promoted += result.promoted; }
           await jobs.put({ ...(await jobs.get(job.id))!, state: "completed", updatedAt: this.now() });
         } catch (error) {
           await this.failJob(job, error);
-        }
+        } finally { this.sourceOrigins.clear(); }
       }
     }
     if (this.options.reportCoverage !== undefined) {
@@ -516,6 +603,7 @@ export class TranscriptMemoryWorker {
           if (event.kind === "transcript.run-imported") {
             for (const record of transcriptRecordsFromEvent(event)) if (record.recordType === "run") await this.enqueueRun(record.run, event.id);
           } else if (event.kind === "terminal.observation") await this.enqueueCandidates(extractLiveMemoryCandidates(event), event);
+          else if (event.kind === "trajectory.recorded") await (await this.jobs()).enqueue("verify-trajectory", [event.id, jobDigest(event), "attested-checkpoint-v1"], { event }, this.now());
           if (["trajectory.recorded", "memory.recorded", "memory.revised"].includes(event.kind) && this.options.continuousCognition) {
             await (await this.jobs()).enqueue("cognition-plan", [event.id], { event }, this.now());
           }

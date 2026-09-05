@@ -131,3 +131,96 @@ include bounded untracked file content and fail explicitly on unavailable Git,
 nonregular untracked files, concurrent edits or more than 16 MiB of untracked
 content. They are integrity references; reconstructible patch/file artifacts
 are a separate task-evidence capability.
+
+## Attempt manifests and runtime observations
+
+New finalized trajectories retain a versioned task specification and the original
+attempt starting revision. Finalization refreshes the final revision without
+replacing the baseline. Optional `task_goal`, `task_version`,
+`acceptance_criteria: [{id, description?}]`, `inputs: [{artifactId}]`,
+`parent_attempt_id`, and `condition_id` hook fields add explicitly reported task
+metadata. Exact prompt/specification bodies remain in redacted private artifacts;
+canonical metadata contains references and optional privacy-projected summaries.
+
+The `context` hook field accepts exact `memoryRefs: [{memoryId, revision}]`,
+artifact references, and compaction/handoff lineage. Revision zero is valid.
+These references describe offered context; they do not prove model use. The API
+checks that canonical context sources fit the task's audience and space.
+`PreCompact`/`Handoff` records retain the observed context boundary.
+
+Runtime fields are allowlisted from hook metadata and supported native records.
+Native model/usage extraction also runs when reasoning capture is excluded.
+Absent values remain absent; the old required model-summary field uses
+`unreported` with `modelObservation: unavailable`. Zero token counts/cost are
+retained when explicitly observed. Each usage-bearing hook creates one dedicated
+runtime observation; derived tool/check steps do not duplicate that usage.
+Current usage scope and interpretation are explicitly `unknown`, so reports must
+not sum them as independent increments or claim attempt totals. Native extraction
+reads at most 8 MiB and records at most 100 runtime observations per finalizing
+hook; malformed and excluded metadata counts remain visible.
+
+Use `super-brain-capture acceptance-context --source codex --session ID` to obtain
+fresh public task/attempt/revision IDs for `decision`. Canonical acceptance and
+`manifest.attempt.finalRevision` use the same opaque revision identity. The local
+operator boundary also accepts the legacy private Git fingerprint and translates
+it before publication. Acceptance may cite criterion IDs from the active task
+version. A changed/unavailable final revision removes the acceptance pointer and
+cannot retain successful task outcome. Git configurations that hide or transform
+tracked bytes (assume-unchanged, skip-worktree, ignored modes, checkout filters
+and line-ending transformations) make the fingerprint unavailable.
+
+## Opt-in private repository snapshots
+
+Legacy and newly initialized configurations default to `metadata-only`.
+Repository snapshots require a vault key and explicit consent roots and bounds:
+
+```sh
+super-brain-capture configure --repository-capture snapshot \
+  --repository-root /absolute/project \
+  --snapshot-max-bytes 16777216 --snapshot-max-files 1000 \
+  --snapshot-untracked include --snapshot-binary include
+```
+
+The configured policy applies after the daemon restarts. The implementation never
+changes an installed daemon or repository automatically. Untracked and binary
+content are excluded unless explicitly enabled. Capture's state/vault/key paths,
+including their resolved symlink targets, are excluded from repository content.
+The underlying repository fingerprint is bounded to 16 MiB of changed file bytes.
+
+An encrypted snapshot records the required base commit, separate index/worktree
+file overlays, deletions, executable modes, and allowed untracked files. NUL Git
+records preserve path bytes, including leading spaces and newlines. Original
+bytes pass secret redaction before encoding. Redacted text makes reconstruction
+partial; binary secrets and unsupported file types are excluded. Git binary
+review patches are retained only after their decoded source blobs have passed
+the same inspection. Partial snapshots omit all review patches, and patch bytes
+count against the storage bound. Changed repositories, hidden tracked files,
+symlinks, gitlinks, private paths and limits are reported explicitly.
+
+`reconstruction: complete` describes the supported tracked/visible-untracked
+Git overlay **with the separately available base commit**. It is not a full
+repository backup, and does not include ignored files, external dependencies or
+submodule contents. Canonical references alone do not prove private availability.
+To verify a complete snapshot in a new disposable checkout:
+
+```sh
+super-brain-capture reconstruct-snapshot --artifact repository-snapshot:HASH \
+  --source-repository /absolute/repository-with-base-commit \
+  --destination /absolute/new-disposable-checkout
+```
+
+The command requires a new destination separate from the source, verifies the
+encrypted descriptor and stored bytes, restores the index and working files,
+and compares the restored fingerprint to the private source revision. It refuses
+partial snapshots and existing destinations. Tests perform this drill only on
+synthetic repositories.
+
+Completed encrypted receiver receipts bind each finalized normalized trajectory
+command, its stable stamp and privacy-projected capture identity to the original
+private/public revision mapping. `createCapturedTrajectoryVerifier` compares the
+actual canonical record to that exact witness. A copied acceptance label cannot
+attest a different trajectory/checkpoint. Missing legacy witnesses remain
+unverified. API principal/workspace fields stay server-owned, and worker promotion
+still requires the separate exact acceptance/checkpoint witnesses and the API's
+shared-review authorization. Rebasing old outbound jobs does not manufacture new
+attestation.

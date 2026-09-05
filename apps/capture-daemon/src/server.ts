@@ -32,6 +32,7 @@ function policy(config: CaptureConfig): CapturePolicySettings {
     reasoningTreePolicy: config.reasoningTreePolicy,
     treeSnapshotEveryEvents: config.treeSnapshotEveryEvents,
     anonymizationPolicy: config.anonymizationPolicy,
+    ...(config.repositoryCapture === undefined ? {} : { repositoryCapture: config.repositoryCapture }),
   };
 }
 
@@ -42,6 +43,7 @@ function policyPatch(value: Record<string, unknown>): CapturePolicyPatch {
     "reasoningTreePolicy",
     "treeSnapshotEveryEvents",
     "anonymizationPolicy",
+    "repositoryCapture",
   ]);
   const unknown = Object.keys(value).filter((key) => !allowed.has(key));
   if (unknown.length > 0) throw new TypeError(`unknown capture policy fields: ${unknown.join(", ")}`);
@@ -166,6 +168,14 @@ export class CaptureHttpServer {
           return;
         }
         send(response, 405, { error: "method_not_allowed" });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/acceptance-context") {
+        if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) { send(response, 401, { error: "unauthorized" }); return; }
+        const source = hookSource(undefined, url.searchParams.get("source"));
+        const sessionId = url.searchParams.get("sessionId");
+        if (sessionId === null || sessionId.length === 0) throw new TypeError("acceptance context requires sessionId");
+        send(response, 200, await this.engine.acceptanceContext(source, sessionId));
         return;
       }
       const artifactMatch = /^\/artifacts\/(claude-code|codex)\/([a-f0-9]{64})$/i.exec(url.pathname);

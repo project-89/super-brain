@@ -1,6 +1,7 @@
 import type { Author, CaptureEnvelope, FoldEvent } from "@_89/fold";
 import type { EpistemicAccessContext, EpistemicEventStamp } from "@_89/fold-epistemic";
 import type { OracleEvaluation, ReviewVerdict } from "@_89/fold-eval";
+import type { TaskEvidenceRecord } from "./evidence.js";
 import type {
   FirstDivergence,
   ProjectedTrajectory,
@@ -28,6 +29,7 @@ export interface TrajectoryInput {
   readonly steps: RawTrajectory["steps"];
   readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
   readonly reviewText?: string;
+  readonly manifest?: RawTrajectory["manifest"];
 }
 
 export interface TrajectoryTreeRecord {
@@ -55,12 +57,14 @@ export type TrajectoryLogRecord = TrajectoryTreeRecord | TrajectoryRunRecord;
 export interface TrajectoryState {
   readonly trees: ReadonlyMap<string, TrajectoryTreeRecord>;
   readonly trajectories: ReadonlyMap<string, TrajectoryRunRecord>;
+  readonly evidence?: readonly TaskEvidenceRecord[];
 }
 
 export interface TrajectoryEvaluation {
   readonly trajectoryId: string;
   readonly review: ReviewVerdict;
-  readonly oracle: OracleEvaluation;
+  readonly oracle: Omit<OracleEvaluation, "confidence"> & { readonly confidence: number | null; readonly availability: "available" | "unavailable" };
+  readonly reviewProvenance?: "legacy-self-reported";
 }
 
 export interface TrajectoryDivergence {
@@ -76,6 +80,11 @@ export interface TrajectoryTaskReport {
   readonly analysis: ProjectionAnalysis;
   readonly divergences: readonly TrajectoryDivergence[];
   readonly evaluations: readonly TrajectoryEvaluation[];
+  readonly evidence?: readonly TaskEvidenceRecord[];
+  readonly evidenceAvailability?: "reference-only";
+  readonly comparison?: { readonly status: "compatible" | "incompatible" | "unspecified"; readonly taskVersions: readonly string[] };
+  readonly projectionBasis?: "structural" | "semantic" | "mixed" | "unspecified";
+  readonly acceptanceSummary?: readonly { readonly attemptId: string; readonly revisionId: string; readonly verdict: "success" | "failure" | "conflicting"; readonly outcomeIds: readonly string[]; readonly authority: "authenticated-human" }[];
 }
 
 export interface TrajectoryTreeMutationResult {

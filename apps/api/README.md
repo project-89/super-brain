@@ -328,3 +328,21 @@ revisions, and reasoning cancellation follow the
 legacy memories with no explicit applicability require review; empty project
 lists no longer imply global applicability. Scoped writers may correct shared
 memory, while acceptance/rejection retains owner/admin review authority.
+
+Versioned task/attempt manifests, per-turn runtime context, authenticated delayed
+outcomes and transcript reinterpretation follow the
+[Phase 3 attempt contract](../../docs/PHASE3_ATTEMPT_CONTRACTS.md). Private artifact
+references remain reference-only until a local witness verifies their bytes.
+Task versions/input baselines are immutable; incompatible comparisons are flagged.
+Legacy review text never supplies authenticated human oracle confidence.
+
+Static integration credentials explicitly configure
+`taskEvidenceAuthority: {"kind":"integration","integrationId":"ci-provider"}`
+and the narrow `task-outcomes:write` capability. An outcome can carry
+`source: {"providerId":"ci-provider","deliveryId":"stable-provider-delivery-id"}`;
+no prior Fold event is required for that authenticated external observation.
+The provider must match the credential and exact delivery retries reuse the body
+and stamp. Integration reporters cannot assert human acceptance/intervention.
+Static human operator credentials explicitly configure
+`taskEvidenceAuthority: {"kind":"human"}`. Verified Clerk session tokens derive
+human authority from the resolved user; Clerk machine/API-key tokens do not.

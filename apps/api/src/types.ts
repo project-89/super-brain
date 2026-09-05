@@ -1,4 +1,5 @@
 import type { Author } from "@_89/fold";
+import type { TaskEvidenceAuthority } from "@_89/fold-trajectory";
 import type {
   FoldSdk,
   FoldSdkAccessContext,
@@ -25,6 +26,7 @@ export interface AuthenticatedSubject {
   readonly identityProvider?: "static" | "clerk";
   readonly organizationId?: string;
   readonly organizationRoleLimit?: OrganizationRole;
+  readonly taskEvidenceAuthority?: TaskEvidenceAuthority;
 }
 
 export const API_CAPABILITIES = [
@@ -34,6 +36,8 @@ export const API_CAPABILITIES = [
   "memories:write",
   "trajectories:read",
   "trajectories:write",
+  "task-outcomes:write",
+  "task-interventions:write",
   "transcripts:read",
   "transcripts:write",
   "fleet:read",
@@ -189,6 +193,7 @@ export interface StaticCredentialConfiguration {
   readonly principalId: string;
   readonly author?: Author;
   readonly capabilities?: readonly ApiCapability[];
+  readonly taskEvidenceAuthority?: { readonly kind: "human" } | { readonly kind: "integration"; readonly integrationId: string };
   readonly workspaces?: Readonly<Record<string, StaticWorkspaceMembership>>;
   readonly organizations?: Readonly<Record<string, StaticOrganizationMembership>>;
 }

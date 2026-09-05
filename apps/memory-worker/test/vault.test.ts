@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import { appendFileSync, statSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,9 +7,8 @@ import { NativeTranscriptNormalizer, TranscriptBuilder, RecordAnonymizer, parseC
 import type { TranscriptSource } from "@_89/fold-transcript";
 import { readVaultEvidence, vaultPath } from "../src/vault.js";
 
-vi.mock("node:fs", { spy: true });
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 async function fixture(source: TranscriptSource, records: readonly object[], options: { encryptionKey?: Uint8Array; anonymizer?: RecordAnonymizer; parserVersion?: "1" | "2" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "worker-vault-")); roots.push(root);
   const sourcePath = join(root, "native-run.jsonl");
@@ -120,18 +119,17 @@ it("labels historical missing checksums as unverified and excludes mismatched ca
 
 it("bounds bytes read when an artifact grows after its size check", async () => {
   const item = await fixture("codex", [{ type: "event_msg", payload: { type: "task_started", turn_id: "turn" } }]);
-  const original = await vi.importActual<typeof import("node:fs")>("node:fs");
-  const size = original.statSync(item.path).size;
-  let streamed = 0;
-  vi.mocked(fs.createReadStream).mockImplementationOnce((path, options) => {
-    original.appendFileSync(path, "\n" + JSON.stringify({ type: "session_meta", payload: { extra: "x".repeat(1024 * 1024) } }) + "\n");
-    const stream = original.createReadStream(path, options);
-    stream.on("data", (chunk) => { streamed += Buffer.byteLength(chunk); });
-    return stream;
+  const size = statSync(item.path).size;
+  const originalPush = NativeTranscriptNormalizer.prototype.push;
+  let records = 0;
+  vi.spyOn(NativeTranscriptNormalizer.prototype, "push").mockImplementation(function (this: NativeTranscriptNormalizer, record) {
+    if (records++ === 0) appendFileSync(item.path, "\n" + JSON.stringify({ type: "session_meta", payload: { extra: "x".repeat(1024 * 1024) } }) + "\n");
+    return originalPush.call(this, record);
   });
   expect(await readVaultEvidence(item.vaultRoot, item.bundle.run, { artifact: item.bundle.artifact, canonicalTurns: item.canonicalTurns, maxBytes: size }))
     .toEqual({ status: "retry", reason: "artifact-changing" });
-  expect(streamed).toBeLessThanOrEqual(size);
+  expect(records).toBe(1);
+
 });
 
 

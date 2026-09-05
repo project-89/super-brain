@@ -31,6 +31,7 @@ const staticCredentialSchema = z
     principalId: z.string().min(1),
     author: authorSchema.optional(),
     capabilities: z.array(z.enum(API_CAPABILITIES)).max(API_CAPABILITIES.length).optional(),
+    taskEvidenceAuthority: z.discriminatedUnion("kind", [z.object({ kind: z.literal("human") }).strict(), z.object({ kind: z.literal("integration"), integrationId: z.string().trim().min(1).max(500) }).strict()]).optional(),
     workspaces: z.record(staticWorkspaceMembershipSchema).optional(),
     organizations: z.record(staticOrganizationMembershipSchema).optional(),
   })
@@ -109,7 +110,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
       nonEmpty(token, "credential token");
       nonEmpty(configured.principalId, "credential principalId");
       const author = authorSchema.parse(
-        configured.author ?? { kind: "human", id: configured.principalId },
+        configured.author ?? { kind: configured.taskEvidenceAuthority?.kind === "integration" ? "agent" : "human", id: configured.principalId },
       );
       const organizations: Readonly<Record<string, StoredOrganizationMembership>> =
         configured.organizations ?? {
@@ -130,6 +131,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
           credentialId: id,
           principalId: configured.principalId,
           author,
+          ...(configured.taskEvidenceAuthority === undefined ? {} : { taskEvidenceAuthority: configured.taskEvidenceAuthority.kind === "human" ? { kind: "human" as const, principalId: configured.principalId } : configured.taskEvidenceAuthority }),
           ...(configured.capabilities === undefined
             ? {}
             : { capabilities: [...new Set(configured.capabilities)] as ApiCapability[] }),
@@ -162,6 +164,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
           ...subject,
           author: { ...subject.author },
           ...(subject.capabilities === undefined ? {} : { capabilities: [...subject.capabilities] }),
+          ...(subject.taskEvidenceAuthority === undefined ? {} : { taskEvidenceAuthority: { ...subject.taskEvidenceAuthority } }),
         };
   }
 
@@ -178,6 +181,7 @@ export class StaticIdentityDirectory implements Authenticator, MembershipResolve
       stored.subject.author.id !== subject.author.id ||
       stored.subject.author.productionId !== subject.author.productionId ||
       JSON.stringify(stored.subject.capabilities) !== JSON.stringify(subject.capabilities) ||
+      JSON.stringify(stored.subject.taskEvidenceAuthority) !== JSON.stringify(subject.taskEvidenceAuthority) ||
       stored.subject.identityProvider !== subject.identityProvider
     ) {
       return undefined;

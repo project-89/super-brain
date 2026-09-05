@@ -8,7 +8,7 @@ export type WorkerJobState = "pending" | "waiting" | "retry" | "completed" | "ex
 export interface WorkerJob {
   readonly version: 1;
   readonly id: string;
-  readonly kind: "extract-run" | "extract-turn" | "propose" | "cognition-plan" | "synthesis";
+  readonly kind: "extract-run" | "extract-turn" | "propose" | "verify-trajectory" | "cognition-plan" | "synthesis";
   readonly state: WorkerJobState;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -184,7 +184,7 @@ export class DurableWorkerJobs {
 
   async coverage(): Promise<ProcessingCoverage> {
     const jobs = await this.active();
-    const byKind = { "extract-run": 0, "extract-turn": 0, propose: 0, "cognition-plan": 0, synthesis: 0 };
+    const byKind = { "extract-run": 0, "extract-turn": 0, propose: 0, "verify-trajectory": 0, "cognition-plan": 0, synthesis: 0 };
     for (const job of jobs) byKind[job.kind] += 1;
     const count = async (state: "completed" | "excluded" | "exhausted") => (await readdir(join(this.directory, state))).filter((name) => /^[a-f0-9]{64}\.enc$/.test(name)).length;
     return {

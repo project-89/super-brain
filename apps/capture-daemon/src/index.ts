@@ -12,3 +12,7 @@ export * from "./types.js";
 export * from "./transcript-vault.js";
 export * from "./evidence.js";
 export * from "./receipts.js";
+export * from "./repository.js";
+export * from "./repository-snapshot.js";
+export * from "./runtime.js";
+export * from "./trajectory-authority.js";

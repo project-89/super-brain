@@ -191,3 +191,15 @@ export async function listDeliveredTranscriptRunIds(
   }
   return new Set(body.runs.map((run) => transcriptRunSchema.parse(run).id));
 }
+
+export async function readDeliveredTranscriptBundle(runId: string, options: TranscriptDeliveryOptions): Promise<TranscriptImportBundle> {
+  if (!runId.trim()) throw new TypeError("transcript run id must not be empty");
+  const response = await (options.fetcher ?? fetch)(endpoint(options, `transcript-runs/${encodeURIComponent(runId)}`), {
+    headers: { authorization: `Bearer ${options.bearerToken}` }, signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.json().catch(() => undefined) as unknown;
+  if (!response.ok) throw responseError(response.status, body);
+  const bundle = transcriptImportBundleSchema.parse(body);
+  if (bundle.run.id !== runId) throw new TranscriptDeliveryError("Transcript lookup returned another run");
+  return bundle;
+}

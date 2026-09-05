@@ -62,6 +62,11 @@ import {
   type TrajectoryInput,
   type TrajectoryState,
   type TrajectoryTreeRecord,
+  taskEvidenceRecordsFromEvent, makeTaskEvidenceEvent, rebuildTaskEvidence, TASK_EVIDENCE_KINDS,
+  taskVersionKey,
+  assertTaskAcceptanceSource,
+  type TaskEvidenceInput, type TaskEvidenceMutationResult, type TaskEvidenceAuthority, type TaskOutcomeInput, type TaskInterventionInput,
+  type TaskManifest, type AttemptManifest, type AttemptContext, type TaskAcceptanceRef,
 } from "@_89/fold-trajectory";
 import { isAdditiveTreeRevision } from "@_89/fold-trace";
 import {
@@ -101,6 +106,7 @@ import {
   rebuildTranscriptCatalog,
   transcriptImportBundleSchema,
   validateTranscriptEventEnvelope,
+  validateTranscriptInterpretation,
   type TranscriptCatalog,
   type TranscriptChunk,
   type TranscriptProject,
@@ -141,6 +147,7 @@ import type {
   TranscriptProjectSummary,
   TranscriptRunDetail,
   TranscriptRunFilters,
+  TranscriptEvidenceOrigin,
   TrajectoryMutationResult,
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
@@ -217,6 +224,10 @@ function validateMemoryEnvelope(event: FoldEvent): void {
 }
 
 function validateTrajectoryEnvelope(event: FoldEvent): void {
+  if (taskEvidenceRecordsFromEvent(event).length > 0) {
+    if (event.changes.length !== 1) throw new FoldSdkError("task evidence event requires one change");
+    return;
+  }
   const records = trajectoryLogRecordsFromEvent(event);
   const isTrajectoryEvent = TRAJECTORY_EVENT_KINDS.has(event.kind);
   if (isTrajectoryEvent && (records.length !== 1 || event.changes.length !== 1)) {
@@ -288,7 +299,7 @@ export class FoldSdk {
   private readonly memoryProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }>();
   private readonly candidateProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryCandidateProjection }>();
 
-  private commandState: { entries?: FoldLogEntry[]; revision?: string; staged: FoldLogEntry[] } | undefined;
+  private commandState: { entries?: FoldLogEntry[]; revision?: string; staged: FoldLogEntry[]; method: string } | undefined;
   private readonly localReceipts = new Map<string, FoldCommandReceipt>();
 
   constructor(private readonly store: FoldSdkStore) {}
@@ -320,6 +331,7 @@ export class FoldSdk {
           }
           for (const { event } of existing.entries) {
             assertCanAppendEvent(event, access);
+            for (const record of taskEvidenceRecordsFromEvent(event)) assertCanWritePersonalMemory({ workspaceId: record.workspaceId, ...(record.spaceId === undefined ? {} : { spaceId: record.spaceId }), audience: "workspace", creatorId: record.actorId }, access);
             for (const record of memoryLogRecordsFromEvent(event)) assertCanWritePersonalMemory({ workspaceId: record.workspaceId, ...(record.spaceId === undefined ? {} : { spaceId: record.spaceId }), audience: record.audience, creatorId: record.actorId }, access);
             for (const contribution of memoryEvidenceContributionsFromEvent(event)) assertCanWritePersonalMemory({ ...contribution, creatorId: contribution.actorId }, access);
             for (const record of memoryCandidateLogRecordsFromEvent(event)) {
@@ -332,7 +344,7 @@ export class FoldSdk {
           }
           return existing.result as T;
         }
-        const state: NonNullable<FoldSdk["commandState"]> = { staged: [] };
+        const state: NonNullable<FoldSdk["commandState"]> = { staged: [], method };
         this.commandState = state;
         let committed = false;
         try {
@@ -460,10 +472,19 @@ export class FoldSdk {
     validateProducerOrder([...entries, ...added].map(({ event }) => event));
     const canonicalEvents = sortLog([...entries, ...added]).filter(({ status }) => status === "canon").map(({ event }) => event);
     for (const { event, status } of added) if (status === "canon" && event.kind.startsWith("memory.")) this.validateMemoryReferences(access, event, canonicalEvents);
+    for (const { event, status } of added) if (status === "canon" && event.kind.startsWith("trajectory.")) this.validateTaskReferences(access, event, canonicalEvents);
+    for (const { event, status } of added) if (status === "canon" && event.kind.startsWith("transcript.")) {
+      const contained = canonicalEvents.slice(0, canonicalEvents.findIndex((item) => item.id === event.id)).filter((source) => authorizeEventAccess(source, access).allowed && source.capture.scope.creator === undefined && (source.capture.scope.space === undefined || source.capture.scope.space === event.capture.scope.space));
+      for (const record of transcriptRecordsFromEvent(event)) if (record.recordType === "run" && record.run.interpretation !== undefined) {
+        const catalog = rebuildTranscriptCatalog(contained); const artifact = catalog.artifacts.get(record.run.artifactId);
+        if (!artifact) throw new FoldSdkAccessError("reinterpretation artifact is unavailable in target scope");
+        validateTranscriptInterpretation(record.run, artifact, catalog);
+      }
+    }
     // Raw append and domain commands share the same invariant checks before any durable write.
     if (added.some(({ event, status }) => status === "canon" && MEMORY_EVENT_KINDS.has(event.kind))) rebuildMemories(canonicalEvents);
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("memory.candidate-"))) rebuildMemoryCandidates(canonicalEvents);
-    if (added.some(({ event, status }) => status === "canon" && TRAJECTORY_EVENT_KINDS.has(event.kind))) rebuildTrajectories(canonicalEvents);
+    if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("trajectory."))) rebuildTrajectories(canonicalEvents);
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("transcript."))) rebuildTranscriptCatalog(canonicalEvents);
     if (this.commandState === undefined) throw new FoldSdkError("append requires a command boundary");
     this.commandState.staged.push(...added);
@@ -538,6 +559,63 @@ export class FoldSdk {
       if (scope === undefined || contribution.actorId !== access.principalId) throw new FoldSdkAccessError("evidence contribution target or actor is unavailable");
       if (contribution.authority !== memoryWriteAuthority(scope, access)) throw new FoldSdkAccessError("evidence contribution authority does not match authenticated access");
       assertEvidence(scope, contribution.evidence);
+    }
+  }
+
+  private validateTaskReferences(access: FoldSdkAccessContext, event: FoldEvent, allEvents: readonly FoldEvent[]): void {
+    const before = allEvents.slice(0, allEvents.findIndex(({ id }) => id === event.id)).filter((source) => authorizeEventAccess(source, access).allowed);
+    const target = event.capture.scope;
+    const contains = (scope: FoldEvent["capture"]["scope"]) => scope.workspace === target.workspace && scope.creator === undefined && (scope.space === undefined || scope.space === target.space);
+    const contained = before.filter((source) => contains(source.capture.scope));
+    const taskState = rebuildTaskEvidence(contained);
+    const visibleTaskState = rebuildTaskEvidence(before);
+    const assertTask = (taskId: string, taskVersion: string) => {
+      const key = taskVersionKey(taskId, taskVersion);
+      if (visibleTaskState.tasks.has(key) && !taskState.tasks.has(key)) throw new FoldSdkAccessError("task specification is unavailable in target scope");
+    };
+    const sourceEvent = (id: string) => {
+      const source = contained.find((item) => item.id === id);
+      if (!source) throw new FoldSdkAccessError("task evidence source is unavailable in target scope");
+      return source;
+    };
+    const assertContext = (context: AttemptContext | undefined) => {
+      if (!context) return;
+      const memories = rebuildMemories(before);
+      for (const ref of context.memoryRefs ?? []) {
+        const current = memories.memories.get(ref.memoryId);
+        const source = current?.revision === ref.revision ? current : memories.revisions?.get(ref.memoryId)?.get(ref.revision);
+        if (!current || !source || source.audience !== "workspace" || source.workspaceId !== target.workspace || (source.spaceId !== undefined && source.spaceId !== target.space)) throw new FoldSdkAccessError("task memory context revision is unavailable in target scope");
+      }
+      for (const lineage of context.lineage ?? []) {
+        const source = sourceEvent(lineage.eventId);
+        if (lineage.previousAttemptId !== undefined && !taskState.attempts.has(lineage.previousAttemptId)) throw new FoldSdkAccessError("context parent attempt is unavailable");
+        if (lineage.previousTurnId !== undefined && source.capture.identity?.turn !== lineage.previousTurnId) throw new FoldSdkAccessError("context turn does not match its source");
+      }
+    };
+    const assertAttempt = (attempt: AttemptManifest) => {
+      assertTask(attempt.taskId, attempt.taskVersion);
+      if (visibleTaskState.attempts.has(attempt.attemptId) && !taskState.attempts.has(attempt.attemptId)) throw new FoldSdkAccessError("attempt baseline is unavailable in target scope");
+      if (attempt.parentAttemptId !== undefined && !taskState.attempts.has(attempt.parentAttemptId)) throw new FoldSdkAccessError("parent attempt is unavailable in target scope");
+      assertContext(attempt.context);
+      if (attempt.acceptance) {
+        const source = sourceEvent(attempt.acceptance.eventId);
+        assertTaskAcceptanceSource(attempt.acceptance, source);
+      }
+    };
+    for (const record of trajectoryLogRecordsFromEvent(event)) if (record.recordType === "trajectory") {
+      if (record.trajectory.manifest) assertAttempt(record.trajectory.manifest.attempt);
+      for (const step of record.trajectory.steps) assertContext(step.context);
+    }
+    for (const record of taskEvidenceRecordsFromEvent(event)) {
+      if (this.commandState?.method === "append") throw new FoldSdkAccessError("task evidence requires a dedicated authorized command");
+      if (record.actorId !== access.principalId) throw new FoldSdkAccessError("task evidence actor mismatch");
+      if (record.recordType === "task-manifest") assertTask(record.input.taskId, record.input.taskVersion);
+      if (record.recordType === "attempt-manifest") assertAttempt(record.input as AttemptManifest);
+      if (record.recordType === "outcome" || record.recordType === "intervention") {
+        if (record.input.sourceEventId !== undefined) sourceEvent(record.input.sourceEventId);
+        if (!taskState.attempts.has(record.input.attemptId)) throw new FoldSdkAccessError("task evidence attempt is unavailable in target scope");
+        if (record.recordType === "outcome" && record.input.acceptance !== undefined) assertTaskAcceptanceSource(record.input.acceptance as TaskAcceptanceRef, sourceEvent(record.input.acceptance.eventId));
+      }
     }
   }
 
@@ -743,6 +821,8 @@ export class FoldSdk {
       const catalog = this.store.stableReads === true && cachedCatalog !== undefined
         ? cachedCatalog.catalog
         : rebuildTranscriptCatalog(events);
+      const contained = events.filter((event) => event.capture.scope.creator === undefined && (event.capture.scope.space === undefined || event.capture.scope.space === context.capture.scope.space));
+      validateTranscriptInterpretation(bundle.run, bundle.artifact, rebuildTranscriptCatalog(contained));
       if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, { catalog });
       const same = (left: unknown, right: unknown): boolean =>
         JSON.stringify(left) === JSON.stringify(right);
@@ -800,6 +880,57 @@ export class FoldSdk {
       await this.appendSequenceInternal(context.access, newEvents);
       if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, { catalog: nextCatalog });
       return { events: newEvents, run: bundle.run };
+    });
+  }
+
+  transcriptEvidenceOrigins(access: FoldSdkAccessContext, refs: readonly MemoryCandidateEvidence[]): Promise<readonly TranscriptEvidenceOrigin[]> {
+    return this.enqueue(async () => {
+      if (refs.length > 100) throw new FoldSdkError("at most 100 transcript evidence origins may be resolved");
+      const events = (await this.entriesForAccess(access, { include: "canon" })).map(({ event }) => event);
+      const catalog = rebuildTranscriptCatalog(events);
+      return refs.flatMap((reference): TranscriptEvidenceOrigin[] => {
+        const source = events.find(({ id }) => id === reference.eventId);
+        const run = reference.runId === undefined ? undefined : catalog.runs.get(reference.runId);
+        if (!source || !run) return [];
+        const sourceRecords = transcriptRecordsFromEvent(source);
+        if (!sourceRecords.some((record) => (record.recordType === "run" && record.run.id === run.id) || (record.recordType === "chunk" && record.chunk.runId === run.id) || (record.recordType === "artifact" && record.artifact.id === run.artifactId))) return [];
+        const turn = reference.turnId === undefined ? undefined : (catalog.chunksByRun.get(run.id) ?? []).flatMap((chunk) => chunk.turns).find(({ id }) => id === reference.turnId);
+        if (reference.turnId !== undefined && turn === undefined) return [];
+        const sourceOccurrenceId = run.interpretation?.sourceOccurrenceId ?? run.artifactId;
+        const original = catalog.artifacts.get(run.interpretation?.sourceArtifactId ?? run.artifactId)!;
+        // A caller-selected artifact ID or renamed source path cannot create independent corroboration.
+        // This is conservative content-family equivalence, distinct from a witnessed live occurrence.
+        const independenceKey = `transcript-source-family-v1:${original.source}:${original.sha256}`;
+        return [{ reference, sourceOccurrenceId, ...(turn?.origin === undefined ? {} : { recordRanges: turn.origin.recordRanges }), independenceKey, verified: true }];
+      });
+    });
+  }
+
+  private recordTaskEvidence(context: TrajectoryEventContext, stamp: TrajectoryEventStamp, data: TaskEvidenceInput): Promise<TaskEvidenceMutationResult> {
+    const identity = data.recordType === "outcome" && data.input.source !== undefined ? [data.input.source.providerId, data.input.source.deliveryId] : stamp.id;
+    return this.command(context.access, `recordTaskEvidence:${data.recordType}`, identity, { context, stamp, data }, async () => {
+      const event = makeTaskEvidenceEvent(context, stamp, data);
+      await this.appendInternal(context.access, event, "canon");
+      return { event, record: taskEvidenceRecordsFromEvent(event)[0]! };
+    });
+  }
+  recordTaskManifest(context: TrajectoryEventContext, stamp: TrajectoryEventStamp, input: TaskManifest): Promise<TaskEvidenceMutationResult> {
+    return this.recordTaskEvidence(context, stamp, { recordType: "task-manifest", input });
+  }
+  recordAttemptManifest(context: TrajectoryEventContext, stamp: TrajectoryEventStamp, input: AttemptManifest): Promise<TaskEvidenceMutationResult> {
+    return this.recordTaskEvidence(context, stamp, { recordType: "attempt-manifest", input });
+  }
+  recordTaskOutcome(context: TrajectoryEventContext & { readonly evidenceAuthority: TaskEvidenceAuthority }, stamp: TrajectoryEventStamp, input: TaskOutcomeInput): Promise<TaskEvidenceMutationResult> {
+    return this.recordTaskEvidence(context, stamp, { recordType: "outcome", input, authority: context.evidenceAuthority });
+  }
+  recordTaskIntervention(context: TrajectoryEventContext & { readonly evidenceAuthority: TaskEvidenceAuthority }, stamp: TrajectoryEventStamp, input: TaskInterventionInput): Promise<TaskEvidenceMutationResult> {
+    return this.recordTaskEvidence(context, stamp, { recordType: "intervention", input, authority: context.evidenceAuthority });
+  }
+  taskEvidence(access: FoldSdkAccessContext, taskId: string): Promise<ReturnType<typeof rebuildTaskEvidence>> {
+    return this.enqueue(async () => {
+      const events = (await this.entriesForAccess(access, { include: "canon" })).map(({ event }) => event);
+      const state = rebuildTaskEvidence(events);
+      return { tasks: new Map([...state.tasks].filter(([, task]) => task.taskId === taskId)), attempts: new Map([...state.attempts].filter(([, attempt]) => attempt.taskId === taskId)), records: state.records.filter((record) => record.input.taskId === taskId) };
     });
   }
 

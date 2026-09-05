@@ -1,7 +1,7 @@
-import { createReadStream } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { chmod, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 import {
@@ -80,7 +80,7 @@ async function atomicPrivateJson(path: string, value: unknown): Promise<void> {
   }
 }
 
-async function atomicPrivateText(path: string, value: string): Promise<void> {
+export async function atomicPrivateText(path: string, value: string): Promise<void> {
   await secureDirectory(dirname(path));
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
   const file = await open(temporary, "wx", 0o600);
@@ -96,6 +96,20 @@ async function atomicPrivateText(path: string, value: string): Promise<void> {
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
+}
+
+/** Bounded reads for evidence reached from canonical references. Never follow a final symlink. */
+export async function readBoundedPrivateText(path: string, maxBytes: number): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.size > maxBytes) throw new Error("private evidence is not a bounded regular file");
+    const bytes = Buffer.alloc(before.size); let offset = 0;
+    while (offset < bytes.length) { const chunk = await file.read(bytes, offset, bytes.length - offset, offset); if (chunk.bytesRead === 0) break; offset += chunk.bytesRead; }
+    const after = await file.stat(); const current = await lstat(path);
+    if (offset !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || before.ino !== current.ino || before.dev !== current.dev) throw new Error("private evidence changed while reading");
+    return bytes.toString("utf8");
+  } finally { await file.close(); }
 }
 
 function sha256(value: string): string {
@@ -517,7 +531,8 @@ export async function readHookVaultArtifact(options: {
   let serialized: string | undefined;
   for (const name of [`${id}.json.enc`, `${id}.json`]) {
     try {
-      serialized = (await readFile(join(directory, name), "utf8")).trim();
+      serialized = (await readBoundedPrivateText(join(directory, name), 32 * 1024 * 1024)).trim();
+      if (name.endsWith(".enc") && (JSON.parse(serialized) as { $superBrainEncrypted?: unknown }).$superBrainEncrypted !== 1) throw new Error("encrypted hook artifact requires authenticated envelope");
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

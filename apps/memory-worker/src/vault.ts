@@ -1,10 +1,6 @@
-import { createHash } from "node:crypto";
-import { createReadStream, type Stats } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
-import { join, relative } from "node:path";
-import { createInterface } from "node:readline";
+import { join } from "node:path";
 import type { TranscriptArtifact, TranscriptRun, TranscriptSource, TranscriptTurn } from "@_89/fold-transcript";
-import { NativeTranscriptNormalizer, decryptVaultLine, nativeTextContent } from "@_89/super-brain-importer";
+import { NativeTranscriptNormalizer, nativeTextContent, visitStoredTranscriptArtifact } from "@_89/super-brain-importer";
 import type { VaultMessage } from "./types.js";
 
 const recordValue = (value: unknown): Record<string, unknown> | undefined =>
@@ -126,47 +122,14 @@ export async function readVaultEvidence(vaultRoot: string, run: TranscriptRun, o
   const parserVersion = artifact.parser.version;
   if ((parserVersion !== "1" && parserVersion !== "2") || artifact.parser.id !== (run.source === "codex" ? "codex-jsonl" : "claude-jsonl")) return { status: "excluded", reason: "unsupported-parser" };
   if (artifact.anonymizationPolicy !== undefined && artifact.anonymizationPolicy !== "none" && options.canonicalTurns === undefined) return { status: "waiting", reason: "metadata-unavailable" };
-  const encryptedPath = vaultPath(vaultRoot, run, true, artifact)!;
-  const plainPath = vaultPath(vaultRoot, run, false, artifact)!;
-  let path: string | undefined;
-  let before: Stats | undefined;
   try {
-    for (const candidate of [encryptedPath, plainPath]) {
-      try { before = await lstat(candidate); path = candidate; break; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    }
-    if (path === undefined || before === undefined) return { status: "waiting", reason: "artifact-unavailable" };
-    if (!before.isFile()) return { status: "excluded", reason: "nonregular-artifact" };
-    if (relative(await realpath(vaultRoot), await realpath(path)).startsWith("..")) return { status: "excluded", reason: "artifact-identity-mismatch" };
-    if (before.size > (options.maxBytes ?? 128 * 1024 * 1024)) return { status: "excluded", reason: "artifact-too-large" };
-    if (path === encryptedPath && options.encryptionKey === undefined) return { status: "waiting", reason: "key-unavailable" };
     const projection = new VaultMessageProjection(run.source, run.nativeId, { parserVersion, ...(options.canonicalTurns === undefined ? {} : { canonicalTurns: options.canonicalTurns }) });
-    // Read only the size inspected above; appenders cannot make this pass unbounded.
-    const stream = createReadStream(path, { end: Math.max(0, before.size - 1) });
-    const storedHash = createHash("sha256");
-    stream.on("data", (chunk) => storedHash.update(chunk));
-    const lines = createInterface({ input: stream, crlfDelay: Infinity });
-    let lineNumber = 0;
-    try {
-      for await (const line of lines) {
-        lineNumber++;
-        if (line.trim().length === 0) continue;
-        let decrypted: string;
-        try {
-          if (path === encryptedPath && recordValue(JSON.parse(line))?.$superBrainEncrypted !== 1) return { status: "excluded", reason: "malformed-record", line: lineNumber };
-          decrypted = decryptVaultLine(line, options.encryptionKey);
-        }
-        catch { return { status: "retry", reason: "decryption-failed", line: lineNumber }; }
-        let record: Record<string, unknown> | undefined;
-        try { record = recordValue(JSON.parse(decrypted)); } catch { /* Corruption is reported, not skipped. */ }
-        if (record === undefined) return { status: "excluded", reason: "malformed-record", line: lineNumber };
-        projection.push(record);
-      }
-    } finally { lines.close(); stream.destroy(); }
-    const after = await lstat(path);
-    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ino !== after.ino) return { status: "retry", reason: "artifact-changing" };
-    if (artifact.storedSha256 !== undefined && artifact.storedSha256 !== storedHash.digest("hex")) return { status: "excluded", reason: "artifact-integrity-mismatch" };
-    return projection.finish(artifact.storedSha256 === undefined ? "legacy-unverified" : "verified");
+    const result = await visitStoredTranscriptArtifact({ vaultRoot, artifact,
+      ...(options.encryptionKey === undefined ? {} : { encryptionKey: options.encryptionKey }),
+      ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
+      onRecord: (record) => projection.push(record),
+    });
+    return result.status === "ready" ? projection.finish(result.integrity) : result;
   } catch (error) {
     if (error instanceof VaultIdentityError) return { status: "excluded", reason: "turn-identity-mismatch" };
     return { status: "retry", reason: "io-error" };
