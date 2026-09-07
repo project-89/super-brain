@@ -8,6 +8,7 @@ import {
   CaptureEngine,
   CaptureHttpServer,
   DurableSpool,
+  HookInbox,
   HookVault,
   StateStore,
   parseCaptureConfig,
@@ -75,6 +76,53 @@ describe("capture operator settings", () => {
       await expect(artifactResponse.json()).resolves.toMatchObject({
         artifact: { id: artifact.id, source: "codex", payload: { output: "complete" } },
       });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("acknowledges lifecycle hooks from the durable inbox before normalization", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-server-inbox-"));
+    const parsed = parseCaptureConfig({
+      apiUrl: "http://127.0.0.1:3003",
+      workspaceId: "workspace-a",
+      apiToken: "api-token",
+      sensorId: "urn:sensor:super-brain-capture:test",
+      hookToken: "hook-token",
+      operatorToken: "operator-token",
+      bindHost: "127.0.0.1",
+      port: 8377,
+      heartbeatWindowMs: 90_000,
+      heartbeatIntervalMs: 30_000,
+      orphanAfterMs: 86_400_000,
+      stateRoot: join(root, "state"),
+      vaultRoot: join(root, "vault"),
+      reasoningPolicy: "exclude",
+    });
+    const config = { ...parsed, port: 0 };
+    const spool = new DurableSpool(config.stateRoot);
+    const engine = new CaptureEngine(config, new StateStore(config.stateRoot), new HookVault(config.vaultRoot), spool);
+    const inbox = new HookInbox(config.stateRoot);
+    await engine.initialize();
+    await inbox.initialize();
+    const ingest = vi.spyOn(engine, "ingest");
+    const server = new CaptureHttpServer(config, engine, spool, undefined, undefined, inbox);
+    const address = await server.start();
+    try {
+      const response = await fetch(`http://${address.host}:${address.port}/hook`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-agent-source": "codex",
+          "x-super-brain-hook-token": "hook-token",
+        },
+        body: JSON.stringify({ session_id: "session-a", hook_event_name: "SessionStart" }),
+      });
+
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toMatchObject({ accepted: true, inboxId: expect.any(String) });
+      expect(ingest).not.toHaveBeenCalled();
+      await expect(inbox.snapshot()).resolves.toMatchObject({ pendingHooks: 1, failedHooks: 0 });
     } finally {
       await server.close();
     }

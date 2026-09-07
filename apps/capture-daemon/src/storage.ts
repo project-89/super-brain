@@ -599,19 +599,26 @@ export class DurableSpool {
   async resolveFailed(
     reason: string,
     confirm = false,
+    options: { readonly jobId?: string } = {},
   ): Promise<{ readonly matched: number; readonly resolved: number }> {
     await this.initialize();
     const normalizedReason = reason.trim();
     if (normalizedReason.length === 0) throw new TypeError("failed-job resolution requires a reason");
-    const names = (await readdir(this.failed))
+    const availableNames = (await readdir(this.failed))
       .filter((name) => name.endsWith(".json") && !name.endsWith(".error.json"))
       .sort();
-    if (!confirm) return { matched: names.length, resolved: 0 };
+    const jobs = await Promise.all(availableNames.map(async (name) => ({
+      name,
+      job: JSON.parse(await readFile(join(this.failed, name), "utf8")) as SpoolJob,
+    })));
+    const selected = options.jobId === undefined
+      ? jobs
+      : jobs.filter(({ job }) => job.id === options.jobId);
+    if (!confirm) return { matched: selected.length, resolved: 0 };
     let resolved = 0;
-    for (const name of names) {
+    for (const { name, job } of selected) {
       const source = join(this.failed, name);
       const errorPath = join(this.failed, `${name}.error.json`);
-      const job = JSON.parse(await readFile(source, "utf8")) as SpoolJob;
       let failure: unknown;
       try {
         failure = JSON.parse(await readFile(errorPath, "utf8")) as unknown;
@@ -639,24 +646,34 @@ export class DurableSpool {
       }
       resolved += 1;
     }
-    return { matched: names.length, resolved };
+    return { matched: selected.length, resolved };
   }
 
   async retryFailed(
     confirm = false,
-    options: { readonly rebaseEvents?: boolean; readonly rebaseTrajectories?: boolean } = {},
+    options: {
+      readonly rebaseEvents?: boolean;
+      readonly rebaseTrajectories?: boolean;
+      readonly jobId?: string;
+    } = {},
   ): Promise<{ readonly matched: number; readonly retried: number; readonly rebased: number }> {
     await this.initialize();
-    const names = (await readdir(this.failed))
+    const availableNames = (await readdir(this.failed))
       .filter((name) => name.endsWith(".json") && !name.endsWith(".error.json"))
       .sort();
-    if (!confirm) return { matched: names.length, retried: 0, rebased: 0 };
+    const jobs = await Promise.all(availableNames.map(async (name) => ({
+      name,
+      job: JSON.parse(await readFile(join(this.failed, name), "utf8")) as SpoolJob,
+    })));
+    const selected = options.jobId === undefined
+      ? jobs
+      : jobs.filter(({ job }) => job.id === options.jobId);
+    if (!confirm) return { matched: selected.length, retried: 0, rebased: 0 };
     let retried = 0;
     let rebased = 0;
     const rebaseStart = Date.now();
-    for (const [index, name] of names.entries()) {
+    for (const [index, { name, job }] of selected.entries()) {
       const source = join(this.failed, name);
-      const job = JSON.parse(await readFile(source, "utf8")) as SpoolJob;
       const retryJob = options.rebaseEvents === true && job.kind === "event"
         ? rebaseEventJob(job, rebaseStart + index)
         : options.rebaseTrajectories === true && (job.kind === "trajectory" || job.kind === "trajectory-tree")
@@ -681,7 +698,7 @@ export class DurableSpool {
       });
       retried += 1;
     }
-    return { matched: names.length, retried, rebased };
+    return { matched: selected.length, retried, rebased };
   }
 }
 

@@ -651,6 +651,31 @@ describe("capture daemon", () => {
     });
   });
 
+  it("recovers one quarantined job without mutating unrelated failures", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-capture-selective-recovery-"));
+    const stateRoot = join(root, "state");
+    const spool = new DurableSpool(stateRoot);
+    const current = config(root);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    await engine.ingest("codex", { session_id: "retry-one", cwd: process.cwd(), hook_event_name: "SessionStart" });
+    await engine.ingest("codex", { session_id: "resolve-two", cwd: process.cwd(), hook_event_name: "SessionStart" });
+    const pending = await spool.list();
+    expect(pending).toHaveLength(2);
+    for (const item of pending) await spool.reject(item.path, "different permanent failures");
+
+    const retryId = pending[0]!.job.id;
+    const resolveId = pending[1]!.job.id;
+    await expect(spool.retryFailed(false, { jobId: retryId }))
+      .resolves.toEqual({ matched: 1, retried: 0, rebased: 0 });
+    await expect(spool.retryFailed(true, { jobId: retryId }))
+      .resolves.toEqual({ matched: 1, retried: 1, rebased: 0 });
+    await expect(spool.snapshot()).resolves.toMatchObject({ pendingJobs: 1, failedJobs: 1 });
+    await expect(spool.resolveFailed("confirmed unrelated failure", true, { jobId: resolveId }))
+      .resolves.toEqual({ matched: 1, resolved: 1 });
+    await expect(spool.snapshot()).resolves.toMatchObject({ pendingJobs: 1, failedJobs: 0 });
+  });
+
   it("explicitly rebases an ordered quarantined event while retaining its source ID", async () => {
     const root = await mkdtemp(join(tmpdir(), "super-brain-capture-rebase-"));
     const spool = new DurableSpool(join(root, "state"));

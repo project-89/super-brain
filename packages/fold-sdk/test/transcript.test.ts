@@ -124,16 +124,53 @@ describe("Fold SDK transcript imports", () => {
     });
   });
 
-  it("makes exact retries no-ops and rejects changed identities", async () => {
+  it("makes exact retries no-ops and preserves changed source artifacts as immutable snapshots", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     await sdk.importTranscript(context(), bundle, { importId: "import-a", importedAt: 1 });
     const retry = await sdk.importTranscript(context(), bundle, { importId: "import-b", importedAt: 2 });
     expect(retry.events).toEqual([]);
 
+    const nextArtifact = {
+      ...artifact,
+      id: "artifact-next",
+      sha256: "d".repeat(64),
+      byteLength: 200,
+    };
+    const snapshot = await sdk.importTranscript(context(), {
+      ...bundle,
+      artifact: nextArtifact,
+      run: {
+        ...run,
+        artifactId: nextArtifact.id,
+        counts: { ...run.counts, messages: 3 },
+      },
+    }, { importId: "import-c", importedAt: 3 });
+    expect(snapshot.run).toMatchObject({
+      id: `codex:run-a:snapshot:${"d".repeat(16)}`,
+      snapshotOfRunId: run.id,
+      nativeId: run.nativeId,
+      artifactId: nextArtifact.id,
+    });
+    expect(snapshot.events).toHaveLength(3);
+    expect(snapshot.events.every((event) => event.capture.identity?.run === snapshot.run.id)).toBe(true);
+    expect(await sdk.transcriptRuns(access())).toHaveLength(2);
+
+    const snapshotRetry = await sdk.importTranscript(context(), {
+      ...bundle,
+      artifact: nextArtifact,
+      run: {
+        ...run,
+        artifactId: nextArtifact.id,
+        counts: { ...run.counts, messages: 3 },
+      },
+    }, { importId: "import-d", importedAt: 4 });
+    expect(snapshotRetry.events).toEqual([]);
+    expect(snapshotRetry.run.id).toBe(snapshot.run.id);
+
     await expect(sdk.importTranscript(context(), {
       ...bundle,
       run: { ...run, counts: { ...run.counts, messages: 3 } },
-    }, { importId: "import-c", importedAt: 3 })).rejects.toBeInstanceOf(FoldSdkConflictError);
+    }, { importId: "import-e", importedAt: 5 })).rejects.toBeInstanceOf(FoldSdkConflictError);
   });
 
   it("keeps transcript queries inside the authenticated workspace", async () => {

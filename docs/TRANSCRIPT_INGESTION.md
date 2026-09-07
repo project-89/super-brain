@@ -73,6 +73,12 @@ and the vault writer verifies the source hash again before storage. A transcript
 that changes during either phase is rejected for retry instead of producing a
 mismatched artifact and metadata bundle.
 
+Some harnesses can resume an old native session and append to its transcript
+after an earlier import. Fold keeps both observations immutable: the later
+content-addressed artifact receives a deterministic snapshot run ID and
+`snapshotOfRunId` links it to the original source-qualified run. Reimporting the
+same later artifact is a no-op.
+
 `artifact.stored: true` means the importer successfully persisted that local
 vault copy. The API stores only artifact metadata and does not serve or assume
 access to client-local vault content. A remote or multi-user deployment needs a

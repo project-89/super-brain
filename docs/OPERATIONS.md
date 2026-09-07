@@ -147,6 +147,19 @@ pnpm --filter @_89/super-brain-memory-worker start -- install-service
 ```
 
 Service logs are under `~/.local/state/super-brain/{api,memory-worker,capture}`.
+The capture service accepts hooks into a durable local inbox even while the API
+is unavailable. The API and memory worker still require PostgreSQL. When local
+PostgreSQL runs in Docker, configure its container to return with Docker after a
+host restart; substitute the installation's actual container name:
+
+```sh
+docker update --restart unless-stopped super-brain-postgres
+docker start super-brain-postgres
+```
+
+After a reboot, `GET /health` on the capture service reports both `inbox` and
+delivery-spool counts. A healthy recovered installation reaches zero pending and
+failed items in both layers without increasing the terminal relay-failure audit.
 
 ## Encrypted Vault
 
@@ -200,6 +213,17 @@ them:
 ```sh
 pnpm --filter @_89/super-brain-capture-daemon start -- retry-failed
 pnpm --filter @_89/super-brain-capture-daemon start -- retry-failed --confirm
+```
+
+Use `--job <job-id>` to preview, retry, or resolve exactly one quarantined job.
+This prevents recovery of one understood failure from mutating unrelated audit
+items:
+
+```sh
+pnpm --filter @_89/super-brain-capture-daemon start -- retry-failed \
+  --job capture-... --confirm
+pnpm --filter @_89/super-brain-capture-daemon start -- resolve-failed \
+  --job capture-... --reason "source transcript was deleted" --confirm
 ```
 
 If the API accepted later events before an older quarantined event, canonical

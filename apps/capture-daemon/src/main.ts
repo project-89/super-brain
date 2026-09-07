@@ -13,9 +13,11 @@ import {
 } from "./config.js";
 import { SpoolProcessor } from "./delivery.js";
 import { installHermesHook, installHooks, installLaunchAgent } from "./install.js";
+import { HookInbox, HookInboxProcessor } from "./inbox.js";
 import { CaptureHttpServer } from "./server.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
 import { exportCaptureData, pruneHookArtifacts, verifyCaptureExport } from "./maintenance.js";
+import { captureRelayFallbackEligible, postCaptureRelay } from "./relay.js";
 import { DurableSpool, HookVault, recordRelayFailure, StateStore } from "./storage.js";
 import type { HookSource, ReasoningPolicy, ReasoningTreePolicy } from "./types.js";
 import { readVaultKey, RecordAnonymizer, type AnonymizationPolicy } from "@_89/super-brain-importer";
@@ -48,31 +50,42 @@ function executablePath(): string {
 async function relay(args: readonly string[], path = "/hook"): Promise<void> {
   const source = args[1] as HookSource | undefined;
   if (source === undefined) return;
+  let config: Awaited<ReturnType<typeof readCaptureConfig>> | undefined;
+  let body: string | undefined;
   try {
-    const config = await readCaptureConfig(configPath(args));
+    config = await readCaptureConfig(configPath(args));
     const raw = await stdin();
-    const body = path === "/hook"
+    body = path === "/hook"
       ? raw.trim().length === 0 ? "{}" : raw
       : JSON.stringify({
           ...(raw.trim().length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>),
           source,
         });
-    const response = await fetch(`http://${config.bindHost}:${config.port}${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-agent-source": source,
-        "x-super-brain-hook-token": config.hookToken,
-      },
+    await postCaptureRelay({
+      url: `http://${config.bindHost}:${config.port}${path}`,
+      source,
+      token: config.hookToken,
       body,
-      signal: AbortSignal.timeout(2_000),
     });
-    if (!response.ok) throw new Error(`capture daemon rejected the request with HTTP ${response.status}`);
   } catch (error) {
     if (path !== "/hook") throw error;
     // Lifecycle hooks must never block or break the coding-agent host.
     try {
-      const config = await readCaptureConfig(configPath(args));
+      config ??= await readCaptureConfig(configPath(args));
+      if (body !== undefined && captureRelayFallbackEligible(error)) {
+        try {
+          const encryptionKey = config.vaultKeyPath === undefined ? undefined : await readVaultKey(config.vaultKeyPath);
+          const payload = JSON.parse(body) as unknown;
+          if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+            throw new TypeError("hook payload must be a JSON object");
+          }
+          await new HookInbox(config.stateRoot, encryptionKey).enqueue(source, payload as Record<string, unknown>);
+          return;
+        } catch (fallbackError) {
+          await recordRelayFailure(config.stateRoot, source, path, fallbackError);
+          return;
+        }
+      }
       await recordRelayFailure(config.stateRoot, source, path, error);
     } catch {
       // Capture diagnostics must not break the host either.
@@ -89,6 +102,7 @@ async function run(args: readonly string[]): Promise<void> {
     : await readVaultKey(config.anonymizationKeyPath!);
   const anonymizer = new RecordAnonymizer(config.anonymizationPolicy, anonymizationKey);
   const spool = new DurableSpool(config.stateRoot);
+  const inbox = new HookInbox(config.stateRoot, vaultEncryptionKey);
   const engine = new CaptureEngine(
     config,
     new StateStore(config.stateRoot),
@@ -100,6 +114,8 @@ async function run(args: readonly string[]): Promise<void> {
     anonymizer,
   );
   await engine.initialize();
+  await inbox.initialize();
+  const inboxProcessor = new HookInboxProcessor(inbox, engine);
   const processor = new SpoolProcessor(config, spool, vaultEncryptionKey, anonymizer);
   const server = new CaptureHttpServer(config, engine, spool, async (patch) => {
     if (
@@ -112,8 +128,9 @@ async function run(args: readonly string[]): Promise<void> {
     const result = await updateCaptureConfig(path, patch);
     setTimeout(() => process.kill(process.pid, "SIGTERM"), 100).unref();
     return result.config;
-  }, vaultEncryptionKey);
+  }, vaultEncryptionKey, inbox);
   await server.start();
+  inboxProcessor.start();
   processor.start();
   const heartbeats = setInterval(() => void engine.heartbeat().catch(() => undefined), config.heartbeatIntervalMs);
   process.stdout.write(`Super Brain capture listening on http://${config.bindHost}:${config.port}\n`);
@@ -124,6 +141,7 @@ async function run(args: readonly string[]): Promise<void> {
   });
   clearInterval(heartbeats);
   await server.close();
+  await inboxProcessor.stop();
   await processor.stop();
 }
 
@@ -299,6 +317,7 @@ async function main(): Promise<void> {
       {
         rebaseEvents: args.includes("--rebase-events"),
         rebaseTrajectories: args.includes("--rebase-trajectories"),
+        ...(option(args, "--job") === undefined ? {} : { jobId: option(args, "--job")! }),
       },
     );
     process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "retry" : "dry-run", ...result }, null, 2)}\n`);
@@ -308,7 +327,11 @@ async function main(): Promise<void> {
     const reason = option(args, "--reason");
     if (reason === undefined) throw new TypeError("resolve-failed requires --reason TEXT");
     const config = await readCaptureConfig(configPath(args));
-    const result = await new DurableSpool(config.stateRoot).resolveFailed(reason, args.includes("--confirm"));
+    const result = await new DurableSpool(config.stateRoot).resolveFailed(
+      reason,
+      args.includes("--confirm"),
+      { ...(option(args, "--job") === undefined ? {} : { jobId: option(args, "--job")! }) },
+    );
     process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "resolve" : "dry-run", ...result }, null, 2)}\n`);
     return;
   }

@@ -14,6 +14,9 @@ import {
 import { DurableSpool, TranscriptSnapshotStore } from "./storage.js";
 import type { CaptureConfig, SpoolJob } from "./types.js";
 
+const DEFAULT_BATCH_SIZE = 50;
+const DEFAULT_TRANSIENT_BACKOFF_MS = 5_000;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -27,24 +30,46 @@ function permanentApiError(error: unknown): boolean {
   return false;
 }
 
+function transientLocalTranscriptError(error: unknown): boolean {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+  return error instanceof Error && error.message.includes("changed while");
+}
+
 export class SpoolProcessor {
   private readonly client: SuperBrainClient;
   private timer: NodeJS.Timeout | undefined;
   private processing: Promise<void> | undefined;
   private readonly retryAt = new Map<string, number>();
   private readonly snapshots: TranscriptSnapshotStore;
+  private readonly batchSize: number;
+  private readonly transientBackoffMs: number;
+  private nextFlushAt = 0;
 
   constructor(
     private readonly config: CaptureConfig,
     private readonly spool: DurableSpool,
     private readonly vaultEncryptionKey?: Uint8Array,
     private readonly anonymizer = new RecordAnonymizer("none"),
+    options: {
+      readonly fetch?: typeof fetch;
+      readonly batchSize?: number;
+      readonly transientBackoffMs?: number;
+    } = {},
   ) {
+    this.batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+    this.transientBackoffMs = options.transientBackoffMs ?? DEFAULT_TRANSIENT_BACKOFF_MS;
+    if (!Number.isInteger(this.batchSize) || this.batchSize < 1) {
+      throw new TypeError("spool batch size must be a positive integer");
+    }
+    if (!Number.isFinite(this.transientBackoffMs) || this.transientBackoffMs < 0) {
+      throw new TypeError("spool transient backoff cannot be negative");
+    }
     this.client = new SuperBrainClient({
       baseUrl: config.apiUrl,
       organizationId: config.organizationId,
       workspaceId: config.workspaceId,
       token: config.apiToken,
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     });
     this.snapshots = new TranscriptSnapshotStore(config.stateRoot);
   }
@@ -110,10 +135,14 @@ export class SpoolProcessor {
   }
 
   private async processPending(): Promise<void> {
+    if (this.nextFlushAt > Date.now()) return;
     const pending = await this.spool.list();
+    let attempted = 0;
     for (const { path, job } of pending) {
+      if (attempted >= this.batchSize) break;
       if (job.kind === "transcript" && Date.parse(job.notBefore) > Date.now()) continue;
       if ((this.retryAt.get(path) ?? 0) > Date.now()) continue;
+      attempted += 1;
       try {
         await this.deliver(job);
         if (job.kind === "transcript" && job.ownedSnapshot === true) {
@@ -128,10 +157,11 @@ export class SpoolProcessor {
           await this.spool.reject(path, errorMessage(error));
           continue;
         }
-        if (job.kind === "transcript") {
+        if (job.kind === "transcript" && transientLocalTranscriptError(error)) {
           this.retryAt.set(path, Date.now() + 5_000);
           continue;
         }
+        this.nextFlushAt = Date.now() + this.transientBackoffMs;
         break;
       }
     }

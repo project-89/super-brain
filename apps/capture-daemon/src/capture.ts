@@ -1034,12 +1034,12 @@ export class CaptureEngine {
     }
 
     session = await this.stepStore.synchronize(session);
-    const seenArtifacts = [...this.state.seenArtifacts, artifact.id].slice(-10_000);
-    const retainedArtifacts = new Set(seenArtifacts);
+    const retryCutoff = artifact.eventTime - HOOK_RETRY_WINDOW_MS;
     const seenArtifactTimes = Object.fromEntries([
-      ...Object.entries(this.state.seenArtifactTimes ?? {}).filter(([id]) => retainedArtifacts.has(id)),
+      ...Object.entries(this.state.seenArtifactTimes ?? {}).filter(([, eventTime]) => eventTime >= retryCutoff),
       [artifact.id, artifact.eventTime],
     ]);
+    const seenArtifacts = Object.keys(seenArtifactTimes);
     this.state = {
       ...this.state,
       seenArtifacts,

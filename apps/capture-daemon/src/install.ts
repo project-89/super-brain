@@ -188,6 +188,24 @@ function xml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+export function captureLaunchAgentPlist(options: {
+  readonly executable: string;
+  readonly configPath: string;
+  readonly stateRoot: string;
+}): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.super-brain.capture</string>
+<key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(options.executable)}</string><string>run</string><string>--config</string><string>${xml(options.configPath)}</string></array>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Background</string>
+<key>ThrottleInterval</key><integer>5</integer>
+<key>StandardOutPath</key><string>${xml(join(options.stateRoot, "daemon.log"))}</string>
+<key>StandardErrorPath</key><string>${xml(join(options.stateRoot, "daemon.error.log"))}</string>
+</dict></plist>\n`;
+}
+
 export async function installLaunchAgent(executableInput: string, configPathInput: string): Promise<string> {
   if (process.platform !== "darwin") throw new Error("launchd installation is only available on macOS");
   const executable = resolve(executableInput);
@@ -197,15 +215,7 @@ export async function installLaunchAgent(executableInput: string, configPathInpu
   const path = join(agents, "com.super-brain.capture.plist");
   await mkdir(agents, { recursive: true });
   await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>com.super-brain.capture</string>
-<key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(executable)}</string><string>run</string><string>--config</string><string>${xml(configPath)}</string></array>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-<key>StandardOutPath</key><string>${xml(join(stateRoot, "daemon.log"))}</string>
-<key>StandardErrorPath</key><string>${xml(join(stateRoot, "daemon.error.log"))}</string>
-</dict></plist>\n`;
+  const plist = captureLaunchAgentPlist({ executable, configPath, stateRoot });
   await writeFile(path, plist, { encoding: "utf8", mode: 0o600 });
   const domain = `gui/${process.getuid?.() ?? 501}`;
   await execFileAsync("launchctl", ["bootout", domain, path]).catch(() => undefined);

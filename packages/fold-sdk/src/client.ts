@@ -556,7 +556,7 @@ export class FoldSdk {
     options: TranscriptImportOptions,
   ): Promise<TranscriptImportResult> {
     return this.enqueue(async () => {
-      const bundle = transcriptImportBundleSchema.parse(input);
+      const incoming = transcriptImportBundleSchema.parse(input);
       if (options.importId.trim().length === 0) {
         throw new FoldSdkError("transcript import id must not be empty");
       }
@@ -574,6 +574,29 @@ export class FoldSdk {
       if (this.store.stableReads === true) this.transcriptCatalogs.set(cacheKey, { catalog });
       const same = (left: unknown, right: unknown): boolean =>
         JSON.stringify(left) === JSON.stringify(right);
+      const existingRun = catalog.runs.get(incoming.run.id);
+      const bundle = existingRun === undefined || same(existingRun, incoming.run)
+        ? incoming
+        : (() => {
+            if (
+              existingRun.source !== incoming.run.source ||
+              existingRun.nativeId !== incoming.run.nativeId ||
+              existingRun.artifactId === incoming.run.artifactId
+            ) {
+              throw new FoldSdkConflictError(`transcript run ${incoming.run.id} changed after import`);
+            }
+            const suffix = `:snapshot:${incoming.artifact.sha256.slice(0, 16)}`;
+            const snapshotId = `${incoming.run.id.slice(0, 500 - suffix.length)}${suffix}`;
+            return transcriptImportBundleSchema.parse({
+              ...incoming,
+              run: {
+                ...incoming.run,
+                id: snapshotId,
+                snapshotOfRunId: incoming.run.id,
+              },
+              chunks: incoming.chunks.map((chunk) => ({ ...chunk, runId: snapshotId })),
+            });
+          })();
       const assertSame = <T>(existing: T | undefined, candidate: T, label: string): boolean => {
         if (existing === undefined) return false;
         if (!same(existing, candidate)) {
@@ -612,16 +635,25 @@ export class FoldSdk {
       const maxT = events.reduce((maximum, event) => Math.max(maximum, event.at.t), -1);
       const firstT = Math.max(options.importedAt, maxT + 1);
       const worldDate = new Date(options.importedAt).toISOString().slice(0, 10);
+      const eventContext = bundle.run.id === context.capture.identity?.run
+        ? context
+        : {
+            ...context,
+            capture: {
+              ...context.capture,
+              identity: { ...context.capture.identity, run: bundle.run.id },
+            },
+          };
       const newEvents = records.map((record, index) => {
         const stamp = {
           id: `${options.importId}:${String(index).padStart(6, "0")}`,
           t: firstT + index,
           worldDate,
         };
-        if (record.type === "project") return makeTranscriptProjectEvent(context, stamp, record.value);
-        if (record.type === "artifact") return makeTranscriptArtifactEvent(context, stamp, record.value);
-        if (record.type === "run") return makeTranscriptRunEvent(context, stamp, record.value);
-        return makeTranscriptChunkEvent(context, stamp, record.value);
+        if (record.type === "project") return makeTranscriptProjectEvent(eventContext, stamp, record.value);
+        if (record.type === "artifact") return makeTranscriptArtifactEvent(eventContext, stamp, record.value);
+        if (record.type === "run") return makeTranscriptRunEvent(eventContext, stamp, record.value);
+        return makeTranscriptChunkEvent(eventContext, stamp, record.value);
       });
 
       const nextCatalog = extendTranscriptCatalog(catalog, newEvents);

@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { CaptureEngine } from "./capture.js";
+import { HookInbox } from "./inbox.js";
 import { DurableSpool, readHookVaultArtifact, readRelayFailureSummary } from "./storage.js";
 import { readTranscriptArtifactPage, type TranscriptVaultSource } from "./transcript-vault.js";
 import type { CaptureConfig, CapturePolicyPatch, CapturePolicySettings, HookSource } from "./types.js";
@@ -90,6 +91,7 @@ export class CaptureHttpServer {
     private readonly spool: DurableSpool,
     private readonly updatePolicy?: (patch: CapturePolicyPatch) => Promise<CaptureConfig>,
     private readonly vaultEncryptionKey?: Uint8Array,
+    private readonly inbox?: HookInbox,
   ) {}
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
@@ -120,15 +122,17 @@ export class CaptureHttpServer {
     try {
       const url = new URL(request.url ?? "/", "http://capture.local");
       if (request.method === "GET" && url.pathname === "/health") {
-        const [spool, relayFailures] = await Promise.all([
+        const [spool, relayFailures, inbox] = await Promise.all([
           this.spool.snapshot(),
           readRelayFailureSummary(this.config.stateRoot),
+          this.inbox?.snapshot(),
         ]);
         send(response, 200, {
           status: "ok",
           ...this.engine.snapshot(),
           ...spool,
           relayFailures,
+          ...(inbox === undefined ? {} : { inbox }),
           policy: {
             reasoning: this.config.reasoningPolicy,
             encryptedReasoning: this.config.retainEncryptedReasoning ? "retain" : "exclude",
@@ -216,10 +220,14 @@ export class CaptureHttpServer {
         : url.pathname === "/decision"
           ? "HumanDecision"
           : undefined;
-      const result = await this.engine.ingest(
-        hookSource(request.headers["x-agent-source"] as string | undefined, body.source),
-        eventName === undefined ? body : { ...body, hook_event_name: eventName },
-      );
+      const source = hookSource(request.headers["x-agent-source"] as string | undefined, body.source);
+      const payload = eventName === undefined ? body : { ...body, hook_event_name: eventName };
+      if (url.pathname === "/hook" && this.inbox !== undefined) {
+        const result = await this.inbox.enqueue(source, payload);
+        send(response, 202, { accepted: true, inboxId: result.id });
+        return;
+      }
+      const result = await this.engine.ingest(source, payload);
       send(response, 202, { accepted: true, artifactId: result.artifactId });
     } catch (error) {
       send(response, 400, { error: error instanceof Error ? error.message : "invalid_request" });
