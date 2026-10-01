@@ -1,5 +1,6 @@
 import { authorizeRecall, canAccessSpace, validateAccessContext } from "./access.js";
 import { normalizeMemoryApplicability } from "./validity.js";
+import { matchesMemoryProjects } from "./applicability.js";
 import { normalizeMemoryTags } from "./events.js";
 import type {
   EpistemicAccessContext,
@@ -49,12 +50,9 @@ function matchesFilters(memory: PersonalMemory, request: RecallRequest): boolean
   if (request.sources !== undefined && request.sources.length > 0 && !request.sources.includes(memory.source)) {
     return false;
   }
-  if (request.projectIds !== undefined && request.projectIds.length > 0) {
-    const requested = new Set(request.projectIds);
-    if (applicability.kind === "projects" && !applicability.projectIds.some((projectId) => requested.has(projectId))) {
-      return false;
-    }
-  }
+  // Project filters admit global and intersecting project memories; unresolved
+  // records surface only in review recall that explicitly includes them.
+  if (!matchesMemoryProjects(memory, request.projectIds) && !(request.includeNeedsReview === true && applicability.kind === "unresolved")) return false;
   if (request.from !== undefined && memory.createdAt < request.from) return false;
   if (request.to !== undefined && memory.createdAt > request.to) return false;
   return true;

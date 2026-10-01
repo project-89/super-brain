@@ -5,3 +5,4 @@ export * from "./worker.js";
 export * from "./jobs.js";
 export * from "./status.js";
 export * from "./authority.js";
+export * from "./scheduler.js";

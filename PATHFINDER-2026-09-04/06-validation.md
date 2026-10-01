@@ -1,9 +1,9 @@
 # Validation and observation record
 
-- Repository: `/Users/jakobgrant/Workspaces/super-brain`
-- Branch: `main`
-- Commit: `eda5604e6e1d06465dac5e1b914c531c96b15031`
-- Review date: September 4, 2026, America/Vancouver (September 5 UTC).
+Repository: `/Users/jakobgrant/Workspaces/super-brain`  
+Branch: `main`  
+Commit: `eda5604e6e1d06465dac5e1b914c531c96b15031`  
+Review date: September 4, 2026, America/Vancouver (September 5 UTC).
 
 ## Verification
 

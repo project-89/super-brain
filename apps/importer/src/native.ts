@@ -21,6 +21,49 @@ export function explicitToolResult(value: unknown): EvidenceResult {
   return "unknown";
 }
 
+/**
+ * Provider envelopes can carry failure flags in the payload, a JSON-encoded output, or its metadata.
+ * Returns `null` when the source does not establish a result.
+ */
+export function toolResultFailed(payload: Record<string, unknown> | undefined): boolean | null {
+  let output: unknown = payload?.output;
+  if (typeof output === "string") {
+    try { output = JSON.parse(output) as unknown; } catch { /* Plain-text provider envelope. */ }
+  }
+  const result = recordValue(output);
+  const metadata = recordValue(result?.metadata);
+  const signals = [payload, result, metadata];
+  if (signals.some((item) => item?.is_error === true || item?.isError === true || item?.success === false)) return true;
+  const exitCodes = signals.map((item) => item?.exit_code ?? item?.exitCode)
+    .filter((value): value is number => typeof value === "number" && Number.isInteger(value));
+  if (exitCodes.some((code) => code !== 0)) return true;
+  if (exitCodes.length > 0) return false;
+  if (signals.some((item) => item?.success === true || item?.is_error === false || item?.isError === false)) return false;
+  if (typeof output === "string") {
+    // Do not interpret quoted exit-code strings inside a command's actual output.
+    const header = output.split(/\r?\n(?:Final output|Output):(?:\r?\n|$)/, 1)[0]!;
+    if (/^(?:Chunk ID:|Wall time:)/.test(header)) {
+      const code = header.match(/(?:^|\r?\n)Process exited with code (-?\d+)(?:\r?\n|$)/)?.[1];
+      if (code !== undefined) return Number(code) !== 0;
+    }
+  }
+  return null;
+}
+
+function providerToolResult(payload: Record<string, unknown> | undefined): EvidenceResult {
+  const failed = toolResultFailed(payload);
+  if (failed !== null) return failed ? "failure" : "success";
+  // A provider envelope establishes results only in its header; exit codes in the command's own output are data.
+  const output = payload?.output;
+  if (typeof output === "string" && /^(?:Chunk ID:|Wall time:)/.test(output)) return "unknown";
+  return explicitToolResult(output);
+}
+
+function recordTypeLabel(type: unknown, nestedType?: unknown): string {
+  const label = typeof type === "string" && /^[a-zA-Z0-9_.-]{1,100}$/.test(type) ? type : "<missing-or-invalid-type>";
+  return nestedType === undefined ? label : `${label}:${recordTypeLabel(nestedType)}`;
+}
+
 export interface NativeMessage {
   readonly role: TranscriptTurn["roles"][number];
   readonly text: string;
@@ -35,6 +78,8 @@ export interface NativeAction {
 }
 export interface NativeRecord {
   readonly at?: string;
+  /** Bounded source record type label for parser diagnostics; never contains private text. */
+  readonly recordType: string;
   readonly cwd?: string;
   readonly branch?: string;
   readonly remote?: string;
@@ -66,7 +111,10 @@ export function normalizeNativeRecord(source: TranscriptSource, record: Record<s
   const type = stringValue(record.type);
   const messages: NativeMessage[] = [];
   const actions: NativeAction[] = [];
-  const common = { ...(at === undefined ? {} : { at }), messages, actions };
+  const payloadRecord = recordValue(record.payload);
+  const recordType = source === "claude-code" ? recordTypeLabel(record.type)
+    : recordTypeLabel(type, type === "response_item" || type === "event_msg" ? payloadRecord?.type : undefined);
+  const common = { ...(at === undefined ? {} : { at }), recordType, messages, actions };
   const optional = (key: string, value: unknown) => stringValue(value) === undefined ? {} : { [key]: stringValue(value)! };
   if (source === "claude-code") {
     const message = recordValue(record.message);
@@ -105,15 +153,23 @@ export function normalizeNativeRecord(source: TranscriptSource, record: Record<s
     else if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") actions.push({
       kind: "result", ...optional("nativeId", payload?.call_id), ...optional("name", payload?.call_id),
       text: typeof payload?.output === "string" ? payload.output : JSON.stringify(payload?.output ?? ""),
-      result: explicitToolResult(payload?.output),
+      result: providerToolResult(payload),
     });
+    else if (payloadType === "web_search_call") {
+      const callId = stringValue(payload?.id) ?? stringValue(payload?.call_id);
+      actions.push({ kind: "call", name: "web_search", ...(callId === undefined ? {} : { nativeId: callId }) });
+      if (payload?.status === "completed" || payload?.status === "failed") actions.push({
+        kind: "result", name: "web_search", ...(callId === undefined ? {} : { nativeId: callId }),
+        result: payload.status === "failed" ? "failure" : "success",
+      });
+    }
   }
   return {
     ...common,
     ...(type === "session_meta" ? { ...optional("cwd", payload?.cwd), ...optional("branch", git?.branch), ...optional("remote", git?.repository_url), ...optional("clientVersion", payload?.cli_version) } : {}),
     ...(type === "turn_context" ? { ...optional("cwd", payload?.cwd), ...optional("branch", payload?.git_branch), ...optional("model", payload?.model) } : {}),
     ...(type === "turn_context" || (type === "event_msg" && payloadType === "task_started") ? { startsTurn: true as const, ...optional("nativeTurnId", payload?.turn_id) } : {}),
-    unknown: type === "response_item" ? !["message", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output", "reasoning"].includes(payloadType ?? "")
+    unknown: type === "response_item" ? !["message", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output", "web_search_call", "reasoning"].includes(payloadType ?? "")
       : !["session_meta", "turn_context", "event_msg", "world_state", "compacted"].includes(type ?? ""),
   };
 }

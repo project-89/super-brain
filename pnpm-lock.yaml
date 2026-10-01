@@ -53,6 +53,13 @@ importers:
       zod:
         specifier: ^3.25.0
         version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.23.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
 
   apps/brain:
     dependencies:
@@ -236,6 +243,9 @@ importers:
       '@_89/fold':
         specifier: workspace:*
         version: link:../fold
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
 
   packages/fold-eval:
     dependencies:
@@ -280,6 +290,9 @@ importers:
         specifier: ^8.16.3
         version: 8.23.0
     devDependencies:
+      '@_89/fold-transcript':
+        specifier: workspace:*
+        version: link:../fold-transcript
       '@types/pg':
         specifier: ^8.15.5
         version: 8.23.1

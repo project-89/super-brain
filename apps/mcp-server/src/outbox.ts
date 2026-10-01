@@ -193,6 +193,8 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
     this.closing = true;
     for (const request of this.requests) request.abort(new Error("outbox-closed"));
     await Promise.allSettled([...this.operations, this.flushing, this.opening]);
+    // Storage that never opened (for example an unusable directory) has nothing to close under the fence.
+    if (this.database === undefined) return;
     await withPrivateRootWrite(this.options.directory,"node-outbox",async()=>{ this.database?.close(); this.database = undefined; });
   }
 }

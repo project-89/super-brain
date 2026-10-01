@@ -26,12 +26,14 @@ interface SchemaTable {
 }
 
 export const STORE_SCHEMA = {
-  component: "store", version: 2,
+  component: "store", version: 3,
   tables: [
     { name: "fold_events", tenant: true, privileges: ["SELECT", "INSERT"], columns: ["sequence", "organization_id", "workspace_id", "t", "event_id", "kind", "status", "event"] },
     { name: "fold_consumer_offsets", tenant: true, columns: ["cursor_sequence"] },
     { name: "fold_command_receipts", tenant: true, privileges: ["SELECT", "INSERT"] },
     { name: "fold_projection_checkpoints", tenant: true, columns: ["format_version", "state_version", "source_revision", "ingestion_sequence", "access_digest", "configuration_digest"] },
+    { name: "fold_ingestion_cursor_resets", tenant: true, privileges: ["SELECT", "INSERT"], columns: ["actor_id", "previous_sequence", "reason"] },
+    { name: "fold_system_projection_cells", tenant: true, columns: ["projection", "section", "cell_id", "value"] },
   ],
 } as const;
 

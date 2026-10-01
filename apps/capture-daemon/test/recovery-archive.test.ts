@@ -21,7 +21,7 @@ it("authenticates and verifies every private file before exposing a recoverable 
 it("rejects wrong keys, corruption and truncation and removes all unauthenticated staging",async()=>{
   const f=await fixture(),archive=join(f.root,"backup.sbr");
   try{await writeRecoveryArchive(archive,f.manifest,f.files,f.key);const bytes=await readFile(archive);
-    for(const [id,content,key] of [["wrong",bytes,randomBytes(32)],["corrupt",Buffer.from(bytes),f.key],["truncated",bytes.subarray(0,bytes.length-10),f.key]] as const){if(id==="corrupt")content[content.length-1]^=1;const input=join(f.root,`${id}.sbr`),stage=join(f.root,`${id}-staging`);await writeFile(input,content);await expect(verifyRecoveryArchive(input,key,stage)).rejects.toThrow();await expect(stat(stage)).rejects.toMatchObject({code:"ENOENT"});}
+    for(const [id,content,key] of [["wrong",bytes,randomBytes(32)],["corrupt",Buffer.from(bytes),f.key],["truncated",bytes.subarray(0,bytes.length-10),f.key]] as const){if(id==="corrupt")content[content.length-1]=content[content.length-1]!^1;const input=join(f.root,`${id}.sbr`),stage=join(f.root,`${id}-staging`);await writeFile(input,content);await expect(verifyRecoveryArchive(input,key,stage)).rejects.toThrow();await expect(stat(stage)).rejects.toMatchObject({code:"ENOENT"});}
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
 it("rejects a correctly authenticated archive with unsafe paths before creating an escaped file",async()=>{

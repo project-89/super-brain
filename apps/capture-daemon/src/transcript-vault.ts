@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 
 import { decryptVaultLine } from "@_89/super-brain-importer";
 
-export type TranscriptVaultSource = "claude-code" | "codex";
+export type TranscriptVaultSource = "claude-code" | "codex" | "gemini" | "hermes";
 
 interface VaultCursor {
   readonly sha256: string;

@@ -7,8 +7,8 @@ import { publishWorkerProcessingStatus } from "../src/status.js";
 import { TranscriptMemoryWorker } from "../src/worker.js";
 
 const subject={organizationId:"org",workspaceId:"workspace",principalId:"worker"};
-const coverage={pending:1,waiting:2,retry:3,completed:4,excluded:5,exhausted:6,oldestPendingAt:1000,
-  byKind:{"extract-run":1,"extract-turn":1,propose:1,"verify-trajectory":1,"cognition-plan":1,synthesis:1}};
+const coverage={pending:1,waiting:2,retry:3,blocked:7,completed:4,excluded:5,exhausted:6,oldestPendingAt:1000,
+  byKind:{"extract-run":1,"extract-turn":1,propose:1,"verify-trajectory":1,"cognition-plan":1,synthesis:1,episode:1}};
 it("publishes an owner-only aggregate allowlist with measured lag and no job payloads",async()=>{
   const root=await mkdtemp(join(tmpdir(),"worker-status-"));try{
     const path=join(root,"status.json");

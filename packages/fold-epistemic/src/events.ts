@@ -1,18 +1,20 @@
 import { parseEvent, type FoldEvent, type JsonValue, type Provenance } from "@_89/fold";
 
 import { assertCanWritePersonalMemory, memoryWriteAuthority, validateAccessContext } from "./access.js";
+import { validateMemoryApplicability } from "./applicability.js";
 import type {
   EpistemicEventContext,
   EpistemicEventStamp,
   ForgottenMemory,
   MemoryEntityRef,
   MemoryCandidateEvidence,
+  MemoryApplicability,
   MemoryAudience,
   MemoryInput,
   MemoryRevisionPatch,
   PersonalMemory,
 } from "./types.js";
-import { memoryProjectIds, memoryValidity, memoryValidityJson, normalizeMemoryEvidence, parseMemorySourceCandidate, memoryRevision } from "./validity.js";
+import { memoryProjectIds, memoryValidity, memoryValidityJson, normalizeMemoryApplicability, normalizeMemoryEvidence, parseMemorySourceCandidate, memoryRevision } from "./validity.js";
 import { assertUuidV7 } from "./uuidv7.js";
 
 export const MEMORY_NODE_KIND = "x.fold.personal-memory";
@@ -230,6 +232,31 @@ function evidenceJson(evidence: readonly MemoryCandidateEvidence[]): JsonValue[]
 }
 function validateEvidence(evidence: readonly MemoryCandidateEvidence[]): void { normalizeMemoryEvidence(evidence, 1_000); }
 
+function validityPatch(patch: MemoryRevisionPatch): Partial<MemoryRevisionPatch> {
+  return Object.fromEntries(Object.entries(memoryValidity(patch)).filter(([key]) => key in patch));
+}
+
+/**
+ * Folds the legacy `projectIds` revision field into canonical applicability.
+ * Nonempty IDs mean project applicability; empty IDs are only valid for a
+ * memory that is not project-scoped.
+ */
+function foldPatchProjectIds(patch: MemoryRevisionPatch, current?: PersonalMemory): MemoryRevisionPatch {
+  if (patch.projectIds === undefined) return patch;
+  const { projectIds, ...rest } = patch;
+  const ids = normalizeMemoryProjectIds(projectIds);
+  if (rest.applicability !== undefined) {
+    const applicability = normalizeMemoryApplicability(rest.applicability, ids);
+    validateMemoryApplicability({ applicability, projectIds: ids });
+    return { ...rest, applicability };
+  }
+  if (ids.length > 0) return { ...rest, applicability: { kind: "projects", projectIds: ids } };
+  if (current !== undefined && normalizeMemoryApplicability(current.applicability, current.projectIds).kind === "projects") {
+    throw new MemoryEventError("project applicability requires at least one projectId");
+  }
+  return rest;
+}
+
 function patchJson(patch: MemoryRevisionPatch): Record<string, JsonValue> {
   return {
     ...Object.fromEntries(Object.entries(memoryValidityJson(patch)).filter(([key]) => key in patch)),
@@ -264,6 +291,9 @@ export function makeMemoryRecordedEvent(
     },
     context.access,
   );
+  if (input.applicability !== undefined && input.projectIds !== undefined && input.projectIds.length > 0) {
+    validateMemoryApplicability({ applicability: input.applicability, projectIds: normalizeMemoryProjectIds(input.projectIds) });
+  }
   const content = input.content ?? null;
   const memory: PersonalMemory = {
     id: input.id,
@@ -284,6 +314,7 @@ export function makeMemoryRecordedEvent(
     updatedAt: stamp.t,
     revision: 0,
   };
+  validateMemoryApplicability(memory);
   return makeEvent(context, stamp, {
     kind: "memory.recorded",
     title: `${audience === "personal" ? "Personal" : "Workspace"} memory recorded from ${input.source}`,
@@ -315,7 +346,7 @@ export function makeMemoryRevisedEvent(
   if (stamp.t < memory.updatedAt) {
     throw new MemoryEventError("memory revision must not predate the current memory");
   }
-  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "sourceMemoryRefs", "supersedes", "contradicts"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "projectIds", "sourceMemoryRefs", "supersedes", "contradicts"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
@@ -324,7 +355,7 @@ export function makeMemoryRevisedEvent(
   }
   validateEvidence(patch.evidence ?? []);
   const normalizedPatch: MemoryRevisionPatch = {
-    ...Object.fromEntries(Object.entries(memoryValidity(patch)).filter(([key]) => key in patch)),
+    ...validityPatch(foldPatchProjectIds(patch, memory)),
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: normalizeMemoryTags(patch.tags) }),
@@ -499,6 +530,10 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
   const entities = parseEntities(memory.entities);
   const evidence = parseEvidence(memory.evidence);
   for (const entity of entities) validateEntity(entity);
+  const storedProjectIds = normalizeMemoryProjectIds(
+    memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds"),
+  );
+  validateMemoryApplicability({ projectIds: storedProjectIds, ...(memory.applicability === undefined ? {} : { applicability: memory.applicability as unknown as MemoryApplicability }) });
   return {
     id,
     workspaceId: stringValue(memory.workspaceId, "memory workspaceId"),
@@ -522,13 +557,16 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
 
 function parsePatch(value: JsonValue | undefined): MemoryRevisionPatch {
   const patch = objectValue(value, "memory revision patch");
-  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "sourceMemoryRefs", "supersedes", "contradicts"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "projectIds", "sourceMemoryRefs", "supersedes", "contradicts"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
   if (Object.keys(patch).length === 0) throw new MemoryEventError("memory revision patch must not be empty");
   const parsed: MemoryRevisionPatch = {
-    ...Object.fromEntries(Object.entries(memoryValidity(patch)).filter(([key]) => key in patch)),
+    ...validityPatch(foldPatchProjectIds({
+      ...(patch as unknown as MemoryRevisionPatch),
+      ...(patch.projectIds === undefined ? {} : { projectIds: stringArray(patch.projectIds, "projectIds") }),
+    })),
     ...(patch.summary === undefined
       ? {}
       : { summary: textValue(patch.summary, "summary") }),

@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FoldApiClient } from "../api";
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
 import { LoadMore } from "../components/LoadMore";
+import { TranscriptDerivations } from "../components/TranscriptDerivations";
 import { formatDateTime, formatRelative } from "../format";
 import type {
   TranscriptProjectSummary,
@@ -44,7 +45,7 @@ function runDate(run: TranscriptRun): string {
 }
 
 function sourceLabel(source: TranscriptSource): string {
-  return source === "claude-code" ? "Claude Code" : "Codex";
+  return { "claude-code": "Claude Code", codex: "Codex", gemini: "Gemini", hermes: "Hermes" }[source];
 }
 
 function matchesProject(run: TranscriptRun, projectId: string): boolean {
@@ -217,7 +218,7 @@ export function HistoryPage({
       <div className="history-toolbar">
         <SearchField value={query} onChange={setQuery} placeholder="Search runs" />
         <div className="segmented-control segmented-control--mode" role="group" aria-label="Transcript source">
-          {(["all", "claude-code", "codex"] as const).map((value) => (
+          {(["all", "claude-code", "codex", "gemini", "hermes"] as const).map((value) => (
             <button key={value} type="button" aria-pressed={source === value} onClick={() => setSource(value)}>
               {value === "all" ? "All" : sourceLabel(value)}
             </button>
@@ -297,6 +298,8 @@ export function HistoryPage({
                 <div><dt>Opaque reasoning</dt><dd>{detail.artifact.encryptedReasoningPolicy ?? "excluded"}</dd></div>
                 <div><dt>Anonymization</dt><dd>{detail.artifact.anonymizationPolicy ?? "none"}</dd></div>
               </dl>
+
+              <TranscriptDerivations key={detail.run.id} api={api} runId={detail.run.id} />
 
               <section className="history-evidence">
                 <header><span><span className="eyebrow">Local artifact</span><h3><Eye aria-hidden="true" />Transcript evidence</h3></span><strong>{detail.artifact.contentPolicy}</strong></header>

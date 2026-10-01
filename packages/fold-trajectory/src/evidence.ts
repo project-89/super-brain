@@ -3,6 +3,7 @@ import { validateAccessContext, canAccessSpace, assertCanWritePersonalMemory } f
 import { z } from "zod";
 import { taskManifestSchema, attemptManifestSchema, taskOutcomeInputSchema, taskInterventionInputSchema, taskEvidenceAuthoritySchema } from "./manifests.js";
 import type { TrajectoryEventContext, TrajectoryEventStamp } from "./types.js";
+import { TRAJECTORY_OUTCOME_NODE_KIND } from "./events.js";
 import type { TaskManifest, AttemptManifest, TaskAcceptanceRef } from "@_89/fold-trace";
 import { taskAcceptanceRefSchema, type TaskOutcomeInput, type TaskInterventionInput, type TaskEvidenceAuthority } from "./manifests.js";
 
@@ -59,7 +60,9 @@ export function taskEvidenceRecordsFromEvent(event: FoldEvent): TaskEvidenceReco
       !event.participants?.includes(record.actorId) || change.provenance?.basis !== "authored" || change.subject !== `task-evidence:${event.id}`) throw new TaskEvidenceError("task evidence envelope mismatch");
     validateAuthority(record); records.push(record);
   }
-  if (Object.values(TASK_EVIDENCE_KINDS).includes(event.kind as typeof TASK_EVIDENCE_KINDS[keyof typeof TASK_EVIDENCE_KINDS]) && records.length !== 1) throw new TaskEvidenceError("task evidence event requires one record");
+  // `trajectory.outcome-recorded` is shared with operator outcome reviews, which carry a distinct node kind.
+  const operatorReview = records.length === 0 && event.changes.length > 0 && event.changes.every((change) => "nodeKind" in change && change.nodeKind === TRAJECTORY_OUTCOME_NODE_KIND);
+  if (Object.values(TASK_EVIDENCE_KINDS).includes(event.kind as typeof TASK_EVIDENCE_KINDS[keyof typeof TASK_EVIDENCE_KINDS]) && records.length !== 1 && !operatorReview) throw new TaskEvidenceError("task evidence event requires one record");
   return records;
 }
 

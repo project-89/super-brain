@@ -1,4 +1,5 @@
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -42,7 +43,7 @@ it("keeps an in-flight nested descendant claimed and reacquires for a late desce
 });
 
 it("drains a real producer and recovers a crashed fence owner without taking over a live one", async()=>{
-  const {fork}=await import("node:child_process");const {once}=await import("node:events");const {fileURLToPath}=await import("node:url");
+  const {fork}=await import("node:child_process");const {fileURLToPath}=await import("node:url");
   const base=await mkdtemp(join(tmpdir(),"private-fence-process-")),root=join(base,"root");
   await withPrivateRootWrite(root,"capture",async()=>{});
   const childPath=fileURLToPath(new URL("./fixtures/private-fence-process.mjs",import.meta.url));

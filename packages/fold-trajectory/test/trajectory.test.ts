@@ -7,6 +7,7 @@ import {
   makeTrajectoryRecordedEvent,
   makeTrajectoryTreeRecordedEvent,
   rebuildTrajectories,
+  continueTrajectories,
   trajectoryLogRecordsFromEvent,
   type TrajectoryEventContext,
   type TrajectoryInput,
@@ -125,8 +126,20 @@ describe("Fold trajectory lifecycle", () => {
     const report = await analyzeTrajectoryTask(rebuildTrajectories([outcome, second, first, treeEvent, source]), tree.taskId);
     expect(report?.records[0]?.trajectory.outcome).toBe("failure");
     expect(report).toMatchObject({ comparison: { status: "incompatible" }, analysis: { traceCount: 0 }, acceptanceSummary: [{ attemptId: "a", revisionId: "before", verdict: "success", authority: "authenticated-human", outcomeIds: ["outcome"] }] });
+    const ordered = [treeEvent, first, second, source, outcome];
+    const continued = continueTrajectories(rebuildTrajectories(ordered.slice(0, 3)), ordered.slice(3));
+    expect(continued.evidence).toEqual(rebuildTrajectories(ordered).evidence);
+    expect(continued.evidence).toHaveLength(1);
   });
 
+  it("round-trips task-verdict evidence without changing legacy inputs", () => {
+    const evidence = { kind: "operator-verdict" as const, eventId: "decision-event", artifactId: "decision-artifact" };
+    const event = makeTrajectoryRecordedEvent(context, { id: "with-evidence", t: 2, worldDate: "2026-08-19" }, tree, {
+      ...input("run-a", "model-a", "success", ["observe-401", "token-expiry", "patch-refresh", "pass"], "VERDICT: approve"),
+      outcomeEvidence: evidence,
+    });
+    expect(trajectoryLogRecordsFromEvent(event)[0]).toMatchObject({ trajectory: { outcomeEvidence: evidence } });
+  });
   it("records server-scoped trees and runs as canonical Fold records", () => {
     const treeEvent = makeTrajectoryTreeRecordedEvent(
       context,

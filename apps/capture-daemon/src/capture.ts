@@ -153,6 +153,7 @@ function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
     acceptance: _acceptance,
     lastVerification: _lastVerification,
     explicitOutcome: _explicitOutcome,
+    outcomeEvidence: _outcomeEvidence,
     reviewText: _reviewText,
     ...remaining
   } = session;
@@ -160,7 +161,7 @@ function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
 }
 
 function completedResponse(step: CapturedStep): boolean {
-  return step.role === "model_output" && step.content === "Agent completed a response";
+  return step.role === "model_output" && (step.content === "Agent completed a response" || step.content.startsWith("Agent response failed"));
 }
 
 function promptStart(step: CapturedStep): boolean {
@@ -723,6 +724,8 @@ export class CaptureEngine {
       });
     } else if (name === "PreToolUse") {
       const tool = toolName(payload);
+      // Starting a mutation invalidates any verdict recorded for the previous revision.
+      if (/edit|write|patch|notebook/i.test(tool)) session = withoutVerifiedOutcome(session);
       const verification = normalizeHookEvidence(payload).verification;
       session = await this.observe(session, artifact, index++, {
         kind: "tool_running",
@@ -830,7 +833,7 @@ export class CaptureEngine {
       ])];
       const mutatingTool = /edit|write|patch|notebook/i.test(tool) || repositoryChanged;
       if (mutatingTool) session = withoutVerifiedOutcome(session);
-      if (repositoryChanged || (success && mutatingTool)) {
+      if (repositoryChanged || (mutatingTool && (success || paths.length > 0))) {
         const pathPages = pagesOf(paths, 200);
         for (const [pathPage, pagePaths] of pathPages.entries()) {
           session = await this.observe(session, artifact, index++, {
@@ -842,6 +845,7 @@ export class CaptureEngine {
               pathPageCount: pathPages.length,
               pathCount: paths.length,
               artifactId: artifact.id,
+              toolResult: normalized.result,
               ...(beforeProject.head === undefined ? {} : { headBefore: beforeProject.head }),
               ...(refreshedProject.head === undefined ? {} : { headAfter: refreshedProject.head }),
               ...(beforeProject.worktreeDigest === undefined ? {} : { worktreeBefore: beforeProject.worktreeDigest }),
@@ -927,7 +931,7 @@ export class CaptureEngine {
       }
       session = await this.observe(session, artifact, index++, { kind: "reasoning_checkpoint", data });
       session = stepFor(session, {
-        nodeKind: "decision",
+        nodeKind: text(payload.decision) === undefined ? "observation" : "decision",
         role: "model_thought",
         content: bounded(summary, 2_000),
         artifactId: artifact.id,
@@ -978,6 +982,7 @@ export class CaptureEngine {
         ...(verdict === undefined ? {} : {
           acceptance: { ...acceptance!, eventId: session.lastEventId! },
           explicitOutcome: verdict,
+          outcomeEvidence: { kind: "operator-verdict", eventId: session.lastEventId!, artifactId: artifact.id },
           reviewText: `VERDICT: ${verdict === "success" ? "approve" : "reject"}${confidence === undefined ? "" : `\nCONFIDENCE: ${confidence}`}`,
         }),
       };
@@ -1041,6 +1046,7 @@ export class CaptureEngine {
         session = {
           ...session,
           explicitOutcome: "failure",
+          outcomeEvidence: { kind: "harness-error", eventId: session.lastEventId!, artifactId: artifact.id },
         };
       }
       if (await this.enqueueTrajectory(session, artifact, index, "stop")) {
@@ -1214,7 +1220,7 @@ export class CaptureEngine {
             },
           });
           next = stepFor(next, {
-            nodeKind: "decision",
+            nodeKind: "observation",
             role: "model_thought",
             content: summary.text,
             artifactId: reasoningArtifact.id,
@@ -1254,6 +1260,10 @@ export class CaptureEngine {
           : `prompt-${privateDigest(this.privacy, "prompt", normalizedPrompt).slice(0, 24)}`;
       const steps = session.steps.slice(unit.startStepNumber - 1, unit.endStepNumber);
       // Legacy labels/check prose carry no independently authenticated acceptance.
+      // An explicit harness failure at the unit boundary remains attributable failure evidence.
+      const failedBoundary = unit.boundaryStep.artifactId === undefined
+        ? undefined : artifactsById.get(unit.boundaryStep.artifactId);
+      const harnessFailure = failedBoundary !== undefined && hookName(failedBoundary.payload) === "StopFailure" && unit.boundaryStep.eventId !== undefined;
       const {
         comparisonKey: _comparisonKey,
         taskKey: _taskKey,
@@ -1268,6 +1278,10 @@ export class CaptureEngine {
         completedUnitCount,
         ...(comparisonKey === undefined ? {} : { comparisonKey }),
         ...(explicitTaskKey === undefined ? {} : { taskKey: bounded(explicitTaskKey, 500) }),
+        ...(harnessFailure ? {
+          explicitOutcome: "failure" as const,
+          outcomeEvidence: { kind: "harness-error" as const, eventId: unit.boundaryStep.eventId!, artifactId: failedBoundary!.id },
+        } : {}),
       };
       const storedBoundary = unit.boundaryStep.artifactId === undefined
         ? undefined
@@ -1413,7 +1427,7 @@ export class CaptureEngine {
     let path = session.transcriptPath;
     let ownedSnapshot = false;
     try {
-      path = await this.transcriptSnapshots.store(session.source, session.transcriptPath);
+      path = await this.transcriptSnapshots.store(session.source, session.transcriptPath, session.sessionId);
       ownedSnapshot = true;
     } catch (error) {
       const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -1429,6 +1443,8 @@ export class CaptureEngine {
       deadlineAt: new Date(artifact.eventTime + (ownedSnapshot ? 7 * 24 * 60 * 60_000 : 30 * 60_000)).toISOString(),
       source: session.source,
       path,
+      nativeSessionId: session.sessionId,
+      originalPath: session.transcriptPath,
       ...(ownedSnapshot ? { ownedSnapshot: true as const } : {}),
     });
   }
@@ -1501,9 +1517,13 @@ export class CaptureEngine {
     const acceptance = session.acceptance;
     const finalRevision = session.manifest === undefined ? undefined : await this.revisionReference(session, artifact);
     const finalRevisionId = session.manifest === undefined ? this.publicRevisionId(session.project) : finalRevision?.revisionId;
-    const outcome = acceptance !== undefined && acceptance.taskId === trajectoryTaskId(session, this.privacy) &&
+    const hasPendingTools = Object.keys(session.pendingTools ?? {}).length > 0;
+    const accepted = acceptance !== undefined && acceptance.taskId === trajectoryTaskId(session, this.privacy) &&
       acceptance.attemptId === this.attemptId(session) && acceptance.revisionId === finalRevisionId
-      ? acceptance.verdict : session.explicitOutcome === "failure" ? "failure" : "unknown";
+      ? acceptance.verdict : undefined;
+    // A success verdict cannot cover tool calls that have not reported a result yet.
+    const outcome = accepted !== undefined && !(accepted === "success" && hasPendingTools)
+      ? accepted : session.explicitOutcome === "failure" ? "failure" : "unknown";
     const tree = this.treeFor(session, outcome);
     const taskId = tree.taskId;
     const finalStepId = `step-${steps.length + 1}`;
@@ -1538,6 +1558,7 @@ export class CaptureEngine {
         id: session.model ?? "unreported",
       },
       outcome,
+      ...(outcome === "unknown" || session.outcomeEvidence === undefined ? {} : { outcomeEvidence: session.outcomeEvidence }),
       steps: allSteps,
       assignments,
       ...(manifest === undefined ? {} : { manifest }),

@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
 import { SuperBrainApiError, SuperBrainClient } from "@_89/super-brain-client";
 import { mergeSharedDecisionTrees, ProjectionValidationError } from "@_89/fold-trace";
@@ -35,6 +36,53 @@ function transientLocalTranscriptError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("changed while");
 }
 
+interface DeliveryJobMetadata {
+  readonly fingerprint: string;
+  readonly kind: SpoolJob["kind"];
+  readonly createdAt?: string;
+}
+
+export interface DeliverySnapshot {
+  readonly status: "idle" | "processing" | "retrying";
+  readonly countersSinceStart: { readonly attempted: number; readonly delivered: number; readonly failures: number };
+  readonly lastAttemptAt?: string;
+  readonly lastDeliveredAt?: string;
+  readonly currentJob?: DeliveryJobMetadata;
+  readonly blockedJob?: DeliveryJobMetadata;
+  readonly nextRetryAt?: string;
+  readonly lastFailure?: {
+    readonly at: string;
+    readonly category: "stack_overflow" | "api_error" | "validation_error" | "missing_file" | "timeout" | "delivery_error";
+    readonly stage: "queue" | "delivery";
+    readonly disposition: "retry" | "deferred" | "failed";
+    readonly httpStatus?: number;
+    readonly job?: DeliveryJobMetadata;
+  };
+}
+
+function jobMetadata(job: SpoolJob): DeliveryJobMetadata {
+  const createdAt = Date.parse(job.createdAt);
+  return {
+    fingerprint: createHash("sha256").update(job.id).digest("hex"),
+    kind: job.kind,
+    ...(Number.isFinite(createdAt) ? { createdAt: new Date(createdAt).toISOString() } : {}),
+  };
+}
+
+function failureCategory(error: unknown): NonNullable<DeliverySnapshot["lastFailure"]>["category"] {
+  if (error instanceof RangeError && error.message.includes("call stack")) return "stack_overflow";
+  // The client wraps local transport/runtime failures as status-0 API errors; classify their cause.
+  if (error instanceof SuperBrainApiError && error.status === 0) {
+    if (error.code === "timeout") return "timeout";
+    if (error.code === "network_error") return error.message.includes("call stack") ? "stack_overflow" : "delivery_error";
+  }
+  if (error instanceof SuperBrainApiError || error instanceof TranscriptDeliveryError) return "api_error";
+  if (error instanceof ProjectionValidationError) return "validation_error";
+  if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return "missing_file";
+  if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) return "timeout";
+  return "delivery_error";
+}
+
 export class SpoolProcessor {
   private readonly client: SuperBrainClient;
   private timer: NodeJS.Timeout | undefined;
@@ -44,6 +92,14 @@ export class SpoolProcessor {
   private readonly batchSize: number;
   private readonly transientBackoffMs: number;
   private nextFlushAt = 0;
+  private attempted = 0;
+  private delivered = 0;
+  private failures = 0;
+  private lastAttemptAt: string | undefined;
+  private lastDeliveredAt: string | undefined;
+  private currentJob: DeliveryJobMetadata | undefined;
+  private blockedJob: DeliveryJobMetadata | undefined;
+  private lastFailure: DeliverySnapshot["lastFailure"];
 
   constructor(
     private readonly config: CaptureConfig,
@@ -71,7 +127,10 @@ export class SpoolProcessor {
       token: config.apiToken,
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     });
-    this.snapshots = new TranscriptSnapshotStore(config.stateRoot);
+    this.snapshots = new TranscriptSnapshotStore(config.stateRoot, {
+      reasoningPolicy: config.reasoningPolicy,
+      retainEncryptedReasoning: config.retainEncryptedReasoning,
+    });
   }
 
   start(intervalMs = 500): void {
@@ -89,8 +148,40 @@ export class SpoolProcessor {
 
   flush(): Promise<void> {
     if (this.processing !== undefined) return this.processing;
-    this.processing = this.processPending().finally(() => { this.processing = undefined; });
+    this.processing = this.processPending().catch((error: unknown) => {
+      this.nextFlushAt = Date.now() + this.transientBackoffMs;
+      this.recordFailure(error, "queue", "retry");
+      throw error;
+    }).finally(() => { this.processing = undefined; this.currentJob = undefined; });
     return this.processing;
+  }
+
+  snapshot(): DeliverySnapshot {
+    return {
+      status: this.processing !== undefined ? "processing" : this.blockedJob !== undefined || this.nextFlushAt > Date.now() ? "retrying" : "idle",
+      countersSinceStart: { attempted: this.attempted, delivered: this.delivered, failures: this.failures },
+      ...(this.lastAttemptAt === undefined ? {} : { lastAttemptAt: this.lastAttemptAt }),
+      ...(this.lastDeliveredAt === undefined ? {} : { lastDeliveredAt: this.lastDeliveredAt }),
+      ...(this.currentJob === undefined ? {} : { currentJob: this.currentJob }),
+      ...(this.blockedJob === undefined ? {} : { blockedJob: this.blockedJob }),
+      ...(this.nextFlushAt <= Date.now() ? {} : { nextRetryAt: new Date(this.nextFlushAt).toISOString() }),
+      ...(this.lastFailure === undefined ? {} : { lastFailure: this.lastFailure }),
+    };
+  }
+
+  private recordFailure(
+    error: unknown,
+    stage: "queue" | "delivery",
+    disposition: "retry" | "deferred" | "failed",
+    job?: DeliveryJobMetadata,
+  ): void {
+    this.failures += 1;
+    const status = error instanceof SuperBrainApiError || error instanceof TranscriptDeliveryError ? error.status : undefined;
+    this.lastFailure = {
+      at: new Date().toISOString(), category: failureCategory(error), stage, disposition,
+      ...(Number.isInteger(status) && status! >= 100 && status! <= 599 ? { httpStatus: status! } : {}),
+      ...(job === undefined ? {} : { job }),
+    };
   }
 
   private async deliver(job: SpoolJob): Promise<void> {
@@ -100,7 +191,7 @@ export class SpoolProcessor {
     }
     if (job.kind === "trajectory" || job.kind === "trajectory-tree") {
       const options = { captureIdentity: job.captureIdentity };
-      const existing = (await this.client.trajectoryTasks()).find(({ taskId }) => taskId === job.tree.taskId);
+      const existing = await this.client.trajectoryTree(job.tree.taskId);
       if (existing === undefined) {
         await this.client.recordTrajectoryTree(job.treeStamp, job.tree, options);
       } else {
@@ -137,31 +228,51 @@ export class SpoolProcessor {
   private async processPending(): Promise<void> {
     if (this.nextFlushAt > Date.now()) return;
     const pending = await this.spool.list();
+    this.blockedJob = undefined;
     let attempted = 0;
-    for (const { path, job } of pending) {
+    for (const entry of pending) {
+      const { path } = entry;
+      let { job } = entry;
       if (attempted >= this.batchSize) break;
       if (job.kind === "transcript" && Date.parse(job.notBefore) > Date.now()) continue;
       if ((this.retryAt.get(path) ?? 0) > Date.now()) continue;
       attempted += 1;
+      this.attempted += 1;
+      this.lastAttemptAt = new Date().toISOString();
+      this.currentJob = jobMetadata(job);
       try {
+        if (job.kind === "transcript" && job.ownedSnapshot !== true) {
+          const snapshot = await this.snapshots.store(job.source, job.path, job.nativeSessionId);
+          job = {
+            ...job, path: snapshot, originalPath: job.originalPath ?? job.path, ownedSnapshot: true,
+            deadlineAt: new Date(Date.now() + 7 * 24 * 60 * 60_000).toISOString(),
+          };
+          await this.spool.replacePending(path, job);
+        }
         await this.deliver(job);
         if (job.kind === "transcript" && job.ownedSnapshot === true) {
           await this.snapshots.complete(job.path);
         }
         this.retryAt.delete(path);
         await this.spool.complete(path);
+        this.delivered += 1;
+        this.lastDeliveredAt = new Date().toISOString();
       } catch (error) {
         const expiredTranscript = job.kind === "transcript" && Date.parse(job.deadlineAt) <= Date.now();
         const unsupportedTranscript = job.kind === "transcript" && !["claude-code", "codex"].includes(job.source);
         if (permanentApiError(error) || expiredTranscript || unsupportedTranscript) {
+          this.recordFailure(error, "delivery", "failed", this.currentJob);
           await this.spool.reject(path, errorMessage(error));
           continue;
         }
         if (job.kind === "transcript" && transientLocalTranscriptError(error)) {
+          this.recordFailure(error, "delivery", "deferred", this.currentJob);
           this.retryAt.set(path, Date.now() + 5_000);
           continue;
         }
         this.nextFlushAt = Date.now() + this.transientBackoffMs;
+        this.blockedJob = this.currentJob;
+        this.recordFailure(error, "delivery", "retry", this.currentJob);
         break;
       }
     }

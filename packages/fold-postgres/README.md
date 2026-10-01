@@ -8,6 +8,7 @@ It owns organization-scoped durable tables for:
 
 - append-only workspace events;
 - resumable consumer offsets;
+- ingestion-sequence subscription offsets, separately versioned from source-time cursors;
 - rebuildable projection checkpoints;
 - semantic memory embeddings;
 - organizations, workspaces, memberships, repository enrollments, and
@@ -78,3 +79,31 @@ Signed Clerk webhooks must include their source `timestamp`; delivery retry time
 ordering evidence. Existing identity audit history seeds conservative occurrence watermarks using
 its receipt time during migration, so older replayed provider events may be deliberately ignored;
 reconcile current provider state with a new source event when needed.
+
+### Ingestion subscriptions
+
+The ingestion API (`readIngestionPage`, `latestIngestionCursor`, `commitIngestionCursor`)
+exposes the same immutable `fold_events.sequence` as `{kind:"ingestion",sequence:"123"}`
+and stores consumer progress in the v2 delivery offset (`fold_consumer_offsets.cursor_sequence`).
+This is arrival order, not source time; chronological lists, event payloads, and projection
+cursors are unchanged. Both append and import acquire the workspace transaction advisory lock
+**before** sequence allocation and retain it through commit, so a reader cannot skip a lower
+uncommitted sequence. Sequence gaps from other tenants or rolled-back transactions are valid and
+are not record counts. Direct SQL ingestion that bypasses this locking protocol is unsupported.
+
+`ingestionConsumerStatus` reports a legacy offset row without a delivery sequence as
+`migrationRequired`; `commitIngestionCursor` refuses it until `migrateConsumerCursor` explicitly
+initializes replay at sequence 0. Migration retains the old event-time position for audit and
+cannot rewind an already-migrated consumer. Never translate the old timestamp watermark to one
+sequence: that would omit late historical events. Replay is at-least-once; consumers must
+deduplicate deterministic event/job identities.
+
+An explicit administrative cursor reset (`resetConsumerCursor`) compares the current sequence
+under the tenant transaction lock, writes an append-only `fold_ingestion_cursor_resets` audit row,
+then resets it to 0 in the same transaction. It retains legacy offsets and event/job data. All
+consumer instances must be stopped: the reset is not a generation fence against a stale remote
+process committing an old checkpoint afterward.
+
+Selected stores (`database.store(tenant, selection)`) read a pinned subset of the log; their
+revision is the head of that selection, and commands committed through them compare the same
+selected head.

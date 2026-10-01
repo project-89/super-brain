@@ -1,6 +1,7 @@
 import type { FoldEvent } from "@_89/fold";
 import { compareEventKeys } from "@_89/fold";
 import { rebuildTaskEvidence } from "./task-state.js";
+import { taskEvidenceRecordsFromEvent } from "./evidence.js";
 import { parseReviewVerdict } from "@_89/fold-eval";
 import {
   analyzeProjectedTrajectories,
@@ -16,6 +17,7 @@ import type {
   TrajectoryState,
   TrajectoryTaskReport,
   TrajectoryTreeRecord,
+  TrajectoryOutcomeRecord,
 } from "./types.js";
 
 export class TrajectoryProjectionError extends Error {
@@ -23,9 +25,23 @@ export class TrajectoryProjectionError extends Error {
 }
 
 export function rebuildTrajectories(events: readonly FoldEvent[]): TrajectoryState {
-  const trees = new Map<string, TrajectoryTreeRecord>();
-  const trajectories = new Map<string, TrajectoryRunRecord>();
-  for (const event of [...events].sort(compareEventKeys)) {
+  return continueTrajectories({ trees: new Map(), trajectories: new Map(), outcomes: new Map(), evidence: [] }, [...events].sort(compareEventKeys));
+}
+
+// Task evidence validation is history-dependent, so continuation retains the folded source events.
+const foldedEvidenceEvents = new WeakMap<TrajectoryState, readonly FoldEvent[]>();
+
+function carriesTaskEvidence(event: FoldEvent): boolean {
+  if (taskEvidenceRecordsFromEvent(event).length > 0) return true;
+  return trajectoryLogRecordsFromEvent(event).some((record) => record.recordType === "trajectory" && record.trajectory.manifest !== undefined);
+}
+
+/** Continue a validated, source-ordered prefix without mutating its prior state. */
+export function continueTrajectories(state: TrajectoryState, events: readonly FoldEvent[]): TrajectoryState {
+  const trees = new Map(state.trees);
+  const trajectories = new Map(state.trajectories);
+  const outcomes = new Map(state.outcomes);
+  for (const event of events) {
     for (const record of trajectoryLogRecordsFromEvent(event)) {
       if (record.recordType === "tree") {
         const current = trees.get(record.tree.taskId);
@@ -33,6 +49,20 @@ export function rebuildTrajectories(events: readonly FoldEvent[]): TrajectorySta
           throw new TrajectoryProjectionError(`non-additive trajectory tree revision for task ${record.tree.taskId}`);
         }
         trees.set(record.tree.taskId, record);
+        continue;
+      }
+      if (record.recordType === "outcome") {
+        const run = trajectories.get(record.trajectoryId);
+        if (run === undefined || run.trajectory.taskId !== record.taskId ||
+          run.workspaceId !== record.workspaceId || run.spaceId !== record.spaceId) {
+          throw new TrajectoryProjectionError(`outcome ${record.eventId} references an unavailable trajectory`);
+        }
+        const history = [...outcomes.get(record.trajectoryId) ?? []];
+        if ((history.at(-1)?.eventId ?? null) !== record.previousEventId) {
+          throw new TrajectoryProjectionError(`outcome ${record.eventId} has a stale predecessor`);
+        }
+        history.push(record);
+        outcomes.set(record.trajectoryId, history);
         continue;
       }
       if (trajectories.has(record.trajectory.id)) {
@@ -46,7 +76,28 @@ export function rebuildTrajectories(events: readonly FoldEvent[]): TrajectorySta
       trajectories.set(record.trajectory.id, record);
     }
   }
-  return { trees, trajectories, evidence: rebuildTaskEvidence(events).records };
+  const priorEvents = foldedEvidenceEvents.get(state) ?? [];
+  const foldedEvents = [...priorEvents, ...events];
+  const evidence = events.some(carriesTaskEvidence) ? rebuildTaskEvidence(foldedEvents).records : state.evidence ?? [];
+  const next: TrajectoryState = { trees, trajectories, outcomes, evidence };
+  foldedEvidenceEvents.set(next, foldedEvents);
+  return next;
+}
+
+export function effectiveTrajectoryRecord(state: TrajectoryState, record: TrajectoryRunRecord): TrajectoryRunRecord {
+  const outcomeReview = state.outcomes.get(record.trajectory.id)?.at(-1);
+  if (outcomeReview === undefined) return record;
+  return {
+    ...record,
+    recordedOutcome: record.trajectory.outcome,
+    outcomeReview,
+    trajectory: {
+      ...record.trajectory,
+      outcome: outcomeReview.outcome,
+      outcomeEvidence: { kind: "operator-verdict", eventId: outcomeReview.eventId },
+    },
+    reviewText: outcomeReview.outcome === "unknown" ? "" : `VERDICT: ${outcomeReview.outcome === "success" ? "approve" : "reject"}`,
+  };
 }
 
 async function evaluateRecord(record: TrajectoryRunRecord): Promise<TrajectoryEvaluation> {
@@ -63,6 +114,7 @@ export async function analyzeTrajectoryTask(
   if (treeRecord === undefined) return undefined;
   const records = [...state.trajectories.values()]
     .filter((record) => record.trajectory.taskId === taskId)
+    .map((record) => effectiveTrajectoryRecord(state, record))
     .sort((left, right) => left.recordedAt - right.recordedAt || left.trajectory.id.localeCompare(right.trajectory.id));
   const projected = records.map((record) =>
     projectTrajectory(record.trajectory, treeRecord.tree, record.assignments),
@@ -93,6 +145,11 @@ export async function analyzeTrajectoryTask(
   const bases = new Set(records.flatMap((record) => Object.values(record.assignments).map(({ method }) => method.basis ?? "unspecified")));
   return {
     taskId,
+    outcomeCounts: {
+      success: records.filter(({ trajectory }) => trajectory.outcome === "success").length,
+      failure: records.filter(({ trajectory }) => trajectory.outcome === "failure").length,
+      unknown: records.filter(({ trajectory }) => trajectory.outcome === "unknown").length,
+    },
     tree: treeRecord.tree,
     records,
     projected,

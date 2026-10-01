@@ -31,6 +31,8 @@ async function fixture(count=1){
   for(let index=0;index<count;index++) await admin.recordMemory({id:memoryId(index),audience:"workspace",source:"conversation",summary:`Recorded procedure ${index}`,content:"Reference data. ".repeat(1500),applicability:{kind:"projects",projectIds:["project"]}});
   async function connect(token:string, telemetryOutbox?:TelemetryOutbox, capture?:CaptureBridge){
     const api=new SuperBrainClient({baseUrl,workspaceId:"workspace",token,...(telemetryOutbox===undefined?{}:{telemetryOutbox})});
+    // The fixture records memories directly, so its project catalog is supplied here; scope verification itself is exercised in recall-scope tests.
+    vi.spyOn(api,"identityPage").mockResolvedValue({items:[{id:"project"}],total:1,revision:null,scope:{workspaceId:"workspace",visibility:"workspace"},canManage:false} as any);
     const server=createSuperBrainMcpServer({api,...(capture===undefined?{}:{capture})});const client=new Client({name:"synthetic-harness",version:"1"});
     const [left,right]=InMemoryTransport.createLinkedPair();await server.connect(right);await client.connect(left);
     cleanups.push(async()=>{await client.close();await server.close();});
@@ -131,7 +133,7 @@ it("propagates MCP cancellation to a canonical search request",async()=>{
     supplied?.addEventListener("abort",()=>reject(supplied?.reason),{once:true});
   });});
   const controller=new AbortController();
-  const pending=mcp.client.callTool({name:"super_brain_search",arguments:{query:"procedure"}},undefined,{signal:controller.signal});
+  const pending=mcp.client.callTool({name:"super_brain_search",arguments:{query:"procedure",broaderDiscovery:true}},undefined,{signal:controller.signal});
   const rejected=expect(pending).rejects.toThrow();
   await vi.waitFor(()=>expect(supplied).toBeDefined());controller.abort(new Error("cancelled"));await rejected;
   await vi.waitFor(()=>expect(supplied?.aborted).toBe(true));

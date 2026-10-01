@@ -112,6 +112,7 @@ function structuredObservations(run: TranscriptRun, runEventId: string, message:
     return [{
       id: deterministicCandidateId(timestampFor(run, message), identity),
       projectIds: projectId === undefined ? [] : [projectId],
+      applicability: projectId === undefined ? { kind: "unresolved" } : { kind: "projects", projectIds: [projectId] },
       source: "claude-mem-observation",
       summary: title.slice(0, 500),
       content: {
@@ -149,6 +150,7 @@ function durableStatements(run: TranscriptRun, runEventId: string, message: Vaul
     return [{
       id: deterministicCandidateId(timestampFor(run, message), identity),
       projectIds: projectId === undefined ? [] : [projectId],
+      applicability: projectId === undefined ? { kind: "unresolved" } : { kind: "projects", projectIds: [projectId] },
       source: "transcript-rule",
       summary: statement,
       content: { statement, role: message.role, runId: run.id, turnId: message.turnId },
@@ -192,6 +194,35 @@ export function extractMemoryCandidates(
     candidates.push(...candidatesForMessage);
   }
   return candidates;
+}
+
+export interface ExtractionCursor { readonly message: number; readonly candidate: number }
+
+export function extractMemoryCandidatePage(
+  run: TranscriptRun,
+  runEventId: string,
+  messages: readonly VaultMessage[],
+  cursor: ExtractionCursor = { message: 0, candidate: 0 },
+  limit = 25,
+): { readonly candidates: readonly ExtractedCandidate[]; readonly next?: ExtractionCursor; readonly messages: number } {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new TypeError("candidate page size must be within [1, 500]");
+  if (!Number.isInteger(cursor.message) || cursor.message < 0 || cursor.message > messages.length || !Number.isInteger(cursor.candidate) || cursor.candidate < 0) throw new TypeError("Invalid extraction cursor");
+  const candidates: ExtractedCandidate[] = [];
+  const end = Math.min(messages.length, cursor.message + 100);
+  for (let index = cursor.message; index < end; index++) {
+    const message = messages[index]!;
+    const observations = structuredObservations(run, runEventId, message);
+    const extracted = observations.length > 0 ? observations : durableStatements(run, runEventId, message);
+    if (index === cursor.message && cursor.candidate > extracted.length) throw new TypeError("Extraction cursor exceeds the source message candidates");
+    for (let candidate = index === cursor.message ? cursor.candidate : 0; candidate < extracted.length; candidate++) {
+      candidates.push(extracted[candidate]!);
+      if (candidates.length === limit) {
+        const next = candidate + 1 < extracted.length ? { message: index, candidate: candidate + 1 } : { message: index + 1, candidate: 0 };
+        return { candidates, messages: messages.length, ...(next.message < messages.length ? { next } : {}) };
+      }
+    }
+  }
+  return { candidates, messages: messages.length, ...(end < messages.length ? { next: { message: end, candidate: 0 } } : {}) };
 }
 
 function jsonObject(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
@@ -248,6 +279,7 @@ export function extractLiveMemoryCandidates(event: FoldEvent): ExtractedCandidat
       id: deterministicCandidateId(event.at.t, `${LIVE_EXTRACTOR.version}\0${observation}\0${event.id}`),
       ...(event.capture.scope.space === undefined ? {} : { spaceId: event.capture.scope.space }),
       projectIds: projectId === undefined ? [] : [projectId],
+      applicability: projectId === undefined ? { kind: "unresolved" } : { kind: "projects", projectIds: [projectId] },
       source,
       summary: summary.slice(0, 500),
       content,

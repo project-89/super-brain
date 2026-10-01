@@ -4,3 +4,4 @@ export * from "./node-command-runner.js";
 export * from "./oracle.js";
 export * from "./verdict.js";
 export * from "./bundle.js";
+export * from "./retrieval.js";

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { derivationHash, type TranscriptDerivationManifest } from "@_89/fold-transcript";
 
 import {
   FoldSdk,
@@ -133,6 +134,33 @@ describe("immutable transcript reinterpretation", () => {
     await expect(sdk.importTranscript(scoped, { ...next, chunks: [{ ...next.chunks[0]!, turns: [{ ...next.chunks[0]!.turns[0]!, origin: { sourceOccurrenceId: artifact.id, recordRanges: [{ start: 0, end: 5 }] } }] }] }, { importId: "range", importedAt: 200 })).rejects.toThrow(/bounds/);
     expect(store.entries.length).toBe(baseline);
   });
+});
+
+it("adds resumable hash-bound evidence without changing original runs or allowing source and policy substitution", async () => {
+  const store = new MemoryStore();
+  const sdk = new FoldSdk(store);
+  const retained = { ...bundle, artifact: { ...artifact, contentPolicy: "redacted" as const, stored: true } };
+  await sdk.importTranscript(context(), retained, { importId: "retained", importedAt: 1 });
+  const records = [0, 1].map((ordinal) => ({ ordinal, line: ordinal + 1, kind: "usage" as const, sourceType: "token_usage_record", data: { tokens: 42 } }));
+  const manifest: TranscriptDerivationManifest = { runId: run.id, artifactId: artifact.id, sourceSha256: artifact.sha256, inputSha256: "d".repeat(64), inputKind: "retained-policy-artifact", parser: { id: "test", version: "1" }, policy: { contentPolicy: "redacted" }, records: 2, sourceRecords: 2, byKind: { usage: 2 }, unclassifiedTypes: {}, chunkHashes: records.map((record) => derivationHash([record])) };
+  const id = derivationHash(manifest);
+  await expect(sdk.recordTranscriptDerivation(context(), { manifest: { ...manifest, sourceSha256: "f".repeat(64) } })).rejects.toThrow("source or retention policy");
+  await expect(sdk.recordTranscriptDerivation(context(), { manifest: { ...manifest, policy: { contentPolicy: "redacted", reasoningPolicy: "included" } } })).rejects.toThrow("source or retention policy");
+  await expect(sdk.recordTranscriptDerivation(context(), { manifest })).resolves.toMatchObject({ imported: true });
+  // Identical commands replay their receipt; a fresh client recognizes the stored record.
+  await expect(sdk.recordTranscriptDerivation(context(), { manifest })).resolves.toMatchObject({ imported: true });
+  await expect(new FoldSdk(store).recordTranscriptDerivation(context(), { manifest })).resolves.toMatchObject({ imported: false });
+  const chunks = records.map((record, sequence) => ({ runId: run.id, derivationId: id, sequence, records: [record] }));
+  await expect(sdk.recordTranscriptDerivation(context(), { chunk: chunks[1]! })).rejects.toThrow("in order");
+  await expect(sdk.recordTranscriptDerivation(context(), { chunk: { ...chunks[0]!, records: [{ ...records[0]!, data: { tokens: 99 } }] } })).rejects.toThrow("checksum");
+  await sdk.recordTranscriptDerivation(context(), { chunk: chunks[0]! });
+  expect(await sdk.transcriptDerivations(access(), run.id)).toMatchObject([{ complete: false }]);
+  await sdk.recordTranscriptDerivation(context(), { chunk: chunks[1]! });
+  await expect(new FoldSdk(store).recordTranscriptDerivation(context(), { chunk: chunks[1]! })).resolves.toMatchObject({ imported: false });
+  expect(await sdk.transcriptDerivations(access(), run.id)).toMatchObject([{ derivationId: id, complete: true, chunks }]);
+  expect(Number.isInteger((await sdk.transcriptDerivations(access(), run.id))[0]!.recordedAt)).toBe(false);
+  expect(await sdk.transcriptRun(access(), run.id)).toEqual({ run, artifact: retained.artifact, projects: [project], chunks: [chunk] });
+  await expect(sdk.transcriptDerivations(access({ workspaceId: "elsewhere" }), run.id)).rejects.toThrow("unavailable");
 });
 
 function context(workspaceId = "workspace-1"): FoldSdkTranscriptContext {

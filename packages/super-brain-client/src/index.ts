@@ -1,6 +1,7 @@
 import type { EventPageOptions, ProjectionSection, ProjectionResponse, FleetResponse, SteeringResponse, SteeringCommand, SerializedTrajectoryTaskReport } from "./ports.js";
 export * from "./ports.js";
-import type { FoldEvent, FoldLogEntry } from "@_89/fold";
+import { sortLog, type FoldEvent, type FoldLogEntry } from "@_89/fold";
+import type { EpisodeWindowInput, EpisodeWindowRecord, WorkEpisodeRevision, EpisodeSource } from "@_89/fold-epistemic";
 import type {
   MemoryAudience,
   MemoryCandidate,
@@ -19,14 +20,17 @@ import type {
   RecallRequest,
   RecalledMemory,
 } from "@_89/fold-epistemic";
-import type { TranscriptProjectSummary, TranscriptRunDetail, MemoryCandidateAcceptanceResult, FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
+import type { TranscriptProjectSummary, TranscriptRunDetail, MemoryCandidateAcceptanceResult, FoldSdkCursor, FoldDeliveryCursor, FoldConsumerCursor, FoldIngestionCursor, RankedMemoryRecallResult, SteeringSnapshot, TrajectoryTaskSummary } from "@_89/fold-sdk";
 import type { TranscriptEvidenceOrigin } from "@_89/fold-sdk";
 import type { EvaluationSourceSelectionRequest, EvaluationSourceSelection } from "@_89/fold-sdk";
 export type { EvaluationSourceSelectionRequest, EvaluationSourceSelection, EvaluationSourceReference } from "@_89/fold-sdk";
-import type { TranscriptRun, TranscriptSource } from "@_89/fold-transcript";
+import type { TranscriptRun, TranscriptSource, IdentityEntity, IdentityAttribution, ProjectAlias, IdentityRecord, IdentityEntityInput, IdentityAttributionInput, ProjectAliasInput } from "@_89/fold-transcript";
 import type {
   TrajectoryInput,
+  TrajectoryOutcomeInput,
+  TrajectoryOutcomeRecord,
   TrajectoryMutationResult,
+  TrajectoryTaskReport,
   TrajectoryTreeMutationResult,
   TrajectoryTreeRecord,
   TaskManifest, AttemptManifest, TaskOutcomeInput, TaskInterventionInput, TaskEvidenceMutationResult, TaskEvidenceRecord,
@@ -91,13 +95,21 @@ export interface ReasoningProviderStatus { readonly id: string; readonly kind: "
 export interface MutationOptions extends RequestOptions { readonly stamp?: EventStamp; readonly expectedRevision?: number }
 export interface MemoryAcceptanceOptions extends MutationOptions { readonly memoryStamp?: EventStamp; readonly memoryId?: string }
 
+export interface EpisodeSynthesisInput {
+  readonly windowId: string; readonly parentWindowId?: string; readonly sourceEventIds: readonly string[];
+  readonly projectId: string | null; readonly spaceId?: string; readonly audience: "personal" | "workspace";
+  readonly trigger: EpisodeWindowInput["trigger"]; readonly provider?: string; readonly contextEpisodeIds?: readonly string[];
+}
+export interface EpisodePage<T> { readonly items: readonly T[]; readonly total: number; readonly nextCursor?: string; readonly coverage: "authorized-current-only" }
+
 export interface StreamedFoldEvent {
   readonly entry: FoldLogEntry;
   readonly cursor: FoldDeliveryCursor;
 }
 
 export interface EventStreamOptions {
-  readonly after?: FoldConsumerCursor;
+  /** Delivery (v2) and ingestion cursors share one sequence; a legacy event-time cursor replays from origin. */
+  readonly after?: FoldConsumerCursor | FoldIngestionCursor;
   readonly replay?: "tail" | "all";
   readonly include?: "canon" | "canon+draft";
   readonly kinds?: readonly string[];
@@ -109,7 +121,38 @@ export interface ConsumeEventOptions extends Omit<EventStreamOptions, "after" | 
   readonly replay?: "tail" | "all";
   readonly reconnect?: boolean;
   readonly reconnectDelayMs?: number;
+  readonly checkpointEvery?: number;
   readonly onEvent: (event: StreamedFoldEvent) => void | Promise<void>;
+}
+
+export interface IngestionConsumerStatus {
+  readonly cursor: FoldIngestionCursor | null;
+  readonly legacyCursor: FoldSdkCursor | null;
+  readonly migrationRequired: boolean;
+  readonly headCursor: FoldIngestionCursor;
+}
+
+function sequenceOf(value: unknown): string {
+  const cursor = value as { readonly sequence?: unknown } | null;
+  if (typeof cursor?.sequence !== "string" || !/^(?:0|[1-9][0-9]{0,18})$/.test(cursor.sequence) || BigInt(cursor.sequence) > 9223372036854775807n) throw new TypeError("Invalid delivery cursor sequence");
+  return cursor.sequence;
+}
+
+/** Accepts the v2 delivery cursor or the equivalent ingestion cursor; both name one log sequence. */
+function deliveryCursor(value: unknown): FoldDeliveryCursor {
+  const cursor = value as { readonly version?: unknown; readonly kind?: unknown } | null;
+  if (cursor?.version !== 2 && cursor?.kind !== "ingestion") throw new TypeError("Invalid delivery cursor; legacy source-time cursors require replay from origin");
+  return { version: 2, sequence: sequenceOf(value) };
+}
+
+function ingestionCursor(value: FoldDeliveryCursor | FoldIngestionCursor): FoldIngestionCursor {
+  return { kind: "ingestion", sequence: deliveryCursor(value).sequence };
+}
+
+function parseIngestionCursor(value: unknown): FoldIngestionCursor {
+  const cursor = value as Partial<FoldIngestionCursor> | null;
+  if (cursor?.kind !== "ingestion" || typeof cursor.sequence !== "string" || !/^(?:0|[1-9][0-9]{0,18})$/.test(cursor.sequence) || BigInt(cursor.sequence) > 9223372036854775807n) throw new TypeError("Invalid ingestion cursor; legacy source-time cursors require explicit replay-all migration");
+  return cursor as FoldIngestionCursor;
 }
 
 export interface ReasoningResponse {
@@ -297,7 +340,7 @@ export class SuperBrainClient {
     const abort = () => controller.abort(signals.find((signal) => signal.aborted)?.reason);
     for (const signal of signals) signal.addEventListener("abort", abort, { once: true });
     if (signals.some((signal) => signal.aborted)) abort();
-    const timer = setTimeout(() => controller.abort(new DOMException("Request deadline exceeded", "TimeoutError")), timeoutMs);
+    const timer = setTimeout(() => controller.abort(new DOMException("Super Brain request timed out: request deadline exceeded", "TimeoutError")), timeoutMs);
     try {
       const headers = new Headers(init.headers);
       headers.set("authorization", `Bearer ${await this.tokenFor(controller.signal)}`);
@@ -367,6 +410,7 @@ export class SuperBrainClient {
   }
 
   async listEvents(options: { readonly eventIds?: readonly string[]; readonly kinds?: readonly string[]; readonly include?: "canon" | "canon+draft"; readonly limit?: number } = {}): Promise<readonly FoldLogEntry[]> {
+    if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 1)) throw new TypeError("limit must be a positive integer");
     if (options.eventIds !== undefined) {
       if (options.eventIds.length < 1 || options.eventIds.length > 1000 || options.eventIds.some((id) => !id.trim() || id.length > 500)) throw new TypeError("eventIds must contain 1 to 1000 valid event IDs");
       const batches: string[][] = [[]]; let encodedLength = 0;
@@ -380,21 +424,125 @@ export class SuperBrainClient {
         for (const batch of batches) entries.push(...await this.listEvents({ ...options, eventIds: batch, limit: batch.length }));
         return entries.sort((a, b) => a.event.at.t - b.event.at.t || (a.event.id < b.event.id ? -1 : a.event.id > b.event.id ? 1 : 0)).slice(0, options.limit ?? 1000);
       }
+      const params = new URLSearchParams();
+      appendRepeated(params, "eventId", options.eventIds);
+      appendRepeated(params, "kind", options.kinds);
+      if (options.include !== undefined) params.set("include", options.include);
+      params.set("limit", String(options.limit ?? options.eventIds.length));
+      const response = await this.request<{ readonly entries: readonly FoldLogEntry[] }>(`${this.workspacePath("events")}?${params}`);
+      return response.entries;
     }
-    const params = new URLSearchParams();
-    appendRepeated(params, "eventId", options.eventIds);
-    appendRepeated(params, "kind", options.kinds);
-    if (options.include !== undefined) params.set("include", options.include);
-    if (options.limit !== undefined || options.eventIds !== undefined) params.set("limit", String(options.limit ?? options.eventIds!.length));
-    const response = await this.request<{ readonly entries: readonly FoldLogEntry[] }>(
-      `${this.workspacePath("events")}${params.size === 0 ? "" : `?${params}`}`,
-    );
-    return response.entries;
+    const entries = new Map<string, FoldLogEntry>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      // Descending cursor pages select the indexed registry path rather than replaying the corpus.
+      const params = new URLSearchParams({ order: "desc", limit: "100" });
+      appendRepeated(params, "kind", options.kinds);
+      if (options.include !== undefined) params.set("include", options.include);
+      if (cursor !== undefined) params.set("pageCursor", cursor);
+      const response = await this.request<{ readonly entries: readonly FoldLogEntry[]; readonly nextCursor?: string }>(
+        `${this.workspacePath("events")}?${params}`,
+      );
+      if (!Array.isArray(response.entries)) throw new TypeError("Event catalog returned an invalid response");
+      for (const entry of response.entries) entries.set(entry.event.id, entry);
+      cursor = response.nextCursor;
+      if (cursor !== undefined) {
+        if (typeof cursor !== "string" || cursor.length === 0 || cursors.has(cursor)) throw new TypeError("Event catalog returned an invalid cursor");
+        cursors.add(cursor);
+      }
+      // Complete a timestamp boundary before applying the legacy ascending last-N limit.
+      if (options.limit !== undefined && entries.size >= options.limit && response.entries.length > 0) {
+        const ordered = sortLog([...entries.values()]);
+        if (response.entries.at(-1)!.event.at.t < ordered[ordered.length - options.limit]!.event.at.t) break;
+      }
+    } while (cursor !== undefined);
+    const ordered = sortLog([...entries.values()]);
+    return options.limit === undefined ? ordered : ordered.slice(-options.limit);
   }
 
-  async transcriptRuns(): Promise<readonly TranscriptRun[]> {
-    const response = await this.request<{ readonly runs: readonly TranscriptRun[] }>(this.workspacePath("transcript-runs"));
-    return response.runs;
+  async transcriptRuns(options: { readonly requestTimeoutMs?: number } = {}): Promise<readonly TranscriptRun[]> {
+    const timeoutMs = options.requestTimeoutMs ?? 30_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("requestTimeoutMs must be a positive integer");
+    const runs = new Map<string, TranscriptRun>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const params = new URLSearchParams({ limit: "100" });
+      if (cursor !== undefined) params.set("pageCursor", cursor);
+      const response = await this.request<{ readonly runs: readonly TranscriptRun[]; readonly nextCursor?: string }>(
+        `${this.workspacePath("transcript-runs")}?${params}`,
+        {}, { timeoutMs },
+      );
+      if (!Array.isArray(response.runs)) throw new TypeError("Transcript run catalog returned an invalid response");
+      for (const run of response.runs) runs.set(run.id, run);
+      cursor = response.nextCursor;
+      if (cursor !== undefined) {
+        if (typeof cursor !== "string" || cursor.length === 0 || cursors.has(cursor)) throw new TypeError("Transcript run catalog returned an invalid cursor");
+        cursors.add(cursor);
+      }
+    } while (cursor !== undefined);
+    return [...runs.values()];
+  }
+
+  async eventById(eventId: string): Promise<FoldEvent | undefined> {
+    try {
+      const result = await this.request<{ readonly entry: FoldLogEntry }>(`${this.workspacePath("events")}/${encodeURIComponent(eventId)}`);
+      if (result.entry.status !== "canon") throw new TypeError("Event lookup returned a non-canonical entry");
+      return result.entry.event;
+    } catch (error) {
+      if (error instanceof SuperBrainApiError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  synthesizeEpisodeWindow(input: EpisodeSynthesisInput): Promise<EpisodeWindowInput> {
+    return this.request(`${this.workspacePath("work-episodes")}/synthesize`, { method: "POST", body: JSON.stringify(input) }, { timeoutMs: 210_000 });
+  }
+  publishEpisodeWindow(input: EpisodeWindowInput): Promise<EpisodeWindowRecord> {
+    return this.request(`${this.workspacePath("work-episodes")}/windows`, { method: "POST", body: JSON.stringify(input) });
+  }
+  workEpisode(episodeId: string): Promise<WorkEpisodeRevision & { readonly projectName?: string; readonly freshness: "current" }> {
+    return this.request(`${this.workspacePath("work-episodes")}/${encodeURIComponent(episodeId)}`);
+  }
+  episodeWindow(windowId: string): Promise<EpisodeWindowRecord> {
+    return this.request(`${this.workspacePath("work-episode-windows")}/${encodeURIComponent(windowId)}`);
+  }
+  episodePage<T = WorkEpisodeRevision>(options: { readonly section?: "episodes" | "windows"; readonly episodeId?: string; readonly detail?: "history" | "sources"; readonly cursor?: string; readonly limit?: number; readonly projectId?: string } = {}): Promise<EpisodePage<T>> {
+    if (options.detail === "sources" && options.limit !== undefined && options.limit !== 1) throw new TypeError("Episode evidence pages contain one complete source event");
+    const query = new URLSearchParams({ limit: String(options.limit ?? (options.detail === "sources" ? 1 : 100)) });
+    if (options.cursor !== undefined) query.set("pageCursor", options.cursor);
+    if (options.projectId !== undefined) query.set("projectId", options.projectId);
+    let path = this.workspacePath(options.section === "windows" ? "work-episode-windows" : "work-episodes");
+    if (options.episodeId !== undefined) path += `/${encodeURIComponent(options.episodeId)}/${options.detail ?? "history"}`;
+    return this.request(`${path}?${query}`);
+  }
+
+  identityPage<T = IdentityEntity | IdentityAttribution | ProjectAlias | IdentityRecord>(
+    section: "entities" | "attributions" | "aliases" | "history" | "projects",
+    options: { readonly cursor?: string; readonly limit?: number; readonly kind?: IdentityEntity["kind"]; readonly active?: boolean } = {},
+  ) {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 100) });
+    if (options.cursor !== undefined) query.set("pageCursor", options.cursor);
+    if (options.kind !== undefined) query.set("kind", options.kind);
+    if (options.active !== undefined) query.set("active", String(options.active));
+    return this.request<{ readonly items: readonly T[]; readonly total: number; readonly nextCursor?: string; readonly revision: string | null; readonly scope: { readonly workspaceId: string; readonly visibility: "workspace" }; readonly canManage: boolean }>(`${this.workspacePath("identities")}/${section}?${query}`);
+  }
+
+  reviseIdentityEntity(expectedRevision: string | null, input: IdentityEntityInput) {
+    return this.request<{ readonly revision: string; readonly entity: IdentityEntity }>(`${this.workspacePath("identities")}/entities`, { method: "POST", body: JSON.stringify({ expectedRevision, input }) });
+  }
+
+  reviseIdentityAttribution(expectedRevision: string | null, input: IdentityAttributionInput) {
+    return this.request<{ readonly revision: string; readonly attribution: IdentityAttribution }>(`${this.workspacePath("identities")}/attributions`, { method: "POST", body: JSON.stringify({ expectedRevision, input }) });
+  }
+
+  previewProjectAlias(input: ProjectAliasInput) {
+    return this.request<{ readonly revision: string | null; readonly previewToken: string; readonly conflicts: readonly string[]; readonly affected: { readonly projectIds: readonly string[]; readonly runs: number; readonly memories: number; readonly candidates: number }; readonly beforeCanonicalProjectId: string; readonly afterCanonicalProjectId: string; readonly scope: { readonly workspaceId: string; readonly visibility: "workspace" } }>(`${this.workspacePath("identities")}/alias-preview`, { method: "POST", body: JSON.stringify({ input }) });
+  }
+
+  reviseProjectAlias(expectedRevision: string | null, previewToken: string, input: ProjectAliasInput) {
+    return this.request<{ readonly revision: string; readonly alias: ProjectAlias }>(`${this.workspacePath("identities")}/aliases`, { method: "POST", body: JSON.stringify({ expectedRevision, previewToken, input }) });
   }
 
   async repositoryEnrollments(): Promise<readonly RepositoryEnrollment[]> {
@@ -457,6 +605,42 @@ export class SuperBrainClient {
       this.workspacePath("trajectory-tasks"),
     );
     return response.tasks;
+  }
+
+  async trajectoryTask(taskId: string): Promise<TrajectoryTaskReport | undefined> {
+    try {
+      const response = await this.request<{ readonly report: TrajectoryTaskReport }>(
+        `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}`,
+      );
+      return response.report;
+    } catch (error) {
+      if (error instanceof SuperBrainApiError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  async trajectoryTree(taskId: string): Promise<TrajectoryTreeRecord | undefined> {
+    try {
+      const response = await this.request<{ readonly record: TrajectoryTreeRecord }>(
+        `${this.workspacePath("trajectory-tasks")}/${encodeURIComponent(taskId)}/tree`,
+      );
+      return response.record;
+    } catch (error) {
+      if (error instanceof SuperBrainApiError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
+
+  recordTrajectoryOutcome(stamp: EventStamp, input: TrajectoryOutcomeInput): Promise<{ readonly event: FoldEvent; readonly record: TrajectoryOutcomeRecord }> {
+    return this.request(this.workspacePath("trajectory-outcomes"), {
+      method: "POST", body: JSON.stringify({ stamp, input }),
+    });
+  }
+
+  trajectoryOutcomes(taskId: string, trajectoryId: string, cursor?: string): Promise<{ readonly records: readonly TrajectoryOutcomeRecord[]; readonly total: number; readonly nextCursor?: string }> {
+    const query = new URLSearchParams({ taskId, trajectoryId, limit: "100" });
+    if (cursor !== undefined) query.set("pageCursor", cursor);
+    return this.request(`${this.workspacePath("trajectory-outcomes")}?${query}`);
   }
 
   recordTrajectory(
@@ -550,11 +734,13 @@ export class SuperBrainClient {
     readonly providerConfigRevision?: string;
     readonly memoryIds?: readonly string[];
     readonly memoryRefs?: readonly MemoryRevisionRef[];
-  }, options: RequestOptions = {}): Promise<ReasoningResponse> {
+  }, options: RequestOptions & { readonly requestTimeoutMs?: number } = {}): Promise<ReasoningResponse> {
+    const requestTimeoutMs = options.timeoutMs ?? options.requestTimeoutMs ?? 60_000;
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1) throw new TypeError("requestTimeoutMs must be a positive integer");
     const result = await this.request<ReasoningResponse>(
       this.workspacePath("reasoning/ask"),
       { method: "POST", body: JSON.stringify(request) },
-      options,
+      { ...options, timeoutMs: requestTimeoutMs },
     );
     this.recordRecallTelemetry(result.provenance);
     return result;
@@ -661,6 +847,12 @@ export class SuperBrainClient {
     });
   }
 
+  addMemoryCandidateEvidence(candidateId: string, input: MemoryCandidateInput): Promise<{ readonly candidate: MemoryCandidateView["candidate"] }> {
+    return this.request(`${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/evidence`, {
+      method: "POST", body: JSON.stringify({ stamp: nextEventStamp(), input }),
+    });
+  }
+
   async memoryCandidates(options: {
     readonly status?: MemoryCandidateView["status"];
     readonly projectIds?: readonly string[];
@@ -734,10 +926,37 @@ export class SuperBrainClient {
     });
   }
 
+  private ingestionConsumerPath(consumerId: string, options: Pick<EventStreamOptions, "kinds" | "include">): string {
+    const params = new URLSearchParams({ order: "ingestion" });
+    appendRepeated(params, "kind", options.kinds);
+    if (options.include !== undefined) params.set("include", options.include);
+    return `${this.workspacePath("consumers")}/${encodeURIComponent(consumerId)}?${params}`;
+  }
+
+  async ingestionConsumerStatus(consumerId: string, options: Pick<EventStreamOptions, "kinds" | "include"> = {}): Promise<IngestionConsumerStatus> {
+    const status = await this.request<IngestionConsumerStatus>(this.ingestionConsumerPath(consumerId, options));
+    if (status.cursor !== null) parseIngestionCursor(status.cursor);
+    parseIngestionCursor(status.headCursor);
+    if (typeof status.migrationRequired !== "boolean") throw new TypeError("Invalid ingestion consumer status");
+    return status;
+  }
+
+  migrateConsumerCursor(consumerId: string, options: Pick<EventStreamOptions, "kinds" | "include"> = {}): Promise<IngestionConsumerStatus> {
+    return this.request(this.ingestionConsumerPath(consumerId, options), { method: "POST", body: JSON.stringify({ migration: "replay-all" }) });
+  }
+
+  resetConsumerCursor(consumerId: string, expectedCursor: FoldIngestionCursor, reason: string, options: Pick<EventStreamOptions, "kinds" | "include"> = {}): Promise<IngestionConsumerStatus> {
+    return this.request(this.ingestionConsumerPath(consumerId, options), { method: "POST", body: JSON.stringify({ reset: { expectedCursor: parseIngestionCursor(expectedCursor), reason } }) });
+  }
+
+  commitIngestionCursor(consumerId: string, cursor: FoldIngestionCursor): Promise<unknown> {
+    return this.request(this.ingestionConsumerPath(consumerId, {}), { method: "POST", body: JSON.stringify({ cursor: parseIngestionCursor(cursor) }) });
+  }
+
   async *eventStream(options: EventStreamOptions = {}): AsyncGenerator<StreamedFoldEvent> {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ order: "ingestion" });
     if (options.after !== undefined) {
-      if ("version" in options.after) params.set("afterSequence", options.after.sequence);
+      if ("version" in options.after || "kind" in options.after) params.set("afterSequence", deliveryCursor(options.after).sequence);
       else {
         params.set("afterT", options.after.t.toString());
         params.set("afterEventId", options.after.eventId);
@@ -793,7 +1012,11 @@ export class SuperBrainClient {
             const failure = JSON.parse(data) as { status?: number; code?: string; message?: string };
             throw new SuperBrainApiError(failure.status ?? 503, failure.code ?? "stream_failed", failure.message ?? "Event stream failed");
           }
-          if (data.length > 0) yield JSON.parse(data) as StreamedFoldEvent;
+          if (eventName === "stream-error") throw new SuperBrainApiError(502, "stream_failed", "Event stream failed");
+          if (data.length > 0) {
+            const event = JSON.parse(data) as StreamedFoldEvent;
+            yield { ...event, cursor: deliveryCursor(event.cursor) };
+          }
         }
         if (done) break;
       }
@@ -809,22 +1032,66 @@ export class SuperBrainClient {
   }
 
   async consumeEvents(options: ConsumeEventOptions): Promise<void> {
-    let cursor = await this.consumerCursor(options.consumerId);
+    const checkpointEvery = options.checkpointEvery ?? 1;
+    if (!Number.isInteger(checkpointEvery) || checkpointEvery < 1 || checkpointEvery > 100) throw new TypeError("checkpointEvery must be an integer within [1, 100]");
+    if (Boolean(options.signal?.aborted)) return;
+    const status = await this.ingestionConsumerStatus(options.consumerId, options);
+    if (Boolean(options.signal?.aborted)) return;
+    if (status.migrationRequired) throw new SuperBrainApiError(409, "ingestion_cursor_migration_required", "Legacy consumer requires explicit replay-all migration; no events were skipped or offsets changed", status);
+    let cursor: FoldIngestionCursor = status.cursor ?? ((options.replay ?? "tail") === "all" ? { kind: "ingestion", sequence: "0" } : status.headCursor);
+    if (status.cursor === null) await this.commitIngestionCursor(options.consumerId, cursor);
+    let pendingCursor: FoldIngestionCursor | undefined;
+    let pendingCount = 0;
+    let checkpointChain = Promise.resolve();
+    const checkpoint = (): Promise<void> => {
+      const next = checkpointChain.then(async () => {
+        const through = pendingCursor;
+        const count = pendingCount;
+        if (through === undefined) return;
+        await this.commitIngestionCursor(options.consumerId, through);
+        cursor = through;
+        if (pendingCursor === through) { pendingCursor = undefined; pendingCount = 0; }
+        else pendingCount -= count;
+      });
+      checkpointChain = next.catch(() => undefined);
+      return next;
+    };
     const reconnect = options.reconnect ?? true;
     do {
       let delayMs = options.reconnectDelayMs ?? 1_000;
+      const connection = new AbortController();
+      const abort = () => connection.abort(options.signal?.reason);
+      if (options.signal?.aborted) abort();
+      else options.signal?.addEventListener("abort", abort, { once: true });
+      let timerError: unknown;
+      let timerBusy = false;
+      const timer = checkpointEvery === 1 ? undefined : setInterval(() => {
+        if (timerBusy || pendingCursor === undefined) return;
+        timerBusy = true;
+        void checkpoint().catch((error: unknown) => { timerError = error; connection.abort(error); }).finally(() => { timerBusy = false; });
+      }, 1_000);
+      timer?.unref?.();
       try {
         for await (const event of this.eventStream({
-          ...(cursor === undefined ? { replay: options.replay ?? "tail" } : { after: cursor }),
+          after: cursor,
           ...(options.include === undefined ? {} : { include: options.include }),
           ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
-          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          signal: connection.signal,
         })) {
+          if (connection.signal.aborted) break;
           await options.onEvent(event);
-          await this.commitConsumerCursor(options.consumerId, event.cursor);
-          cursor = event.cursor;
+          pendingCursor = ingestionCursor(event.cursor);
+          pendingCount += 1;
+          if (pendingCount >= checkpointEvery) await checkpoint();
         }
-      } catch (error) {
+        await checkpoint();
+      } catch (caught) {
+        const error = timerError ?? caught;
+        try { await checkpoint(); } catch (commitError) {
+          if (!reconnect || (commitError instanceof SuperBrainApiError && commitError.status < 500 && commitError.status !== 429)) throw commitError;
+          // Resume from the last acknowledged cursor, never an uncommitted callback result.
+          pendingCursor = undefined; pendingCount = 0;
+        }
         if (options.signal?.aborted === true) return;
         if (!reconnect || (error instanceof SuperBrainApiError && !error.retryable)) throw error;
         if (error instanceof SuperBrainApiError && error.retryAfterMs !== undefined) delayMs = Math.max(delayMs, error.retryAfterMs);
@@ -834,6 +1101,10 @@ export class SuperBrainClient {
             delayMs = Math.max(delayMs, Math.ceil(retryAfterSeconds * 1_000));
           }
         }
+      } finally {
+        if (timer !== undefined) clearInterval(timer);
+        options.signal?.removeEventListener("abort", abort);
+        await checkpointChain;
       }
       if (!reconnect || options.signal?.aborted === true) return;
       await sleep(delayMs, options.signal);
@@ -842,3 +1113,4 @@ export class SuperBrainClient {
 }
 
 export type { MemoryAudience };
+export type { MemoryApplicability } from "@_89/fold-epistemic";

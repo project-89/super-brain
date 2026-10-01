@@ -1,5 +1,10 @@
 # Super Brain Architecture
 
+The next product phase is tracked in
+[Learning and organizational awareness](LEARNING_AND_AWARENESS_PLAN.md).
+Existing component implementations below are foundations for that phase, not a
+claim that reusable procedure learning or organizational status is complete.
+
 ## System Shape
 
 ```text
@@ -117,10 +122,10 @@ normal active memory with causal links to both the proposal and decision.
 
 Automatic promotion is deliberately conservative. Structured ClaudeMem
 observations require confidence `>= 0.95` and a resolved project. Explicit
-human decisions with a resolved project can promote immediately. A live
-reasoning checkpoint becomes active only after a successful trajectory cites
-that checkpoint's exact event ID. Global observations and other rule-derived
-statements remain pending. Repeated equivalent evidence revises the accepted
+human decisions with a resolved project can promote immediately. Live reasoning
+checkpoints remain reviewable even if a successful trajectory cites them; path
+membership does not validate a hypothesis. Unresolved observations and other
+rule-derived statements remain pending. Repeated equivalent evidence revises the accepted
 memory instead of producing duplicate memories.
 
 Recall always applies current workspace, creator, space, audience, and project

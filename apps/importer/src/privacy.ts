@@ -9,6 +9,7 @@ import {
 export type AnonymizationPolicy = "none" | "pseudonymous" | "strict";
 
 const IDENTITY_FIELDS = new Set([
+  "id",
   "account_id",
   "accountId",
   "call_id",
@@ -27,6 +28,11 @@ const IDENTITY_FIELDS = new Set([
   "turnId",
   "user_id",
   "userId",
+  "parent_session_id",
+  "session_key",
+  "chat_id",
+  "thread_id",
+  "projectHash",
 ]);
 
 const PATH_FIELDS = new Set([
@@ -39,6 +45,7 @@ const PATH_FIELDS = new Set([
   "paths",
   "project_root",
   "projectRoot",
+  "git_repo_root",
   "rollout_path",
   "rolloutPath",
   "root",
@@ -139,7 +146,7 @@ export class RecordAnonymizer {
       return Object.fromEntries(
         Object.entries(value).map(([key, item]) => [
           key,
-          key === "encrypted_content" ? item : this.value(item, key),
+          ["encrypted_content", "thoughtSignature", "thought_signature"].includes(key) ? item : this.value(item, key),
         ]),
       );
     }

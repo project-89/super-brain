@@ -1,16 +1,19 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { FoldEvent } from "@_89/fold";
-import type { MemoryCandidateEvidence, MemoryCandidateView, PersonalMemory } from "@_89/fold-epistemic";
-import { transcriptRecordsFromEvent, type TranscriptRun } from "@_89/fold-transcript";
+import { episodeWindowInputSchema, memoryLogRecordsFromEvent, type EpisodeWindowInput, type MemoryCandidateEvidence, type MemoryCandidateView, type PersonalMemory } from "@_89/fold-epistemic";
+import { transcriptDerivationChunkSchema, transcriptRecordsFromEvent, type TranscriptRun } from "@_89/fold-transcript";
 import { trajectoryLogRecordsFromEvent } from "@_89/fold-trajectory";
 import { SuperBrainApiError, SuperBrainClient, type EventStamp } from "@_89/super-brain-client";
 import { deterministicCandidateId, extractedClaimContent, extractLiveMemoryCandidates, extractMemoryCandidates, RULE_EXTRACTOR } from "./extractor.js";
-import { DurableWorkerJobs, jobDigest, type ProcessingCoverage, type WorkerJob, type WorkerJobState } from "./jobs.js";
+import { DurableWorkerJobs, jobDigest, ProcessingBackpressureError, processingDigest, workerJobNamespace, type ProcessingCoverage, type WorkerJob, type WorkerJobState } from "./jobs.js";
 import type { ExtractedCandidate, RunExtraction, VaultMessage } from "./types.js";
 import { readVaultEvidence } from "./vault.js";
 import { verifiedTaskAcceptance } from "./authority.js";
 import { publishWorkerProcessingStatus, type WorkerProcessingStatus } from "./status.js";
+import { DurableWindowScheduler, readSchedulingCoverage, validateSchedulingWindow, type SchedulingWindow } from "./scheduler.js";
+import { MEMORY_WORKER_EVENT_KINDS } from "./subscription.js";
 
 export interface WorkerOptions {
   readonly client: SuperBrainClient;
@@ -26,6 +29,12 @@ export interface WorkerOptions {
   readonly continuousCognition?: boolean;
   readonly cognitionEveryEvents?: number;
   readonly cognitionProviderId?: string;
+  /** Project-scoped work-episode formation over exact durable source windows. */
+  readonly episodeFormation?: boolean;
+  readonly episodeEveryEvents?: number;
+  readonly episodeElapsedMs?: number;
+  /** Active ledger capacity; intake pauses (transport checkpoint unchanged) when reached. */
+  readonly maxActiveJobs?: number;
   readonly modelTimeoutMs?: number;
   readonly maxModelAttempts?: number;
   readonly verifyCapturedEvent?: (event: FoldEvent) => Promise<boolean>;
@@ -86,8 +95,34 @@ interface SynthesisPayload {
   readonly providerId: string; readonly providerRevision: string;
   readonly result?: Awaited<ReturnType<SuperBrainClient["askReasoning"]>>;
 }
+interface EpisodePayload {
+  readonly window: SchedulingWindow;
+  readonly anchor: FoldEvent;
+  readonly episode?: EpisodeWindowInput;
+  readonly episodeContext?: { readonly ids: readonly string[]; readonly omitted: boolean };
+}
 class JobDisposition extends Error {
-  constructor(readonly state: "waiting" | "excluded", readonly reason: string) { super(reason); }
+  constructor(readonly state: "waiting" | "excluded" | "blocked", readonly reason: string) { super(reason); }
+}
+const COGNITION_TRIGGER_KINDS = ["trajectory.recorded", "trajectory.outcome-recorded", "memory.recorded", "memory.revised"];
+const EPISODE_CAPACITY = 200;
+
+function completionSignal(event: FoldEvent): boolean {
+  return trajectoryLogRecordsFromEvent(event).some((record) =>
+    record.recordType === "outcome" ? record.outcome !== "unknown" : record.recordType === "trajectory" && record.trajectory.outcome !== "unknown");
+}
+
+/** Operator repair reads honour bounded server rate limits instead of failing a partial pass. */
+async function repairRequest<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await operation(); } catch (error) {
+      if (!(error instanceof SuperBrainApiError) || error.status !== 429 || attempt >= 3) throw error;
+      const details = error.details as { readonly retryAfterSeconds?: unknown } | undefined;
+      const seconds = typeof details?.retryAfterSeconds === "number" ? details.retryAfterSeconds : 1;
+      if (!Number.isFinite(seconds) || seconds > 300) throw error;
+      await delay(Math.max(1, seconds) * 1_000);
+    }
+  }
 }
 
 export class TranscriptMemoryWorker {
@@ -103,6 +138,9 @@ export class TranscriptMemoryWorker {
   private watchController: AbortController | undefined;
   private background: Promise<unknown>[] = [];
   private projectRoots: Array<{ root: string; projectId: string }> = [];
+  private readonly episodeRuns = new Map<string, TranscriptRun>();
+  private readonly episodeProjects = new Set<string>();
+  private episodeScheduler: DurableWindowScheduler | undefined;
   private readonly evidenceTimes = new Map<string, number>();
   private readonly sourceOrigins = new Map<string, string>();
   private readonly now: () => number;
@@ -119,9 +157,8 @@ export class TranscriptMemoryWorker {
       if (this.closing) throw new Error("Worker is closing");
       this.principalId = identity.principalId;
       this.statusSubject = { ...identity, organizationId: identity.organizationId ?? "local" };
-      const namespace = JSON.stringify([identity.organizationId ?? "local", identity.workspaceId, identity.principalId,
-        RULE_EXTRACTOR, this.options.audience ?? "workspace", this.options.spaceId ?? ""]);
-      const store = new DurableWorkerJobs(this.options.stateRoot ?? join(homedir(), ".local", "state", "super-brain", "memory-worker", "jobs"), namespace);
+      const namespace = workerJobNamespace(identity, { audience: this.options.audience ?? "workspace", ...(this.options.spaceId === undefined ? {} : { spaceId: this.options.spaceId }) });
+      const store = new DurableWorkerJobs(this.options.stateRoot ?? join(homedir(), ".local", "state", "super-brain", "memory-worker", "jobs"), namespace, this.options.maxActiveJobs);
       await store.open(); this.store = store; await this.publishStatus("running"); return store;
     })().catch((error) => { this.opening = undefined; throw error; });
     return this.opening;
@@ -132,7 +169,7 @@ export class TranscriptMemoryWorker {
     for (const controller of this.modelRequests) controller.abort(new Error("worker-closed"));
     await Promise.allSettled([...this.background, this.draining, this.modelDraining, this.opening]);
     await this.publishStatus("stopped");
-    await this.store?.close(); this.store = undefined; this.opening = undefined;
+    await this.store?.close(); this.store = undefined; this.opening = undefined; this.episodeScheduler = undefined;
   }
   private publishStatus(status: WorkerProcessingStatus["status"]): Promise<void> {
     return this.statusPublishing = this.statusPublishing.then(async () => {
@@ -142,6 +179,7 @@ export class TranscriptMemoryWorker {
     });
   }
   configureProjectRoots(runs: readonly TranscriptRun[]): void {
+    for (const run of runs) this.rememberEpisodeRun(run);
     this.projectRoots = runs.flatMap((run) => run.segments.flatMap((segment) =>
       segment.cwd && segment.projectId && !segment.cwd.includes("/.claude-mem/observer-sessions")
         ? [{ root: segment.cwd.replace(/\/$/, ""), projectId: segment.projectId }] : [])).sort((a, b) => b.root.length - a.root.length);
@@ -166,16 +204,21 @@ export class TranscriptMemoryWorker {
       views.push(...page); if (page.length < 1_000) return views;
     }
   }
-  private async enqueueCandidates(candidates: readonly ExtractedCandidate[], witnessEvent?: FoldEvent, trajectoryEvent?: FoldEvent): Promise<void> {
+  private async enqueueCandidates(candidates: readonly ExtractedCandidate[], witnessEvent?: FoldEvent, trajectoryEvent?: FoldEvent): Promise<number> {
     const jobs = await this.jobs();
     const merged = consolidateCandidateEvidence(candidates.map((candidate) => this.resolveCandidate(candidate)), {
       principalId: this.principalId!, audience: this.options.audience ?? "workspace",
       ...(this.options.spaceId === undefined ? {} : { spaceId: this.options.spaceId }),
     });
-    for (const candidate of merged) await jobs.enqueue("propose", [candidateKey(candidate, this.principalId!),
-      candidate.evidence.map(evidenceKey).sort(), candidate.extractor, ...(trajectoryEvent === undefined ? [] : [trajectoryEvent.id])], {
-      candidate, ...(witnessEvent === undefined ? {} : { witnessEvent }), ...(trajectoryEvent === undefined ? {} : { trajectoryEvent }),
-    } satisfies ProposalPayload, this.now());
+    let admitted = 0;
+    for (const candidate of merged) {
+      const identity = [candidateKey(candidate, this.principalId!), candidate.evidence.map(evidenceKey).sort(), candidate.extractor, ...(trajectoryEvent === undefined ? [] : [trajectoryEvent.id])];
+      if (await jobs.get(jobs.identify("propose", identity)) === undefined) admitted++;
+      await jobs.enqueue("propose", identity, {
+        candidate, ...(witnessEvent === undefined ? {} : { witnessEvent }), ...(trajectoryEvent === undefined ? {} : { trajectoryEvent }),
+      } satisfies ProposalPayload, this.now());
+    }
+    return admitted;
   }
   async extractRun(run: TranscriptRun, runEventId: string): Promise<RunExtraction> {
     const detail = await this.options.client.transcriptRun(run.id);
@@ -475,11 +518,247 @@ export class TranscriptMemoryWorker {
     const current = await (await this.jobs()).get(job.id);
     return { proposed: result.proposed, ...(current?.reason === undefined ? {} : { skippedReason: current.reason }) };
   }
+  private rememberEpisodeRun(run: TranscriptRun): void {
+    this.episodeRuns.set(run.id, run);
+    if (run.projectId !== undefined) this.episodeProjects.add(run.projectId);
+    for (const segment of run.segments) if (segment.projectId !== undefined) this.episodeProjects.add(segment.projectId);
+  }
+  private episodePolicy(): string {
+    return processingDigest({ scheduler: "episode-window-v1", audience: this.options.audience ?? "workspace", every: this.options.episodeEveryEvents ?? 25,
+      elapsedMs: this.options.episodeElapsedMs ?? 300_000, capacity: EPISODE_CAPACITY, enabled: this.options.episodeFormation === true,
+      sourceKinds: MEMORY_WORKER_EVENT_KINDS, publication: "content-limited-v1" });
+  }
+  /** Episode output is project-scoped workspace content; restricted sources never feed it. */
+  private publishableSource(event: FoldEvent): boolean {
+    const scope = event.capture?.scope;
+    return (scope?.space === undefined || scope.space === this.options.spaceId) && scope?.creator === undefined;
+  }
+  private canPublishMemory(memory: PersonalMemory): boolean {
+    return memory.audience === (this.options.audience ?? "workspace") && memory.spaceId === this.options.spaceId;
+  }
+  private async authorizedSource(eventId: string, expected?: FoldEvent): Promise<FoldEvent> {
+    const authorized = await this.options.client.eventById(eventId);
+    if (authorized === undefined) throw new JobDisposition("waiting", "source-event-unavailable");
+    if (expected !== undefined && processingDigest(authorized) !== processingDigest(expected)) throw new JobDisposition("waiting", "source-event-changed");
+    if (!this.publishableSource(authorized)) throw new JobDisposition("excluded", "source-publication-scope-incompatible");
+    return authorized;
+  }
+  private async episodeProject(event: FoldEvent): Promise<string | undefined> {
+    if ((this.options.audience ?? "workspace") !== "workspace") return undefined;
+    const projects = new Set<string>();
+    const repo = event.capture.identity?.repo;
+    if (repo !== undefined && this.episodeProjects.has(repo)) projects.add(repo);
+    const addRun = (run: TranscriptRun | undefined) => {
+      if (run?.projectId !== undefined) projects.add(run.projectId);
+      for (const segment of run?.segments ?? []) if (segment.projectId !== undefined) projects.add(segment.projectId);
+    };
+    for (const record of transcriptRecordsFromEvent(event)) {
+      if (record.recordType === "run") { this.rememberEpisodeRun(record.run); addRun(record.run); }
+      if (record.recordType === "chunk") addRun(this.episodeRuns.get(record.chunk.runId));
+    }
+    if (event.kind === "transcript.derivation-chunk-recorded") for (const change of event.changes) if (change.verb === "create") {
+      const parsed = transcriptDerivationChunkSchema.safeParse(change.after.chunk);
+      if (parsed.success) addRun(this.episodeRuns.get(parsed.data.runId));
+    }
+    for (const record of memoryLogRecordsFromEvent(event)) {
+      const memoryId = record.recordType === "recorded" ? record.memory.id : record.memoryId;
+      const memory = await this.options.client.memoryById(memoryId);
+      if (memory === undefined || !this.canPublishMemory(memory)) return undefined;
+      for (const projectId of applicableProjects(memory)) projects.add(projectId);
+    }
+    return projects.size === 1 ? [...projects][0] : undefined;
+  }
+  /** Opens the exact episode window scheduler inside the leased ledger; later opens reuse its checkpoint. */
+  async openEpisodeScheduler(initialSequence = "0"): Promise<DurableWindowScheduler> {
+    if (this.episodeScheduler !== undefined) return this.episodeScheduler;
+    const jobs = await this.jobs();
+    const policy = this.episodePolicy();
+    const scheduler = new DurableWindowScheduler(jobs, policy, {
+      every: this.options.episodeEveryEvents ?? 25, elapsedMs: this.options.episodeElapsedMs ?? 300_000, capacity: EPISODE_CAPACITY,
+      deliver: (window, anchor) => jobs.enqueue("episode", [window.id, policy], { window, anchor } satisfies EpisodePayload, this.now()),
+    });
+    await scheduler.open(initialSequence);
+    this.episodeScheduler = scheduler;
+    return scheduler;
+  }
+  /**
+   * Durably schedules all work derived from one delivered event before its transport acknowledgement.
+   * Returns the number of newly admitted jobs; replays are idempotent.
+   */
+  async scheduleEvent(event: FoldEvent, ingestionSequence?: string): Promise<number> {
+    const jobs = await this.jobs();
+    let queued = 0;
+    const admit = async (kind: WorkerJob["kind"], identity: unknown, payload: unknown) => {
+      if (await jobs.get(jobs.identify(kind, identity)) !== undefined) return;
+      await jobs.enqueue(kind, identity, payload, this.now()); queued++;
+    };
+    // Unscoped worker output must never carry evidence from a restricted transcript import.
+    if (event.kind === "transcript.run-imported" && this.publishableSource(event)) {
+      for (const record of transcriptRecordsFromEvent(event)) if (record.recordType === "run") {
+        this.rememberEpisodeRun(record.run);
+        await admit("extract-run", [record.run.id, record.run.artifactId, RULE_EXTRACTOR], { run: record.run, eventId: event.id } satisfies RunPayload);
+      }
+    } else if (event.kind === "terminal.observation") queued += await this.enqueueCandidates(extractLiveMemoryCandidates(event), event); else if (event.kind === "trajectory.recorded") await admit("verify-trajectory", [event.id, jobDigest(event), "attested-checkpoint-v1"], { event });
+    if (COGNITION_TRIGGER_KINDS.includes(event.kind) && this.options.continuousCognition) await admit("cognition-plan", [event.id], { event });
+    if (this.options.episodeFormation === true && ingestionSequence !== undefined) {
+      const scheduler = await this.openEpisodeScheduler("0");
+      const restricted = !this.publishableSource(event);
+      const projectId = restricted ? undefined : await this.episodeProject(event);
+      await scheduler.observe(ingestionSequence, projectId === undefined ? undefined : {
+        event, projectId, partition: processingDigest({ projectId, workspace: event.capture.scope?.workspace, audience: this.options.audience ?? "workspace" }),
+        completion: completionSignal(event),
+      }, this.now(), restricted || projectId === undefined);
+    }
+    return queued;
+  }
+  /** Chosen-source episode formation: preview is read-only; queueing is idempotent per exact source set. */
+  async queueEpisodeSources(eventIds: readonly string[], projectId: string, queue = false) {
+    if (eventIds.length < 1 || eventIds.length > EPISODE_CAPACITY || new Set(eventIds).size !== eventIds.length || eventIds.some((id) => id.trim().length === 0) || projectId.trim().length === 0) throw new TypeError("Choose 1 to 200 distinct event IDs and one exact project ID");
+    if (this.options.episodeFormation !== true || (this.options.audience ?? "workspace") !== "workspace") throw new TypeError("Episode queueing requires the enabled workspace publication policy");
+    this.configureProjectRoots(await this.options.client.transcriptRuns());
+    const events: FoldEvent[] = [];
+    let sourceBytes = 0;
+    const problems: { eventId: string; reason: string }[] = [];
+    for (const id of [...eventIds].sort()) {
+      try {
+        const event = await this.authorizedSource(id);
+        if (await this.episodeProject(event) !== projectId) { problems.push({ eventId: id, reason: "project is unresolved, ambiguous, or different" }); continue; }
+        if (!(MEMORY_WORKER_EVENT_KINDS as readonly string[]).includes(event.kind)) { problems.push({ eventId: id, reason: "event kind is outside the episode source policy" }); continue; }
+        sourceBytes += Buffer.byteLength(JSON.stringify(event));
+        if (sourceBytes > 8_000_000) throw new TypeError("Chosen episode sources exceed the 8000000-byte queue admission budget; choose smaller explicit sets without omitting any sources");
+        events.push(event);
+      } catch (error) {
+        if (error instanceof JobDisposition) problems.push({ eventId: id, reason: error.reason });
+        else throw error;
+      }
+    }
+    if (problems.length > 0) {
+      if (queue) throw new TypeError("Episode queue refused: one or more chosen sources are unavailable or outside the requested publication scope; run preview");
+      return { mode: "dry-run", eligible: false, projectId, selected: eventIds.length, problems };
+    }
+    const policy = this.episodePolicy();
+    // Manual chosen sets have no transport cursor or elapsed-time deadline; zero times are explicit sentinels.
+    const identity = { version: 1 as const, policy, partition: processingDigest({ projectId, workspace: events[0]!.capture.scope.workspace, audience: "workspace" }), projectId,
+      trigger: "manual" as const, openedAt: 0, sealedAt: 0, sources: events.map((event) => ({ eventId: event.id, digest: processingDigest(event), sourceTime: event.at.t })) };
+    const window: SchedulingWindow = { ...identity, id: processingDigest(identity) };
+    let queued: boolean | undefined;
+    if (queue) {
+      const jobs = await this.jobs();
+      queued = await jobs.get(jobs.identify("episode", [window.id, policy])) === undefined;
+      if (queued) await jobs.enqueue("episode", [window.id, policy], { window, anchor: events.at(-1)! } satisfies EpisodePayload, this.now());
+    }
+    return { mode: queue ? "queue" : "dry-run", eligible: true, projectId, selected: events.length, windowId: window.id,
+      ...(queued === undefined ? {} : { queued }), sourceEventIds: events.map((event) => event.id), coverage: "chosen authorized source events only; no consumer cursor change or model call" };
+  }
+  private async applyEpisode(job: WorkerJob): Promise<void> {
+    const jobs = await this.jobs();
+    let payload = job.payload as EpisodePayload;
+    const save = async (next: EpisodePayload) => { payload = next; await jobs.put({ ...(await jobs.get(job.id) ?? job), payload: next, updatedAt: this.now() }); };
+    try { validateSchedulingWindow(payload.window); } catch { throw new JobDisposition("blocked", "invalid-episode-window-checkpoint"); }
+    const window = payload.window;
+    if (window.policy !== this.episodePolicy()) throw new JobDisposition("blocked", "episode-policy-changed");
+    if (window.projectId === undefined || window.sources.length > EPISODE_CAPACITY || window.sources.at(-1)?.eventId !== payload.anchor.id) throw new JobDisposition("blocked", "invalid-episode-job-scope");
+    for (const source of window.sources) {
+      const current = await this.authorizedSource(source.eventId);
+      if (processingDigest(current) !== source.digest) throw new JobDisposition("waiting", "episode-source-changed-or-unavailable");
+    }
+    if (payload.episode === undefined) {
+      if (payload.episodeContext === undefined) {
+        const page = await this.options.client.episodePage({ projectId: window.projectId, limit: 20 });
+        const context = page.items.filter((item) => item.projectId === window.projectId && item.audience === (this.options.audience ?? "workspace") && item.spaceId === undefined).slice(0, 5);
+        await save({ ...payload, episodeContext: { ids: context.map((item) => item.episodeId), omitted: page.total > context.length } });
+      }
+      try {
+        const episode = await this.options.client.synthesizeEpisodeWindow({ windowId: window.id, sourceEventIds: window.sources.map((source) => source.eventId),
+          projectId: window.projectId, audience: this.options.audience ?? "workspace", trigger: window.trigger,
+          contextEpisodeIds: payload.episodeContext!.ids,
+          ...(window.parentWindowId === undefined ? {} : { parentWindowId: window.parentWindowId }) });
+        episodeWindowInputSchema.parse(episode);
+        // Persist the prepared model output before publication; a lost response republishes without a second model call.
+        await save({ ...payload, episode });
+      } catch (error) {
+        if (!(error instanceof SuperBrainApiError) || error.status !== 413 || error.code !== "episode_input_too_large") throw error;
+        if (payload.episodeContext!.ids.length > 0) {
+          await save({ ...payload, episodeContext: { ids: [], omitted: true } });
+          throw new JobDisposition("waiting", "episode input budget exceeded; retrying same sources without optional prior context");
+        }
+        if (window.sources.length === 1) throw new JobDisposition("blocked", "single episode source exceeds model input budget; preserve source and increase supported budget or add record-level splitting");
+        const middle = Math.ceil(window.sources.length / 2);
+        for (const sources of [window.sources.slice(0, middle), window.sources.slice(middle)]) {
+          const { id: _id, ...previous } = window;
+          const identity = { ...previous, parentWindowId: window.id, trigger: "capacity" as const, sources };
+          const child: SchedulingWindow = { ...identity, id: processingDigest(identity) };
+          const anchor = await this.authorizedSource(sources.at(-1)!.eventId);
+          await jobs.enqueue("episode", [child.id, window.policy], { window: child, anchor } satisfies EpisodePayload, this.now());
+        }
+        return; // Split into two durable child windows after the model input budget refusal.
+      }
+    }
+    const prepared = payload.episode!;
+    if (prepared.sources.length !== window.sources.length || prepared.sources.some((source) => !window.sources.some((expected) => expected.eventId === source.eventId && expected.digest === source.sha256)) ||
+      prepared.projectId !== window.projectId || prepared.windowId !== window.id || prepared.parentWindowId !== window.parentWindowId ||
+      prepared.audience !== (this.options.audience ?? "workspace") || prepared.spaceId !== undefined) throw new JobDisposition("blocked", "episode-preparation-scope-changed");
+    try { await this.options.client.publishEpisodeWindow(prepared); }
+    catch (error) {
+      // A concurrent revision invalidates the prepared output; the next attempt re-prepares from current context.
+      if (error instanceof SuperBrainApiError && error.status === 409) { const { episode: _episode, episodeContext: _context, ...rest } = payload; await save(rest); }
+      throw error;
+    }
+  }
+  /** Historical transcript inventory: dry-run reads nothing locally; queueing is idempotent with watch/reconcile. */
+  async queueTranscriptBackfill(queue = false, limit?: number) {
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) throw new TypeError("Backfill limit must be a positive integer");
+    const archive = await this.archiveRuns();
+    const results: { runId: string; status: "eligible" | "queued" | "existing" | "unavailable" }[] = [];
+    for (const run of limit === undefined ? archive.runs : archive.runs.slice(0, limit)) {
+      const eventId = archive.eventIds.get(run.id);
+      if (eventId === undefined) { results.push({ runId: run.id, status: "unavailable" }); continue; }
+      if (!queue) { results.push({ runId: run.id, status: "eligible" }); continue; }
+      const jobs = await this.jobs();
+      const identity = [run.id, run.artifactId, RULE_EXTRACTOR];
+      const existing = await jobs.get(jobs.identify("extract-run", identity));
+      if (existing === undefined) await this.enqueueRun(run, eventId);
+      results.push({ runId: run.id, status: existing === undefined ? "queued" : "existing" });
+    }
+    return { mode: queue ? "queue" : "dry-run", runs: results.length,
+      counts: Object.fromEntries((["eligible", "queued", "existing", "unavailable"] as const).map((status) => [status, results.filter((item) => item.status === status).length])),
+      coverage: "authorized run inventory; artifact availability is checked during processing", results };
+  }
+  /** Restores candidate evidence missing from accepted memories through attributed, idempotent contributions. */
+  async repairAcceptedEvidence(apply = false): Promise<{ readonly inspected: number; readonly missingMemories: number; readonly repairable: number; readonly repaired: number }> {
+    const accepted = (await repairRequest(() => this.candidateViews())).filter((view) => view.status === "accepted");
+    let missingMemories = 0, repairable = 0, repaired = 0;
+    for (const view of accepted) {
+      if (view.decision?.kind !== "accepted") continue;
+      const memoryId = view.decision.memoryId;
+      const memory = await repairRequest(() => this.options.client.memoryById(memoryId));
+      if (memory === undefined) { missingMemories += 1; continue; }
+      const known = new Set((memory.evidence ?? []).map(evidenceKey));
+      const missing = uniqueEvidence(view.candidate.evidence).filter((item) => !known.has(evidenceKey(item)));
+      if (missing.length === 0) continue;
+      repairable += 1;
+      if (!apply) continue;
+      let current = memory;
+      for (let offset = 0; offset < missing.length; offset += 100) {
+        const evidence = missing.slice(offset, offset + 100);
+        const t = Math.max(this.now(), current.updatedAt + 1);
+        // Deterministic per exact repair so a replayed command is idempotent server-side.
+        const stamp = { id: `memory-worker-repair-${jobDigest([current.id, current.revision, evidence.map(evidenceKey)])}`, t, worldDate: new Date(t).toISOString().slice(0, 10) };
+        const base = current;
+        current = (await repairRequest(() => this.options.client.contributeMemoryEvidence(base.id, { evidence, expectedRevision: base.revision }, { stamp }))).memory;
+      }
+      repaired += 1;
+    }
+    return { inspected: accepted.length, missingMemories, repairable, repaired };
+  }
   async archiveRuns(): Promise<{ runs: readonly TranscriptRun[]; eventIds: ReadonlyMap<string, string> }> {
     const [runs, entries] = await Promise.all([this.options.client.transcriptRuns(), this.options.client.listEvents({ kinds: ["transcript.run-imported"] })]);
     this.configureProjectRoots(runs);
     const eventIds = new Map<string, string>();
-    for (const { event } of entries) for (const record of transcriptRecordsFromEvent(event)) if (record.recordType === "run") eventIds.set(record.run.id, event.id);
+    for (const { event } of entries) {
+      if (!this.publishableSource(event)) continue; // Restricted imports are reported as unavailable, never extracted.
+      for (const record of transcriptRecordsFromEvent(event)) if (record.recordType === "run") eventIds.set(record.run.id, event.id);
+    }
     for (const { event } of entries) this.rememberEvidenceTime(event.id, event.at.t);
     return { runs, eventIds };
   }
@@ -503,7 +782,7 @@ export class TranscriptMemoryWorker {
     const jobs = await this.jobs();
     let proposed = 0, promoted = 0;
     for (const kind of ["extract-run", "extract-turn", "verify-trajectory", "propose"] as const) {
-      const pending = (await jobs.active()).filter((job) => job.kind === kind && job.nextAttemptAt <= this.now()).slice(0, this.options.maxCandidatesPerRun ?? 25);
+      const pending = (await jobs.active()).filter((job) => job.kind === kind && job.state !== "blocked" && job.nextAttemptAt <= this.now()).slice(0, this.options.maxCandidatesPerRun ?? 25);
       for (const job of pending) {
         if (this.closing) break;
         try {
@@ -547,12 +826,13 @@ export class TranscriptMemoryWorker {
   }
   private async drainModels(): Promise<void> {
     const jobs = await this.jobs();
-    for (const kind of ["cognition-plan", "synthesis"] as const) {
-      const pending = (await jobs.active()).filter((job) => job.kind === kind && job.nextAttemptAt <= this.now()).slice(0, kind === "synthesis" ? 1 : 25);
+    for (const kind of ["cognition-plan", "synthesis", "episode"] as const) {
+      const pending = (await jobs.active()).filter((job) => job.kind === kind && job.state !== "blocked" && job.nextAttemptAt <= this.now()).slice(0, kind === "synthesis" ? 1 : kind === "episode" ? 5 : 25);
       for (const job of pending) {
         if (this.closing) return;
         try {
           if (kind === "cognition-plan") await this.planSynthesis((job.payload as { event: FoldEvent }).event);
+          else if (kind === "episode") await this.applyEpisode(job);
           else await this.applySynthesis(job);
           await jobs.put({ ...(await jobs.get(job.id))!, state: "completed", updatedAt: this.now() });
         } catch (error) { await this.failJob(job, error); }
@@ -570,11 +850,17 @@ export class TranscriptMemoryWorker {
     const attempts = latest.attempts + (state === "retry" ? 1 : 0);
     let reason = disposition?.reason ?? (this.closing ? "worker-shutdown" : error instanceof SuperBrainApiError ? error.code : "processing-error");
     if (state === "retry" && job.kind === "synthesis" && attempts >= (this.options.maxModelAttempts ?? 3)) { state = "exhausted"; reason = "model-attempts-exhausted"; }
+    // Episode windows own their exact sources; exhausted model attempts stay preserved for explicit operator retry.
+    if (state === "retry" && job.kind === "episode" && attempts >= (this.options.maxModelAttempts ?? 3)) { state = "blocked"; reason = "model-attempts-exhausted"; }
     const delay = Math.min(60 * 60_000, (this.options.retryBaseMs ?? 1_000) * 2 ** Math.min(Math.max(attempts - 1, 0), 12));
     await jobs.put({ ...latest, state, attempts, updatedAt: this.now(), nextAttemptAt: this.now() + delay, reason });
     this.options.reportWarning?.(`Processing job ${job.id} is ${state}: ${reason}`);
   }
   async coverage(): Promise<ProcessingCoverage> { return (await this.jobs()).coverage(); }
+  /** Sanitized window-scheduler aggregates (no source identifiers). */
+  async schedulingCoverage() { return readSchedulingCoverage(await this.jobs()); }
+  /** Explicit operator recovery for blocked, waiting and retrying work. */
+  async retryBlocked(): Promise<number> { return (await this.jobs()).retryBlocked(this.now()); }
   async retryJob(id: string): Promise<void> {
     const jobs = await this.jobs();
     const original = await jobs.get(id);
@@ -583,6 +869,12 @@ export class TranscriptMemoryWorker {
   }
   async watch(options: { consumerId: string; replay?: "tail" | "all"; signal?: AbortSignal }): Promise<void> {
     await this.jobs();
+    if (this.options.episodeFormation === true) {
+      this.configureProjectRoots(await this.options.client.transcriptRuns());
+      // A new scheduler policy starts at the subscriber's current ingestion position, never reinterpreting history.
+      const initial = (await this.options.client.ingestionConsumerStatus(options.consumerId, { kinds: MEMORY_WORKER_EVENT_KINDS })).cursor?.sequence ?? "0";
+      await this.openEpisodeScheduler(initial);
+    }
     const controller = new AbortController();
     this.watchController = controller;
     const abort = () => controller.abort(options.signal?.reason);
@@ -605,21 +897,27 @@ export class TranscriptMemoryWorker {
           catch { this.options.reportWarning?.("Artifact reconciliation will retry independently"); }
         }
         if (controller.signal.aborted || this.closing) break;
+        try { await this.episodeScheduler?.tick(this.now()); }
+        catch { this.options.reportWarning?.("Episode window sealing will retry independently"); }
         await this.drainJobs();
         await pause();
       }
     })();
     const consumer = this.options.client.consumeEvents({ consumerId: options.consumerId, replay: options.replay ?? "tail", signal: controller.signal,
-        kinds: ["transcript.run-imported", "terminal.observation", "trajectory.recorded", "memory.recorded", "memory.revised"],
-        onEvent: async ({ entry }) => {
-          if (this.closing) throw new Error("Worker is closing");
-          const event = entry.event;
-          if (event.kind === "transcript.run-imported") {
-            for (const record of transcriptRecordsFromEvent(event)) if (record.recordType === "run") await this.enqueueRun(record.run, event.id);
-          } else if (event.kind === "terminal.observation") await this.enqueueCandidates(extractLiveMemoryCandidates(event), event);
-          else if (event.kind === "trajectory.recorded") await (await this.jobs()).enqueue("verify-trajectory", [event.id, jobDigest(event), "attested-checkpoint-v1"], { event }, this.now());
-          if (["trajectory.recorded", "memory.recorded", "memory.revised"].includes(event.kind) && this.options.continuousCognition) {
-            await (await this.jobs()).enqueue("cognition-plan", [event.id], { event }, this.now());
+        kinds: MEMORY_WORKER_EVENT_KINDS,
+        // Every delivered event is durably scheduled before onEvent returns, so acknowledgements may be batched.
+        checkpointEvery: 100,
+        onEvent: async ({ entry, cursor }) => {
+          let paused = false;
+          for (;;) {
+            if (this.closing) throw new Error("Worker is closing");
+            try { await this.scheduleEvent(entry.event, cursor?.sequence); return; }
+            catch (error) {
+              if (!(error instanceof ProcessingBackpressureError)) throw error;
+              if (!paused) this.options.reportWarning?.("Processing capacity reached; intake is paused while durable jobs drain");
+              paused = true;
+              await delay(this.options.pollIntervalMs ?? 1_000, undefined, { signal: controller.signal });
+            }
           }
         },
       });

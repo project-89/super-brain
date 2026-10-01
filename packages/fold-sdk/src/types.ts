@@ -94,14 +94,20 @@ export interface FoldSdkStore {
   readonly immutableSnapshots?: boolean;
   readProjectionCheckpoint?(key: FoldSdkProjectionCheckpointKey): Promise<FoldSdkProjectionCheckpoint | undefined>;
   writeProjectionCheckpoint?(checkpoint: FoldSdkProjectionCheckpoint): Promise<boolean>;
+  eventById?(eventId: string): Promise<FoldLogEntry | undefined>;
+  systemProjection?(access: FoldSdkAccessContext, include: "canon" | "canon+draft"): Promise<FoldSdkSystemProjection>;
   readonly stableReads?: boolean;
   readonly requireDurableCommands?: boolean;
+  /** Reused raw event object references never change content; enables envelope reuse. */
+  readonly immutableEventReferences?: boolean;
   read(options?: { readonly missing?: "error" | "empty" }): Promise<{
     readonly entries: readonly FoldLogEntry[];
     readonly revision?: string;
   }>;
   append(entry: FoldLogEntry): Promise<void>;
   appendMany?(entries: readonly FoldLogEntry[]): Promise<void>;
+  appendValidated?(entry: FoldLogEntry): Promise<"appended" | "unchanged">;
+  appendManyValidated?(entries: readonly FoldLogEntry[]): Promise<void>;
   revision?(): Promise<string>;
   /** Atomic compare-and-swap, including the retry receipt. */
   commit?(entries: readonly FoldLogEntry[], options: FoldCommitOptions): Promise<FoldCommandReceipt>;
@@ -111,6 +117,12 @@ export interface FoldSdkStore {
 export interface FoldSdkCursor {
   readonly t: number;
   readonly eventId: string;
+}
+
+/** Transport position, distinct from a source-time replay/projection cursor. */
+export interface FoldIngestionCursor {
+  readonly kind: "ingestion";
+  readonly sequence: string;
 }
 
 export interface FoldSdkReadOptions {
@@ -129,6 +141,12 @@ export interface FoldSdkProjectOptions extends FoldSdkReadOptions {
 export interface FoldSdkProjection {
   readonly entries: readonly FoldLogEntry[];
   readonly state: FoldState;
+}
+
+export interface FoldSdkSystemProjection {
+  readonly state: FoldState;
+  readonly appliedEventCount: number;
+  readonly appliedChangeCount: number;
 }
 
 export type FoldEventAccessDenialReason =

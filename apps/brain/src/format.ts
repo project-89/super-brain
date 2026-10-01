@@ -25,6 +25,60 @@ export function memoryContent(memory: PersonalMemory): string {
   return JSON.stringify(memory.content, null, 2);
 }
 
+export function readableMemoryContent(content: JsonValue): string {
+  if (typeof content === "string") return content;
+  if (content === null) return "";
+  if (typeof content !== "object") return String(content);
+  if (Array.isArray(content)) return content.map((item) => typeof item === "string" ? item : JSON.stringify(item)).join("\n");
+  const preferred = ["synthesis", "statement", "narrative", "subtitle", "summary", "detail"];
+  const passages = preferred.flatMap((key) => typeof content[key] === "string" ? [content[key]] : []);
+  const facts = Array.isArray(content.facts)
+    ? content.facts.flatMap((fact) => typeof fact === "string" ? [`- ${fact}`] : [])
+    : [];
+  return [...new Set([...passages, ...facts])].join("\n\n") || JSON.stringify(content, null, 2);
+}
+
+export function memorySourceLabel(source: string): string {
+  if (source === "claude-mem-observation") return "Imported Claude memory";
+  if (source === "transcript-rule") return "Session learning";
+  if (source === "continuous-cognition") return "Cross-project synthesis";
+  if (source === "live-reasoning-checkpoint") return "Live reasoning checkpoint";
+  return source.replaceAll("-", " ");
+}
+
+export function shortIdentifier(value: string, head = 8, tail = 6): string {
+  if (value.length <= head + tail + 3) return value;
+  return `${value.slice(0, head)}...${value.slice(-tail)}`;
+}
+
+export function eventKindLabel(kind: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    "terminal.observation": "Agent activity",
+    lifecycle: "Session presence",
+    "memory.candidate-proposed": "Memory proposed",
+    "memory.candidate-accepted": "Memory approved",
+    "memory.candidate-rejected": "Memory rejected",
+    "memory.recorded": "Memory stored",
+    "memory.feedback-recorded": "Memory feedback",
+    "transcript.project-recorded": "Project discovered",
+    "transcript.artifact-imported": "Transcript retained",
+    "transcript.run-imported": "Run archived",
+    "transcript.chunk-imported": "Run evidence indexed",
+    "trajectory.tree-recorded": "Decision path updated",
+    "trajectory.recorded": "Run outcome recorded",
+  };
+  return labels[kind] ?? kind.replaceAll(/[.-]/g, " ");
+}
+
+export function eventCategory(kind: string): string {
+  if (kind === "terminal.observation") return "Activity";
+  if (kind === "lifecycle") return "Presence";
+  if (kind.startsWith("transcript.")) return "History";
+  if (kind.startsWith("memory.")) return "Knowledge";
+  if (kind.startsWith("trajectory.")) return "Decisions";
+  return "System";
+}
+
 export function compactJson(value: JsonValue | undefined): string {
   if (value === undefined) return "-";
   if (typeof value === "string") return value;

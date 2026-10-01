@@ -17,7 +17,21 @@ import {
   pruneHookArtifacts,
   type CaptureConfig,
   type CaptureSession,
+  type HookAuthority,
 } from "../src/index.js";
+
+const operator: HookAuthority = { kind: "local-operator", principalId: "operator:urn:sensor:super-brain-capture:test", authenticatedAt: "2026-09-01T00:00:00.000Z" };
+
+async function gitRepository(root: string): Promise<string> {
+  const { execFileSync } = await import("node:child_process");
+  const repository = join(root, "repo");
+  await mkdir(repository);
+  execFileSync("git", ["init", "-q", repository]);
+  await writeFile(join(repository, "file.txt"), "initial\n");
+  execFileSync("git", ["-C", repository, "add", "file.txt"]);
+  execFileSync("git", ["-C", repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial"]);
+  return repository;
+}
 
 function config(root: string): CaptureConfig {
   return parseCaptureConfig({
@@ -183,6 +197,67 @@ describe("capture daemon", () => {
     expect(Object.values(restored.sessions)[0]).toMatchObject({ active: false, finalized: true });
   });
 
+  it("keeps agent verdict claims separate from operator-authorized decisions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "capture-verdict-authority-"));
+    const repository = await gitRepository(root);
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const vault = new HookVault(current.vaultRoot);
+    const state = new StateStore(current.stateRoot);
+    const engine = new CaptureEngine(current, state, vault, spool);
+    await engine.initialize();
+    const common = { session_id: "agent-claim", cwd: repository };
+    // A caller-selected authority field is an agent claim, never operator provenance.
+    const claim = { ...common, hook_event_name: "HumanDecision", summary: "I think this works", verdict: "success", authority: "operator" };
+    await expect(engine.ingest("codex", claim)).rejects.toThrow("operator authority");
+
+    const trusted = { ...common, session_id: "operator-claim" };
+    await engine.ingest("codex", { ...trusted, hook_event_name: "UserPromptSubmit", prompt: "review" });
+    const expected = await engine.acceptanceContext("codex", "operator-claim");
+    await engine.ingest("codex", { ...trusted, hook_event_name: "HumanDecision", summary: "Checked",
+      acceptance: { version: 1, taskId: expected.taskId, attemptId: expected.attemptId, revisionId: expected.revisionId, verdict: "success" } }, operator);
+    const restarted = new CaptureEngine(current, state, vault, spool);
+    await restarted.initialize();
+    await restarted.ingest("codex", { ...trusted, hook_event_name: "Stop" });
+    const jobs = (await spool.list()).map(({ job }) => job);
+    const approved = jobs.find((job) => job.kind === "trajectory" && job.input.outcome === "success");
+    expect(approved).toMatchObject({ input: { outcomeEvidence: { kind: "operator-verdict", eventId: expect.any(String), artifactId: expect.any(String) } } });
+    expect((await vault.sessionArtifacts("codex", "operator-claim")).some(({ authority }) => authority?.kind === "local-operator")).toBe(true);
+    expect(await vault.sessionArtifacts("codex", "agent-claim")).toEqual([]);
+  });
+
+  it("retains explicit harness errors with evidence and does not invent verification success", async () => {
+    const root = await mkdtemp(join(tmpdir(), "capture-verdict-errors-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "error-session", cwd: root };
+    await engine.ingest("codex", { ...common, hook_event_name: "PostToolUse", tool_name: "exec_command", tool_input: { cmd: "pnpm test" }, tool_response: { output: "still running" } });
+    await engine.ingest("codex", { ...common, hook_event_name: "StopFailure", error_type: "provider_error" });
+    const jobs = (await spool.list()).map(({ job }) => job);
+    expect(jobs.find((job) => job.kind === "trajectory")).toMatchObject({ input: { outcome: "failure", outcomeEvidence: { kind: "harness-error", eventId: expect.any(String) } } });
+    expect(JSON.stringify(jobs)).toContain("test verification unknown");
+    expect(JSON.stringify(jobs)).not.toContain("verification passed");
+  });
+
+  it.each(["PreToolUse", "PostToolUseFailure"])("invalidates an operator verdict after a mutating tool: %s", async (hook) => {
+    const root = await mkdtemp(join(tmpdir(), "capture-verdict-stale-"));
+    const repository = await gitRepository(root);
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "stale-verdict", cwd: repository };
+    await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "review" });
+    const expected = await engine.acceptanceContext("codex", "stale-verdict");
+    await engine.ingest("codex", { ...common, hook_event_name: "HumanDecision", summary: "Checks out",
+      acceptance: { version: 1, taskId: expected.taskId, attemptId: expected.attemptId, revisionId: expected.revisionId, verdict: "success" } }, operator);
+    await engine.ingest("codex", { ...common, hook_event_name: hook, tool_name: "apply_patch" });
+    await engine.ingest("codex", { ...common, hook_event_name: "Stop" });
+    expect((await spool.list()).find(({ job }) => job.kind === "trajectory")?.job).toMatchObject({ input: { outcome: "unknown" } });
+  });
+
   it("invalidates stale verification after a later mutation and links tool evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "super-brain-capture-outcome-"));
     const current = config(root);
@@ -264,19 +339,19 @@ describe("capture daemon", () => {
     const spool = new DurableSpool(current.stateRoot);
     const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
     await engine.initialize();
-    const common = { session_id: "path-pages", cwd: process.cwd() };
+    const common = { session_id: "path-pages", cwd: root };
     await engine.ingest("claude-code", { ...common, hook_event_name: "SessionStart" });
     await engine.ingest("claude-code", {
       ...common,
       hook_event_name: "PostToolUse",
       tool_name: "Edit",
       tool_response: { success: true },
-      tool_input: { file_path: Array.from({ length: 205 }, (_, index) => join(process.cwd(), `file-${index}.ts`)) },
+      tool_input: { file_path: Array.from({ length: 205 }, (_, index) => join(root, `file-${index}.ts`)) },
     });
     await engine.ingest("claude-code", {
       ...common,
       hook_event_name: "FileChanged",
-      file_path: join(process.cwd(), "package.json"),
+      file_path: join(root, "package.json"),
       event: "change",
     });
 
@@ -299,7 +374,7 @@ describe("capture daemon", () => {
     const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
     await engine.initialize();
     for (const [sessionId, tool] of [["comparison-a", "Read"], ["comparison-b", "Search"]] as const) {
-      const common = { session_id: sessionId, cwd: process.cwd() };
+      const common = { session_id: sessionId, cwd: root };
       await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
       await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Fix the same issue" });
       await engine.ingest("codex", { ...common, hook_event_name: "PreToolUse", tool_name: tool, tool_use_id: `${sessionId}-tool` });

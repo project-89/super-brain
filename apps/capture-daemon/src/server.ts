@@ -5,6 +5,7 @@ import { readProcessingStatus } from "./processing-status.js";
 import { normalizeHookEvidence } from "./evidence.js";
 import { CaptureReceiptQueue, receiptEncryptionKey } from "./receipts.js";
 import { CaptureEngine } from "./capture.js";
+import type { DeliverySnapshot } from "./delivery.js";
 import { DurableSpool, readHookVaultArtifact, readRelayFailureSummary } from "./storage.js";
 import { readTranscriptArtifactPage, type TranscriptVaultSource } from "./transcript-vault.js";
 import type { CaptureConfig, CapturePolicyPatch, CapturePolicySettings, HookSource } from "./types.js";
@@ -97,6 +98,7 @@ export class CaptureHttpServer {
     private readonly spool: DurableSpool,
     private readonly updatePolicy?: (patch: CapturePolicyPatch) => Promise<CaptureConfig>,
     private readonly vaultEncryptionKey?: Uint8Array,
+    private readonly deliverySnapshot?: () => DeliverySnapshot,
   ) {}
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
@@ -144,6 +146,7 @@ export class CaptureHttpServer {
           ...spool,
           relayFailures,
           receipts,
+          ...(this.deliverySnapshot === undefined ? {} : { delivery: this.deliverySnapshot() }),
           policy: {
             reasoning: this.config.reasoningPolicy,
             encryptedReasoning: this.config.retainEncryptedReasoning ? "retain" : "exclude",
@@ -185,7 +188,7 @@ export class CaptureHttpServer {
         send(response, 200, await this.engine.acceptanceContext(source, sessionId));
         return;
       }
-      const artifactMatch = /^\/artifacts\/(claude-code|codex)\/([a-f0-9]{64})$/i.exec(url.pathname);
+      const artifactMatch = /^\/artifacts\/(claude-code|codex|gemini|hermes)\/([a-f0-9]{64})$/i.exec(url.pathname);
       if (artifactMatch !== null) {
         if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) {
           send(response, 401, { error: "unauthorized" });

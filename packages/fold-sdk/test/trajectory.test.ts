@@ -85,6 +85,43 @@ describe("SDK trajectory API", () => {
     expect((await new FoldSdk(store).trajectoryTasks(context.access))[0]?.trajectoryCount).toBe(1);
   });
 
+  it("corrects outcomes without changing the run, preserves history on replay, and rejects stale reviews", async () => {
+    const store = new MemoryStore();
+    const sdk = new FoldSdk(store);
+    const context = trajectoryContext();
+    await sdk.recordTrajectoryTree(context, stamp("tree", 1), tree);
+    await sdk.recordTrajectory(context, stamp("run", 2), trajectory("run-a"));
+    const input = { taskId: tree.taskId, trajectoryId: "run-a", outcome: "failure" as const, reason: "Manual check found a broken refresh flow", previousEventId: null };
+    const review = await sdk.recordTrajectoryOutcome(context, stamp("review", 3), input);
+    expect(review.event.capture?.scope).toEqual({ workspace: context.access.workspaceId, space: "space-a" });
+    expect((await sdk.trajectoryReport(context.access, tree.taskId))?.records[0]).toMatchObject({
+      recordedOutcome: "success", outcomeReview: { eventId: "review", actorId: context.access.principalId },
+      trajectory: { outcome: "failure", outcomeEvidence: { kind: "operator-verdict", eventId: "review" } },
+    });
+    await expect(sdk.recordTrajectoryOutcome(context, stamp("review", 3), input)).resolves.toEqual(review);
+    await expect(sdk.recordTrajectoryOutcome(context, stamp("stale", 4), input)).rejects.toBeInstanceOf(FoldSdkConflictError);
+    await expect(sdk.recordTrajectoryOutcome(context, stamp("early", 1), { ...input, previousEventId: "review" })).rejects.toBeInstanceOf(FoldSdkConflictError);
+    await sdk.recordTrajectoryOutcome(context, stamp("withdraw", 5), { ...input, outcome: "unknown", previousEventId: "review", reason: "The failed check used an outdated environment" });
+    const replay = new FoldSdk(store);
+    expect(await replay.trajectoryOutcomes(context.access, tree.taskId, "run-a")).toHaveLength(2);
+    expect((await replay.trajectoryTasks(context.access))[0]).toMatchObject({ successCount: 0, failureCount: 0, unknownCount: 1, lastRecordedAt: 5 });
+    expect((await store.read()).entries.find(({ event }) => event.id === "run")?.event.changes[0]).toMatchObject({ after: { trajectory: { outcome: "success" } } });
+    await expect(replay.recordTrajectory(context, stamp("run", 2), trajectory("run-a"))).resolves.toMatchObject({ record: { trajectory: { outcome: "success" } } });
+  });
+
+  it("requires human authors and does not reveal or rescope inaccessible runs", async () => {
+    const sdk = new FoldSdk(new MemoryStore());
+    const context = trajectoryContext();
+    await sdk.recordTrajectoryTree(context, stamp("tree", 1), tree);
+    await sdk.recordTrajectory(context, stamp("run", 2), trajectory("run-a"));
+    const input = { taskId: tree.taskId, trajectoryId: "run-a", outcome: "success" as const, reason: "Operator verified the refresh flow", previousEventId: null };
+    await expect(sdk.recordTrajectoryOutcome({ ...context, author: { kind: "ingest", id: "agent" } }, stamp("agent", 3), input)).rejects.toThrow("human author");
+    const hidden = trajectoryContext("space-b");
+    await expect(sdk.recordTrajectoryOutcome(hidden, stamp("hidden", 4), input)).rejects.toBeInstanceOf(TrajectoryTaskUnavailableError);
+    await expect(sdk.trajectoryOutcomes(hidden.access, tree.taskId, "run-a")).rejects.toBeInstanceOf(TrajectoryTaskUnavailableError);
+    await expect(sdk.recordTrajectoryOutcome(context, stamp("wrong-task", 5), { ...input, taskId: "elsewhere" })).rejects.toBeInstanceOf(TrajectoryTaskUnavailableError);
+  });
+
   it("records a scoped tree and run, then returns summaries and analysis", async () => {
     const sdk = new FoldSdk(new MemoryStore());
     const context = trajectoryContext();

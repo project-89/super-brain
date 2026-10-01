@@ -85,6 +85,11 @@ export interface TraceRuntimeObservation {
     readonly cost?: { readonly amount: number; readonly currency: string };
   };
 }
+export interface OutcomeEvidence {
+  readonly kind: "operator-verdict" | "harness-error";
+  readonly eventId: string;
+  readonly artifactId?: string;
+}
 export type TraceStepRole =
   | "model_thought"
   | "tool_call"
@@ -130,6 +135,7 @@ export interface RawTrajectory {
     readonly version?: string;
   };
   readonly outcome: TraceOutcome;
+  readonly outcomeEvidence?: OutcomeEvidence;
   readonly capture: CaptureEnvelope;
   readonly steps: readonly TraceStep[];
   readonly manifest?: TrajectoryManifest;
@@ -192,6 +198,7 @@ export interface ProjectedTrajectory {
   readonly taskId: string;
   readonly model: RawTrajectory["model"];
   readonly outcome: TraceOutcome;
+  readonly outcomeEvidence?: OutcomeEvidence;
   readonly capture: CaptureEnvelope;
   readonly steps: readonly ProjectedStep[];
   readonly manifest?: TrajectoryManifest;

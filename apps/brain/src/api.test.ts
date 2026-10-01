@@ -49,6 +49,41 @@ const trajectoryBundle: TrajectoryImportBundle = {
 describe("Fold API client", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("identifies local archive credential failures separately from workspace access", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "unauthorized" }, 401)));
+    await expect(client.transcriptArtifactPage({ source: "codex", sha256: "a".repeat(64) })).rejects.toMatchObject({ code: "capture_access_denied" });
+  });
+
+  it("pages derived evidence and decodes lossless retained payloads", async () => {
+    const data = { output: "left\0right", Unicode: "\ud800" };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ records: [{ ordinal: 0, line: 1, kind: "tool-result", sourceType: "response_item:function_call_output", dataEncoding: "base64-json-utf8", data: { base64: btoa(JSON.stringify(data)) } }], total: 101, nextCursor: "next" }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await client.transcriptDerivedRecords("run/a", "derivation", "cursor+one")).toMatchObject({ items: [{ data }], total: 101, nextCursor: "next" });
+    expect(fetchMock.mock.calls[0]?.[0]).toContain("transcript-derivations/derivation?runId=run%2Fa&limit=100&pageCursor=cursor%2Bone");
+  });
+
+  it("records a run-specific verdict with an explicit predecessor and pages its history", async () => {
+    const input = { taskId: "task/one", trajectoryId: "run/a", outcome: "failure" as const, reason: "Operator found a reproducible regression", previousEventId: "review-before" };
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ record: { ...input, eventId: "review-new" } }))
+      .mockResolvedValueOnce(jsonResponse({ records: [], total: 101, nextCursor: "next" }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await client.recordTrajectoryOutcome(input)).toMatchObject({ eventId: "review-new" });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/trajectory-outcomes");
+    expect(JSON.parse(init.body as string)).toMatchObject({ input, stamp: { id: expect.any(String), t: expect.any(Number) } });
+    expect(await client.trajectoryOutcomes("task/one", "run/a", "cursor+one")).toEqual({ items: [], total: 101, nextCursor: "next" });
+    expect(fetchMock.mock.calls[1]?.[0]).toContain("taskId=task%2Fone&trajectoryId=run%2Fa&limit=100&pageCursor=cursor%2Bone");
+  });
+
+  it("records a superseded judgment against the presented recall", async () => {
+    const provenance = { version: 1, recallId: "recall-deploy", subject: { organizationId: "local", workspaceId: "workspace", principalId: "person" }, observedAt: new Date().toISOString(), operation: "search", ranking: { id: "lexical", kind: "lexical" }, items: [{ memoryId: "memory/a", memoryRevision: 2, rank: 3 }] };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+    await client.recordMemoryFeedback({ id: "memory/a", revision: 2 }, "superseded", provenance as never);
+    const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body).toMatchObject({ items: [{ memoryId: "memory/a", input: { version: 2, memoryRevision: 2, recallId: "recall-deploy", signal: "judged", judgment: "superseded", rank: 3 } }] });
+  });
+
   it("encodes workspace and repeated event filters with bearer auth", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ entries: [] }));
     vi.stubGlobal("fetch", fetchMock);
@@ -146,6 +181,16 @@ describe("Fold API client", () => {
       limit: 25,
     });
     expect(String(init.body)).not.toContain("candidates");
+  });
+
+  it("preserves explicit applicability in create and revision payloads", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => jsonResponse({ memory: { id: "memory-a" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const draft = { audience: "workspace" as const, applicability: { kind: "global" as const }, projectIds: [], source: "human", summary: "Reusable", content: "A tool procedure", tags: [] };
+    await client.createMemory(draft);
+    await client.reviseMemory("memory-a", { ...draft, applicability: { kind: "projects", projectIds: ["project-a"] }, projectIds: ["project-a"] });
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string).input).toMatchObject({ applicability: { kind: "global" }, projectIds: [] });
+    expect(JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string).patch).toMatchObject({ applicability: { kind: "projects", projectIds: ["project-a"] } });
   });
 
   it("loads reports with encoded task ids and imports server-scoped bundles", async () => {

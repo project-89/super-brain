@@ -11,3 +11,5 @@ export * from "./native.js";
 export * from "./stored.js";
 export * from "./reinterpret.js";
 export * from "./private-fence.js";
+export * from "./native-archives.js";
+export * from "./project-identities.js";

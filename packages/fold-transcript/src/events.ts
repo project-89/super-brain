@@ -1,4 +1,5 @@
 import { parseEvent, type Author, type CaptureEnvelope, type FoldEvent, type Provenance } from "@_89/fold";
+import { derivationRecordFromEvent } from "./derivations.js";
 
 import {
   transcriptArtifactSchema,
@@ -180,6 +181,7 @@ export function transcriptRecordsFromEvent(event: FoldEvent): readonly Transcrip
 }
 
 export function validateTranscriptEventEnvelope(event: FoldEvent): void {
+  if (derivationRecordFromEvent(event) !== undefined) return;
   const records = transcriptRecordsFromEvent(event);
   const expectedNodeKind = NODE_KIND_BY_EVENT_KIND.get(event.kind);
   const declaresTranscript = expectedNodeKind !== undefined || records.length > 0;

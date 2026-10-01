@@ -17,7 +17,7 @@ import { installHermesHook, installHooks, installLaunchAgent } from "./install.j
 import { CaptureHttpServer } from "./server.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
 import { exportCaptureData, pruneHookArtifacts, verifyCaptureExport } from "./maintenance.js";
-import { DurableSpool, HookVault, recordRelayFailure, StateStore } from "./storage.js";
+import { DurableSpool, HookVault, recordRelayFailure, StateStore, TranscriptSnapshotStore } from "./storage.js";
 import { DEFAULT_REPOSITORY_CAPTURE, reconstructRepositorySnapshot } from "./repository-snapshot.js";
 import type { HookSource, ReasoningPolicy, ReasoningTreePolicy } from "./types.js";
 import { readVaultKey, RecordAnonymizer, type AnonymizationPolicy } from "@_89/super-brain-importer";
@@ -101,7 +101,7 @@ async function run(args: readonly string[]): Promise<void> {
     const result = await updateCaptureConfig(path, patch);
     setTimeout(() => process.kill(process.pid, "SIGTERM"), 100).unref();
     return result.config;
-  }, vaultEncryptionKey);
+  }, vaultEncryptionKey, () => processor.snapshot());
   await server.start();
   processor.start();
   const outbox = new HookOutbox(config.stateRoot, await receiptEncryptionKey(config), config.reasoningPolicy === "include" && config.retainEncryptedReasoning);
@@ -324,6 +324,18 @@ async function main(): Promise<void> {
     process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "delete" : "dry-run", ...result }, null, 2)}\n`);
     return;
   }
+  if (command === "recover-transcripts") {
+    const config = await readCaptureConfig(configPath(args));
+    const snapshots = new TranscriptSnapshotStore(config.stateRoot, {
+      reasoningPolicy: config.reasoningPolicy,
+      retainEncryptedReasoning: config.retainEncryptedReasoning,
+    });
+    const result = await new DurableSpool(config.stateRoot).recoverFailedTranscripts(snapshots, args.includes("--confirm"), {
+      ...(option(args, "--job") === undefined ? {} : { jobId: option(args, "--job")! }),
+    });
+    process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "recover" : "dry-run", ...result }, null, 2)}\n`);
+    return;
+  }
   if (command === "retry-failed") {
     const config = await readCaptureConfig(configPath(args));
     const result = await new DurableSpool(config.stateRoot).retryFailed(
@@ -363,7 +375,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "help") {
-    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|acceptance-context|reconstruct-snapshot|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|retry-failed|resolve-failed> [--config PATH]\n");
+    process.stdout.write("Usage: super-brain-capture <init|run|relay|checkpoint|decision|acceptance-context|reconstruct-snapshot|status|config|configure|rotate-operator-token|inspect-reasoning|install-hooks|install-hermes-hook|install-service|enable-vault-encryption|export|verify-export|prune|recover-transcripts|retry-failed|resolve-failed> [--config PATH]\n");
     return;
   }
   throw new Error(`unknown command: ${command}`);

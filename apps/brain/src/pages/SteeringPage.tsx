@@ -7,6 +7,9 @@ import {
   MessageSquareText,
   Plus,
   Send,
+  Replace,
+  ThumbsDown,
+  ThumbsUp,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -68,6 +71,10 @@ export function SteeringPage({
   const [reasoningError, setReasoningError] = useState<string>();
   const [providers, setProviders] = useState<readonly ReasoningProviderStatus[]>([]);
   const [providerId, setProviderId] = useState("");
+  const [answeredQuestion, setAnsweredQuestion] = useState("");
+  const [judgments, setJudgments] = useState<Record<string, string>>({});
+  const [feedbackPending, setFeedbackPending] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string>();
 
   useEffect(() => {
     let active = true;
@@ -124,16 +131,36 @@ export function SteeringPage({
   };
 
   const ask = async () => {
-    if (!question.trim()) return;
+    if (!question.trim() || reasoningPending || feedbackPending) return;
     setReasoningPending(true);
+    setReasoning(undefined);
+    setJudgments({});
+    setFeedbackError(undefined);
     setReasoningError(undefined);
     try {
       setReasoning(await api.askReasoning(question.trim(), questionActor || undefined, providerId || undefined));
+      setAnsweredQuestion(question.trim());
     } catch (caught) {
       setReasoning(undefined);
       setReasoningError(caught instanceof Error ? caught.message : "Reasoning request failed");
     } finally {
       setReasoningPending(false);
+    }
+  };
+
+  const judgeMemory = async (memoryId: string, signal: "helpful" | "unhelpful" | "superseded") => {
+    setFeedbackPending(true);
+    setFeedbackError(undefined);
+    try {
+      // Judgments bind to the exact recall that presented the memory (question: answeredQuestion).
+      const presented = reasoning?.provenance?.items.find((item) => item.memoryId === memoryId);
+      if (reasoning?.provenance === undefined || presented === undefined) throw new Error("Ask again before recording a judgment for this answer");
+      await api.recordMemoryFeedback({ id: memoryId, revision: presented.memoryRevision }, signal, reasoning.provenance);
+      setJudgments((current) => ({ ...current, [memoryId]: signal }));
+    } catch (caught) {
+      setFeedbackError(caught instanceof Error ? caught.message : "Memory feedback failed");
+    } finally {
+      setFeedbackPending(false);
     }
   };
 
@@ -183,14 +210,20 @@ export function SteeringPage({
           <label><span className="sr-only">Question</span><input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask across authorized memory" /></label>
           <label className="compact-field"><span>Actor context</span><select value={questionActor} onChange={(event) => setQuestionActor(event.target.value)}><option value="">No actor</option>{actorIds.map((actorId) => <option key={actorId}>{actorId}</option>)}</select></label>
           <label className="compact-field"><span>Provider</span><select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option key={provider.id} value={provider.id} disabled={provider.configured === false}>{provider.provider ?? provider.kind} · {provider.model ?? provider.id}{provider.configured === false ? " (not configured)" : ""}</option>)}</select></label>
-          <button className="icon-button reasoning-console__send" type="submit" disabled={reasoningPending || !question.trim()} aria-label="Ask" title="Ask"><Send aria-hidden="true" /></button>
+          <button className="icon-button reasoning-console__send" type="submit" disabled={reasoningPending || feedbackPending || !question.trim()} aria-label="Ask" title="Ask"><Send aria-hidden="true" /></button>
         </form>
         {reasoningError !== undefined && <span className="reasoning-error" role="alert">{reasoningError}</span>}
         {reasoning !== undefined && (
           <div className="reasoning-answer">
             <header><span className="eyebrow">{reasoning.provider.provider ?? reasoning.provider.kind} / {reasoning.provider.model ?? reasoning.provider.id}</span><span>{reasoning.ranking.kind} recall / {reasoning.ranking.corpusSize} scanned</span></header>
             <p>{reasoning.answer}</p>
-            {reasoning.evidence.length > 0 && <ul>{reasoning.evidence.map((item) => <li key={item.memoryId}><Lightbulb aria-hidden="true" /><span><strong>{item.summary || "Untitled memory"}</strong><small>{item.source}{item.score === undefined ? "" : ` / ${Math.round(item.score * 100)}%`}</small></span></li>)}</ul>}
+            {feedbackError !== undefined && <p role="alert">{feedbackError}</p>}
+            {reasoning.evidence.length > 0 && <ul>{reasoning.evidence.map((item) => <li key={item.memoryId}><Lightbulb aria-hidden="true" /><span><strong>{item.summary || "Untitled memory"}</strong><small>{item.source}{item.score === undefined ? "" : ` / ${Math.round(item.score * 100)}%`}{judgments[item.memoryId] === undefined ? "" : ` / ${judgments[item.memoryId]}`}</small><span className="recall-feedback" role="group" aria-label={`Feedback for ${item.summary || "Untitled memory"}`}>
+              {(["helpful", "unhelpful", "superseded"] as const).map((signal) => {
+                const Icon = signal === "helpful" ? ThumbsUp : signal === "unhelpful" ? ThumbsDown : Replace;
+                return <button key={signal} className="icon-button" type="button" title={`Mark ${signal}`} aria-label={`Mark ${signal}`} aria-pressed={judgments[item.memoryId] === signal} disabled={feedbackPending || judgments[item.memoryId] === signal} onClick={() => void judgeMemory(item.memoryId, signal)}><Icon aria-hidden="true" /></button>;
+              })}
+            </span></span></li>)}</ul>}
           </div>
         )}
       </section>

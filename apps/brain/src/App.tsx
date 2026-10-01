@@ -11,16 +11,17 @@ import {
   Settings,
   Sun,
   Trash2,
+  Users,
   Waypoints,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { FoldApiClient } from "./api";
 import { useBrowserTelemetry } from "./use-telemetry";
 import { initialConnection, saveConnection, hasConnectionCredentials } from "./connection";
 import { useSnapshot } from "./use-snapshot";
-import type { BrainPage, ConnectionSettings, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
+import type { BrainPage, ConnectionSettings, MemoryCandidate, MemoryDraft, PersonalMemory, TrajectoryImportBundle } from "./types";
 import { ConnectionDialog } from "./components/ConnectionDialog";
 import { MemoryDialog } from "./components/MemoryDialog";
 import { Modal } from "./components/Modal";
@@ -34,18 +35,23 @@ import { FleetPage } from "./pages/FleetPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { SteeringPage } from "./pages/SteeringPage";
 
+const IdentitiesPage = lazy(() => import("./pages/IdentitiesPage").then(({ IdentitiesPage }) => ({ default: IdentitiesPage })));
+const EpisodesPage = lazy(() => import("./pages/EpisodesPage").then(({ EpisodesPage }) => ({ default: EpisodesPage })));
+
 type Page = BrainPage;
 type Theme = "light" | "dark";
 
 const PAGES: readonly { readonly id: Page; readonly label: string; readonly icon: typeof LayoutDashboard }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "memory", label: "Memory", icon: BrainCircuit },
-  { id: "history", label: "History", icon: FolderClock },
-  { id: "trajectories", label: "Trajectories", icon: Waypoints },
-  { id: "fleet", label: "Fleet", icon: RadioTower },
-  { id: "steering", label: "Steering", icon: MessagesSquare },
-  { id: "events", label: "Events", icon: History },
-  { id: "state", label: "State", icon: Boxes },
+  { id: "history", label: "Runs", icon: FolderClock },
+  { id: "episodes", label: "Episodes", icon: History },
+  { id: "trajectories", label: "Decisions", icon: Waypoints },
+  { id: "fleet", label: "Live agents", icon: RadioTower },
+  { id: "steering", label: "Ask & steer", icon: MessagesSquare },
+  { id: "events", label: "Audit log", icon: History },
+  { id: "identities", label: "Identities", icon: Users },
+  { id: "state", label: "System state", icon: Boxes },
 ];
 
 function pageFromHash(): Page {
@@ -163,6 +169,32 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
     }
   };
 
+  const acceptCandidates = async (candidates: readonly MemoryCandidate[]) => {
+    if (candidates.length === 0) return;
+    setMutationPending(true);
+    setMutationError(undefined);
+    try {
+      const groups = new Map<string, MemoryCandidate[]>();
+      for (const candidate of candidates) {
+        const key = JSON.stringify([candidate.audience, candidate.spaceId ?? null]);
+        groups.set(key, [...(groups.get(key) ?? []), candidate]);
+      }
+      for (const group of groups.values()) {
+        const first = group[0]!;
+        await api.acceptMemoryCandidates(group.map(({ id }) => id), {
+          audience: first.audience,
+          ...(first.spaceId === undefined ? {} : { spaceId: first.spaceId }),
+        });
+      }
+      setNotice(`${candidates.length} ${candidates.length === 1 ? "proposal" : "proposals"} accepted`);
+      await refresh(true);
+    } catch (caught) {
+      setMutationError(caught instanceof Error ? caught.message : "Candidate acceptance failed");
+    } finally {
+      setMutationPending(false);
+    }
+  };
+
   const renderPage = () => {
     if (snapshot === undefined) return null;
     if (page === "memory") {
@@ -175,6 +207,7 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
           candidateTotal={snapshot.memoryCandidateTotal}
           candidateCursor={snapshot.memoryCandidateCursor}
           feedbackEvents={snapshot.events}
+          projects={snapshot.transcriptProjects}
           api={api}
           onRank={(options) => api.rankMemories(options)}
           onCreate={() => { setMutationError(undefined); setMemoryDialog({ open: true }); }}
@@ -188,7 +221,7 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
             setMutationError(undefined);
             try {
               await api.recordMemoryFeedback(memory, signal, presentation);
-              setNotice(signal === "helpful" ? "Memory marked helpful" : "Memory marked unhelpful");
+              setNotice(`Memory marked ${signal}`);
             } catch (caught) {
               setMutationError(caught instanceof Error ? caught.message : "Memory feedback failed");
             } finally {
@@ -208,6 +241,7 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
               setMutationPending(false);
             }
           }}
+          onAcceptCandidates={acceptCandidates}
           onRejectCandidate={async (candidate, reason) => {
             setMutationPending(true);
             setMutationError(undefined);
@@ -228,12 +262,19 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
     if (page === "events") {
       return <EventsPage entries={snapshot.events} total={snapshot.eventTotal} cursor={snapshot.eventCursor} api={api} />;
     }
+    if (page === "identities") {
+      return <Suspense fallback={<div className="identity-status" role="status">Loading identities</div>}><IdentitiesPage key={JSON.stringify([effectiveConnection.baseUrl, effectiveConnection.organizationId, effectiveConnection.workspaceId, effectiveConnection.token])} api={api} refreshVersion={snapshot.loadedAt} organizationId={effectiveConnection.organizationId} workspaceId={effectiveConnection.workspaceId} /></Suspense>;
+    }
+    if (page === "episodes") {
+      return <Suspense fallback={<div className="identity-status" role="status">Loading episodes</div>}><EpisodesPage key={JSON.stringify([effectiveConnection.baseUrl, effectiveConnection.organizationId, effectiveConnection.workspaceId, effectiveConnection.token])} api={api} refreshVersion={snapshot.loadedAt} /></Suspense>;
+    }
     if (page === "trajectories") {
       return (
         <TrajectoriesPage
           tasks={snapshot.trajectoryTasks}
           total={snapshot.trajectoryTaskTotal}
           cursor={snapshot.trajectoryTaskCursor}
+          projects={snapshot.transcriptProjects}
           api={api}
           onImport={() => setTrajectoryImportOpen(true)}
         />
@@ -275,7 +316,7 @@ export default function App({ connectionOverride, accountControls }: AppProps = 
       <header className="topbar">
         <button className="brand" type="button" onClick={() => navigate("overview")} aria-label="Super Brain overview">
           <span className="brand__mark"><BrainCircuit aria-hidden="true" /></span>
-          <span><strong>Super Brain</strong><small>Fold workspace</small></span>
+          <span><strong>Super Brain</strong><small>Knowledge workspace</small></span>
         </button>
         <div className="topbar__context">
           <div className="workspace-identity">

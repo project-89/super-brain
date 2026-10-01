@@ -50,7 +50,9 @@ export function indexTree(tree: SharedDecisionTree): TreeIndex {
       );
     }
     edgesByPair.set(pair, edge.id);
-    outgoing.set(edge.sourceId, [...(outgoing.get(edge.sourceId) ?? []), edge.targetId]);
+    const targets = outgoing.get(edge.sourceId);
+    if (targets === undefined) outgoing.set(edge.sourceId, [edge.targetId]);
+    else targets.push(edge.targetId);
     incoming.set(edge.targetId, (incoming.get(edge.targetId) ?? 0) + 1);
   }
   if ((incoming.get(tree.rootNodeId) ?? 0) !== 0) {
@@ -59,17 +61,26 @@ export function indexTree(tree: SharedDecisionTree): TreeIndex {
 
   const visiting = new Set<string>();
   const visited = new Set<string>();
-  const visit = (nodeId: string): void => {
-    if (visiting.has(nodeId)) {
-      throw new ProjectionValidationError(`shared decision structure contains a cycle at ${nodeId}`);
+  // Explicit DFS frames preserve active-path cycle detection without a call-stack depth limit.
+  const stack = [{ nodeId: tree.rootNodeId, nextTarget: 0 }];
+  visiting.add(tree.rootNodeId);
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]!;
+    const targetId = outgoing.get(frame.nodeId)?.[frame.nextTarget];
+    if (targetId === undefined) {
+      visiting.delete(frame.nodeId);
+      visited.add(frame.nodeId);
+      stack.pop();
+      continue;
     }
-    if (visited.has(nodeId)) return;
-    visiting.add(nodeId);
-    for (const targetId of outgoing.get(nodeId) ?? []) visit(targetId);
-    visiting.delete(nodeId);
-    visited.add(nodeId);
-  };
-  visit(tree.rootNodeId);
+    frame.nextTarget += 1;
+    if (visiting.has(targetId)) {
+      throw new ProjectionValidationError(`shared decision structure contains a cycle at ${targetId}`);
+    }
+    if (visited.has(targetId)) continue;
+    visiting.add(targetId);
+    stack.push({ nodeId: targetId, nextTarget: 0 });
+  }
   if (visited.size !== nodes.size) {
     const unreachable = [...nodes].filter((nodeId) => !visited.has(nodeId)).sort();
     throw new ProjectionValidationError(
@@ -171,6 +182,7 @@ export function projectTrajectory(
     taskId: trajectory.taskId,
     model: trajectory.model,
     outcome: trajectory.outcome,
+    ...(trajectory.outcomeEvidence === undefined ? {} : { outcomeEvidence: trajectory.outcomeEvidence }),
     capture: trajectory.capture,
     ...(trajectory.manifest === undefined ? {} : { manifest: trajectory.manifest }),
     steps,

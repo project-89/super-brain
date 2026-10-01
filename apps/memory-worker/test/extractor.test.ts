@@ -3,7 +3,7 @@ import type { FoldEvent } from "@_89/fold";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encryptVaultLine } from "@_89/super-brain-importer";
+import { encryptVaultLine, parseClaudeTranscript, parseCodexTranscript, parseNativeArchive, archiveRecords } from "@_89/super-brain-importer";
 
 import { extractLiveMemoryCandidates, extractMemoryCandidates, messagesFromVaultRecords, readVaultMessages } from "../src/index.js";
 
@@ -18,6 +18,60 @@ const run = {
   counts: { records: 2, turns: 1, messages: 2, actions: 0, unknown: 0 },
   segments: [{ id: "segment-a", ordinal: 0, projectId: "project-a", resolution: "resolved" as const, startedAt: "2026-08-20T12:00:00.000Z" }],
 };
+
+describe("transcript evidence turn parity", () => {
+  it.each(["gemini", "hermes"] as const)("keeps %s source turns aligned without extracting tool output or private thoughts", async (source) => {
+    const messages = source === "gemini" ? [
+      { id: "setup", type: "gemini", content: [], toolCalls: [{ id: "tool", name: "read_file" }] },
+      { id: "user", type: "user", content: [{ text: "Use Postgres for durable storage." }, { thought: true, text: "private" }] },
+      { type: "gemini", content: [{ text: "We decided to use Postgres." }] },
+    ] : [
+      { id: "setup", role: "system", content: "Setup" },
+      { id: "user", role: "user", content: "Use Postgres for durable storage." },
+      { role: "tool", content: "We decided tool output must not become dialogue." },
+    ];
+    const value = { sessionId: "native", session_id: "native", messages };
+    const directory = await mkdtemp(join(tmpdir(), "native-turn-parity-"));
+    const path = join(directory, "session.json");
+    await writeFile(path, JSON.stringify(value));
+    const parsed = await parseNativeArchive(path, source);
+    const actualTurn = parsed.bundle.chunks.flatMap(({ turns }) => turns).find(({ nativeId }) => nativeId === "user");
+    expect(actualTurn?.ordinal).toBe(1);
+    const dialogue = messagesFromVaultRecords(source, "native", archiveRecords(value));
+    expect(dialogue[0]?.turnId).toBe(actualTurn?.id);
+    expect(JSON.stringify(dialogue)).not.toMatch(/private|tool output/);
+  });
+  it("keeps Codex evidence aligned when system or tool records precede the first prompt", async () => {
+    const records = [
+      { type: "response_item", payload: { type: "message", role: "system", content: [{ type: "input_text", text: "You are Codex" }] } },
+      { type: "response_item", payload: { type: "function_call", call_id: "setup", name: "exec_command" } },
+      { type: "turn_context", payload: { turn_id: "prompt-a" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "prompt-a" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Use Postgres for durable storage." }] } },
+    ];
+    const directory = await mkdtemp(join(tmpdir(), "turn-parity-"));
+    const path = join(directory, "parity.jsonl");
+    await writeFile(path, records.map((record) => JSON.stringify(record)).join("\n"));
+    const parsed = await parseCodexTranscript(path);
+    const actualTurn = parsed.bundle.chunks.flatMap(({ turns }) => turns).find(({ nativeId }) => nativeId === "prompt-a");
+    expect(actualTurn?.ordinal).toBe(1);
+    expect(messagesFromVaultRecords("codex", parsed.bundle.run.nativeId, records)[0]?.turnId).toBe(actualTurn?.id);
+  });
+
+  it("keeps Claude evidence aligned after a leading tool-only assistant message", async () => {
+    const records = [
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "setup", name: "Read" }] } },
+      { type: "user", uuid: "prompt-a", message: { content: "Use Postgres for durable storage." } },
+    ];
+    const directory = await mkdtemp(join(tmpdir(), "turn-parity-"));
+    const path = join(directory, "parity.jsonl");
+    await writeFile(path, records.map((record) => JSON.stringify(record)).join("\n"));
+    const parsed = await parseClaudeTranscript(path);
+    const actualTurn = parsed.bundle.chunks.flatMap(({ turns }) => turns).find(({ nativeId }) => nativeId === "prompt-a");
+    expect(actualTurn?.ordinal).toBe(1);
+    expect(messagesFromVaultRecords("claude-code", parsed.bundle.run.nativeId, records)[0]?.turnId).toBe(actualTurn?.id);
+  });
+});
 
 describe("transcript memory extraction", () => {
   it("extracts structured Claude-Mem observations with deterministic evidence", () => {

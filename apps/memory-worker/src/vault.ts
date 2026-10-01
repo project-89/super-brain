@@ -34,13 +34,52 @@ export interface VaultNormalizationOptions {
 
 class VaultIdentityError extends Error {}
 
+type ArchiveSource = Extract<TranscriptSource, "gemini" | "hermes">;
+const isArchiveSource = (source: TranscriptSource): source is ArchiveSource => source === "gemini" || source === "hermes";
+const archiveText = (source: ArchiveSource, content: unknown): string => source === "gemini" && Array.isArray(content)
+  // Gemini thought parts are private model reasoning, never dialogue evidence.
+  ? content.flatMap((part) => { const value = recordValue(part); return value?.thought !== true && typeof value?.text === "string" ? [value.text] : []; }).join("\n")
+  : nativeTextContent(content);
+
+/** Gemini/Hermes JSON archives: mirrors the importer's turn allocation so citations keep canonical identity. */
+class NativeArchiveTurns {
+  private readonly byNativeId = new Map<string, { id: string; ordinal: number }>();
+  private current: { id: string; ordinal: number } | undefined;
+  private count = 0;
+  constructor(private readonly source: ArchiveSource, private readonly nativeId: string) {}
+  private start(nativeId?: string): void {
+    const known = nativeId === undefined ? undefined : this.byNativeId.get(nativeId);
+    if (known !== undefined) { this.current = known; return; }
+    const ordinal = this.count++;
+    this.current = { id: `${this.source}:${this.nativeId}:turn:${ordinal}`, ordinal };
+    if (nativeId !== undefined) this.byNativeId.set(nativeId, this.current);
+  }
+  push(record: Record<string, unknown>): { unknown: boolean; cwd?: string; at?: string; turn?: { id: string; ordinal: number }; message?: { role: "user" | "assistant"; text: string; nativeId?: string } } {
+    const type = typeof record.type === "string" ? record.type : undefined;
+    if (type === "archive_metadata") {
+      const cwd = recordValue(record.metadata)?.cwd;
+      return { unknown: false, ...(typeof cwd === "string" && cwd.trim().length > 0 ? { cwd } : {}) };
+    }
+    const kind = this.source === "gemini" ? type : typeof record.role === "string" ? record.role : undefined;
+    const nativeId = typeof record.id === "number" ? String(record.id) : typeof record.id === "string" && record.id.length > 0 ? record.id : undefined;
+    const at = typeof record.timestamp === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(record.timestamp) ? record.timestamp : undefined;
+    if (kind !== "user" && kind !== "assistant" && kind !== "gemini" && kind !== "tool" && kind !== "system") return { unknown: true };
+    if (kind === "user") this.start(nativeId);
+    if (this.current === undefined) this.start();
+    const role = kind === "gemini" ? "assistant" : kind;
+    return { unknown: false, ...(at === undefined ? {} : { at }), turn: this.current!,
+      ...(role === "user" || role === "assistant" ? { message: { role, text: archiveText(this.source, record.content), ...(nativeId === undefined ? {} : { nativeId }) } } : {}) };
+  }
+}
+
 function isBoilerplate(text: string): boolean {
   return /^(?:You are (?:Codex|Claude)|# AGENTS\.md instructions|<permissions instructions>|<environment_context>|<collaboration_mode>|Hello memory agent)/i.test(text.trimStart().slice(0, 160));
 }
 
 class VaultMessageProjection {
   readonly messages: VaultMessage[] = [];
-  private readonly decoder: NativeTranscriptNormalizer;
+  private readonly decoder: NativeTranscriptNormalizer | undefined;
+  private readonly archive: NativeArchiveTurns | undefined;
   private readonly seen = new Set<string>();
   private readonly turnIds = new Set<string>();
   private readonly observedOrdinals = new Set<number>();
@@ -51,12 +90,33 @@ class VaultMessageProjection {
   private excludedCount = 0;
   private resultCount = 0;
   constructor(readonly source: TranscriptSource, nativeId: string, options: VaultNormalizationOptions) {
-    this.decoder = new NativeTranscriptNormalizer(source, nativeId, { parserVersion: options.parserVersion ?? "1" });
+    if (isArchiveSource(source)) this.archive = new NativeArchiveTurns(source, nativeId);
+    else this.decoder = new NativeTranscriptNormalizer(source, nativeId, { parserVersion: options.parserVersion ?? "1" });
     this.turns = options.canonicalTurns === undefined ? undefined : new Map(options.canonicalTurns.map((turn) => [turn.ordinal, turn]));
     if (this.turns !== undefined && this.turns.size !== options.canonicalTurns!.length) throw new VaultIdentityError("duplicate canonical ordinal");
   }
+  private pushArchive(record: Record<string, unknown>): void {
+    const normalized = this.archive!.push(record);
+    this.recordCount++;
+    if (normalized.unknown) this.unknownCount++;
+    if (normalized.cwd !== undefined) this.projectPath = normalized.cwd;
+    if (normalized.turn === undefined) return;
+    const canonical = this.turns?.get(normalized.turn.ordinal);
+    if (this.turns !== undefined && canonical === undefined) throw new VaultIdentityError("native turn has no canonical identity");
+    const turnId = canonical?.id ?? normalized.turn.id;
+    this.turnIds.add(turnId);
+    this.observedOrdinals.add(normalized.turn.ordinal);
+    const message = normalized.message;
+    if (message === undefined) { this.excludedCount++; return; }
+    const text = message.text.trim();
+    if (text.length === 0 || isBoilerplate(text)) { this.excludedCount++; return; }
+    this.messages.push({ role: message.role, text, turnId, evidenceKind: "message",
+      ...(normalized.at === undefined ? {} : { at: normalized.at }), ...(this.projectPath === undefined ? {} : { projectPath: this.projectPath }),
+      ...(message.nativeId === undefined ? {} : { nativeId: message.nativeId }) });
+  }
   push(record: Record<string, unknown>): void {
-    const normalized = this.decoder.push(record);
+    if (this.archive !== undefined) { this.pushArchive(record); return; }
+    const normalized = this.decoder!.push(record);
     this.recordCount++;
     if (normalized.unknown) this.unknownCount++;
     if (normalized.cwd !== undefined) this.projectPath = normalized.cwd;
@@ -109,6 +169,12 @@ export function messagesFromVaultRecords(source: TranscriptSource, nativeId: str
   return [...projection.finish().messages];
 }
 
+function expectedParsers(source: TranscriptSource): readonly string[] {
+  if (source === "codex") return ["codex-jsonl"];
+  if (source === "claude-code") return ["claude-jsonl"];
+  return source === "hermes" ? ["hermes-json", "hermes-hermes-sqlite"] : ["gemini-json"];
+}
+
 export function vaultPath(vaultRoot: string, run: TranscriptRun, encrypted = false, artifact?: TranscriptArtifact): string | undefined {
   const sha256 = artifact?.sha256 ?? run.artifactId.replace(/^artifact-/, "");
   if (!/^[0-9a-f]{64}$/.test(sha256)) return undefined;
@@ -120,7 +186,7 @@ export async function readVaultEvidence(vaultRoot: string, run: TranscriptRun, o
   if (artifact === undefined) return { status: "waiting", reason: "metadata-unavailable" };
   if (artifact.id !== run.artifactId || artifact.source !== run.source || !/^[0-9a-f]{64}$/.test(artifact.sha256)) return { status: "excluded", reason: "artifact-identity-mismatch" };
   const parserVersion = artifact.parser.version;
-  if ((parserVersion !== "1" && parserVersion !== "2") || artifact.parser.id !== (run.source === "codex" ? "codex-jsonl" : "claude-jsonl")) return { status: "excluded", reason: "unsupported-parser" };
+  if ((parserVersion !== "1" && parserVersion !== "2") || !expectedParsers(run.source).includes(artifact.parser.id)) return { status: "excluded", reason: "unsupported-parser" };
   if (artifact.anonymizationPolicy !== undefined && artifact.anonymizationPolicy !== "none" && options.canonicalTurns === undefined) return { status: "waiting", reason: "metadata-unavailable" };
   try {
     const projection = new VaultMessageProjection(run.source, run.nativeId, { parserVersion, ...(options.canonicalTurns === undefined ? {} : { canonicalTurns: options.canonicalTurns }) });
@@ -141,7 +207,7 @@ export async function readVaultMessages(vaultRoot: string, run: TranscriptRun, e
   const sha256 = run.artifactId.replace(/^artifact-/, "");
   const result = await readVaultEvidence(vaultRoot, run, { artifact: {
     id: run.artifactId, source: run.source, sha256, sourcePathHash: "0".repeat(64), byteLength: 0,
-    mediaType: "application/x-ndjson", parser: { id: run.source === "codex" ? "codex-jsonl" : "claude-jsonl", version: "1" },
+    mediaType: "application/x-ndjson", parser: { id: expectedParsers(run.source)[0]!, version: "1" },
     contentPolicy: "redacted", stored: true, redactionCount: 0,
   }, ...(encryptionKey === undefined ? {} : { encryptionKey }) });
   if (result.status === "ready") return result.messages;

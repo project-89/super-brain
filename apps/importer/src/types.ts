@@ -3,11 +3,23 @@ import type { TranscriptImportBundle, TranscriptSource } from "@_89/fold-transcr
 export interface ParsedTranscript {
   readonly sourcePath: string;
   readonly bundle: TranscriptImportBundle;
+  readonly diagnostics?: TranscriptParserDiagnostics;
+  readonly archiveInput?: { readonly kind: "json" } | { readonly kind: "hermes-sqlite"; readonly sessionId: string };
+}
+
+export interface TranscriptParserDiagnostics {
+  readonly recordTypes: Readonly<Record<string, number>>;
+  readonly unknownRecordTypes: Readonly<Record<string, number>>;
+  readonly toolResults: Readonly<Record<"completed" | "failed" | "unknown", number>>;
 }
 
 export interface TranscriptSourceRoots {
   readonly claude?: string;
   readonly codex?: string;
+  readonly codexArchived?: string;
+  readonly gemini?: string;
+  readonly hermes?: string;
+  readonly hermesDatabase?: string;
 }
 
 export interface ScanFailure {
@@ -28,4 +40,5 @@ export interface TranscriptScanReport {
   readonly bySource: Readonly<Record<TranscriptSource, { readonly files: number; readonly bytes: number }>>;
   readonly failures: readonly ScanFailure[];
   readonly transcripts: readonly ParsedTranscript[];
+  readonly diagnostics: Readonly<Record<TranscriptSource, TranscriptParserDiagnostics>>;
 }

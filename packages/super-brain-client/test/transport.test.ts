@@ -48,7 +48,7 @@ describe("canonical transport", () => {
     try {
       const api = new SuperBrainClient({ baseUrl: "", workspaceId: "w", token: "token" });
       await api.identity(); for await (const _event of api.eventStream()) { /* empty */ }
-      expect(requests).toEqual(["/v1/workspaces/w/identity", "/v1/workspaces/w/event-stream"]);
+      expect(requests).toEqual(["/v1/workspaces/w/identity", "/v1/workspaces/w/event-stream?order=ingestion"]);
     } finally { vi.unstubAllGlobals(); }
   });
   it("does not invoke a pre-aborted token supplier or leak its late rejection", async () => {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 
 import { deliverTranscriptBundle, listDeliveredTranscriptRunIds, readDeliveredTranscriptBundle } from "./delivery.js";
 import { reinterpretStoredTranscript } from "./reinterpret.js";
@@ -8,6 +9,8 @@ import { storeRedactedArtifact } from "./redact.js";
 import { ensureVaultKey, readVaultKey } from "./encryption.js";
 import { RecordAnonymizer, type AnonymizationPolicy } from "./privacy.js";
 import { scanTranscripts } from "./scan.js";
+import { parseReprocessSource, reprocessTranscripts } from "./reprocess.js";
+import { inventoryProjectIdentities } from "./project-identities.js";
 
 const args = process.argv.slice(2).filter((argument) => argument !== "--");
 
@@ -28,10 +31,19 @@ function hasFlag(name: string): boolean {
 function sourceRoots(source: string | undefined) {
   const claude = option("--claude-root") ?? join(homedir(), ".claude", "projects");
   const codex = option("--codex-root") ?? join(homedir(), ".codex", "sessions");
+  const codexArchived = option("--codex-archive-root") ?? (option("--codex-root") === undefined ? join(homedir(), ".codex", "archived_sessions") : undefined);
+  const codexRoots = { codex, ...(codexArchived === undefined ? {} : { codexArchived }) };
+  const gemini = option("--gemini-root") ?? join(homedir(), ".gemini", "tmp");
+  const hermesHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
+  const hermes = option("--hermes-root") ?? join(hermesHome, "logs");
+  const hermesDatabase = option("--hermes-db") ?? (option("--hermes-root") === undefined ? join(hermesHome, "state.db") : undefined);
+  const hermesRoots = { hermes, ...(hermesDatabase === undefined ? {} : { hermesDatabase }) };
   if (source === "claude") return { claude };
-  if (source === "codex") return { codex };
-  if (source === undefined || source === "all") return { claude, codex };
-  throw new TypeError("--source must be claude, codex, or all");
+  if (source === "codex") return codexRoots;
+  if (source === "gemini") return { gemini };
+  if (source === "hermes") return hermesRoots;
+  if (source === undefined || source === "all") return { claude, ...codexRoots, gemini, ...hermesRoots };
+  throw new TypeError("--source must be claude, codex, gemini, hermes, or all");
 }
 
 async function main(): Promise<void> {
@@ -57,8 +69,43 @@ async function main(): Promise<void> {
       ...(imported === undefined ? {} : { imported: imported.imported, eventCount: imported.eventCount }) }, null, 2)}\n`);
     return;
   }
+  if (command === "project-identities") {
+    if (args.includes("--token")) throw new TypeError("use FOLD_API_TOKEN instead of a command-line token");
+    const required = (value: string | undefined, name: string) => { if (!value) throw new TypeError(`project-identities requires ${name}`); return value; };
+    const report = await inventoryProjectIdentities({
+      apiUrl: required(option("--api-url") ?? process.env.FOLD_API_URL, "--api-url or FOLD_API_URL"),
+      organizationId: option("--organization") ?? process.env.FOLD_API_ORGANIZATION ?? "local",
+      workspaceId: required(option("--workspace") ?? process.env.FOLD_API_WORKSPACE, "--workspace or FOLD_API_WORKSPACE"),
+      bearerToken: required(process.env.FOLD_API_TOKEN, "FOLD_API_TOKEN"),
+      reportPath: required(option("--report"), "--report"),
+    });
+    process.stdout.write(`${JSON.stringify({ mode: report.mode, scope: report.scope, ...report.summary }, null, 2)}\n`);
+    return;
+  }
+  if (command === "reprocess") {
+    if (args.includes("--token")) throw new TypeError("use FOLD_API_TOKEN instead of a command-line token");
+    const required = (value: string | undefined, name: string) => { if (!value) throw new TypeError(`reprocess requires ${name}`); return value; };
+    const keyPath = option("--vault-key") ?? process.env.FOLD_TRANSCRIPT_VAULT_KEY_FILE;
+    const source = parseReprocessSource(option("--source"));
+    const results = await reprocessTranscripts({
+      apiUrl: required(option("--api-url") ?? process.env.FOLD_API_URL, "--api-url"),
+      organizationId: option("--organization") ?? process.env.FOLD_API_ORGANIZATION ?? "local",
+      workspaceId: required(option("--workspace") ?? process.env.FOLD_API_WORKSPACE, "--workspace"),
+      bearerToken: required(process.env.FOLD_API_TOKEN, "FOLD_API_TOKEN"),
+      vaultRoot: required(option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT, "--vault"),
+      stateRoot: required(option("--state"), "--state"),
+      confirm: hasFlag("--confirm"),
+      ...(source === undefined ? {} : { source }),
+      ...(keyPath === undefined ? {} : { key: await readVaultKey(keyPath) }),
+      ...(option("--limit") === undefined ? {} : { limit: Number(option("--limit")) }),
+      ...(option("--run-id") === undefined ? {} : { runId: option("--run-id")! }),
+      progress: (value) => process.stdout.write(`${JSON.stringify(value)}\n`),
+    });
+    if (results.some((result) => result.status === "failed")) process.exitCode = 1;
+    return;
+  }
   if (command !== "scan" && command !== "import") {
-    throw new TypeError("supported commands: scan, import, reinterpret");
+    throw new TypeError("supported commands: scan, import, reinterpret, reprocess, project-identities");
   }
   let delivery: {
     readonly apiUrl: string;
@@ -134,9 +181,23 @@ async function main(): Promise<void> {
     actions: report.actions,
     unknownRecords: report.unknownRecords,
     bySource: report.bySource,
+    diagnostics: report.diagnostics,
     failures: report.failures,
   };
   if (command === "scan") {
+    const reportPath = option("--report");
+    if (reportPath !== undefined) {
+      await writeFile(reportPath, `${JSON.stringify({
+        version: 1,
+        kind: "transcript-parser-inventory",
+        generatedAt: new Date().toISOString(),
+        ...baseSummary,
+        runs: report.transcripts.map(({ bundle, diagnostics }) => ({
+          runId: bundle.run.id, source: bundle.run.source, sourceSha256: bundle.artifact.sha256,
+          parser: bundle.artifact.parser, counts: bundle.run.counts, diagnostics,
+        })),
+      }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    }
     process.stdout.write(`${JSON.stringify({ mode: "dry-run", ...baseSummary }, null, 2)}\n`);
     return;
   }

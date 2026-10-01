@@ -1,3 +1,4 @@
+import type { FoldLogEntry } from "@_89/fold";
 import { describe, expect, it } from "vitest";
 
 import { assertCanAppendEvent, authorizeEventAccess, FoldSdk } from "../src/index.js";
@@ -62,5 +63,28 @@ describe("SDK capture-scope access", () => {
     await expect(
       sdk.listEntries(access({ workspaceRole: "invalid" as never })),
     ).rejects.toThrow(/unsupported workspace role/);
+  });
+
+  it("uses a store-validated append without replaying existing events", async () => {
+    class ValidatedStore extends MemoryStore {
+      validatedAppends = 0;
+
+      override async read(): Promise<{ readonly entries: readonly FoldLogEntry[] }> {
+        throw new Error("the optimized append path must not read the log");
+      }
+
+      async appendValidated(entry: FoldLogEntry): Promise<"appended"> {
+        this.validatedAppends += 1;
+        this.entries.push(entry);
+        return "appended";
+      }
+    }
+
+    const store = new ValidatedStore();
+    const sdk = new FoldSdk(store);
+    await expect(sdk.append(access(), event({ id: "event-fast", t: 4 }))).resolves.toMatchObject({
+      event: { id: "event-fast" },
+    });
+    expect(store.validatedAppends).toBe(1);
   });
 });

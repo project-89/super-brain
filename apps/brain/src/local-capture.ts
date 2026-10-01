@@ -33,6 +33,7 @@ export async function localCaptureRequest<T>(settings: ConnectionSettings, path:
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     });
     const body = await response.json() as T & { readonly error?: string };
+    if ((response.status === 401 || response.status === 403) && options.operator !== false) throw new SuperBrainApiError(response.status, "capture_access_denied", "Local archive access denied: capture operator credential is missing or invalid.");
     if (!response.ok) throw new SuperBrainApiError(response.status, "capture_request_failed", body.error ?? `Local capture request failed (${response.status})`);
     return body;
   } catch (error) {

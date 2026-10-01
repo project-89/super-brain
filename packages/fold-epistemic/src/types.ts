@@ -19,6 +19,8 @@ export interface MemoryEntityRef {
 }
 
 export type MemoryAudience = "personal" | "workspace";
+/** Legacy string encoding accepted on replay and input parsing; canonical form is `MemoryApplicability`. */
+export type LegacyMemoryApplicability = "project" | "general" | "unresolved";
 
 export type MemoryApplicability =
   | { readonly kind: "unresolved" }
@@ -46,6 +48,7 @@ export interface PersonalMemory extends MemoryValidityInput {
   readonly spaceId?: string;
   readonly creatorId: string;
   readonly audience: MemoryAudience;
+  readonly applicability?: MemoryApplicability;
   readonly projectIds: readonly string[];
   readonly source: string;
   readonly summary: string;
@@ -63,6 +66,7 @@ export interface MemoryInput extends MemoryValidityInput {
   readonly id: string;
   readonly spaceId?: string;
   readonly audience?: MemoryAudience;
+  readonly applicability?: MemoryApplicability;
   readonly projectIds?: readonly string[];
   readonly source: string;
   readonly summary?: string;
@@ -73,6 +77,8 @@ export interface MemoryInput extends MemoryValidityInput {
 }
 
 export interface MemoryRevisionPatch extends MemoryValidityInput {
+  readonly applicability?: MemoryApplicability;
+  readonly projectIds?: readonly string[];
   readonly summary?: string;
   readonly content?: JsonValue;
   readonly tags?: readonly string[];
@@ -154,6 +160,7 @@ export interface MemoryCandidateInput extends MemoryValidityInput {
   readonly id: string;
   readonly spaceId?: string;
   readonly audience?: MemoryAudience;
+  readonly applicability?: MemoryApplicability;
   readonly projectIds?: readonly string[];
   readonly source: string;
   readonly summary: string;
@@ -167,6 +174,7 @@ export interface MemoryCandidateInput extends MemoryValidityInput {
 }
 
 export interface MemoryCandidate extends Omit<MemoryCandidateInput, "audience" | "projectIds" | "tags" | "entities"> {
+  readonly supportEventIds?: readonly string[];
   readonly workspaceId: string;
   readonly proposerId: string;
   readonly audience: MemoryAudience;

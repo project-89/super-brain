@@ -3,14 +3,14 @@ import { createReadStream } from "node:fs";
 import { opendir, stat } from "node:fs/promises";
 import { extname } from "node:path";
 
-export async function discoverJsonlFiles(root: string): Promise<readonly string[]> {
+export async function discoverJsonlFiles(root: string, accept: (name: string) => boolean = (name) => extname(name) === ".jsonl"): Promise<readonly string[]> {
   const files: string[] = [];
   async function visit(directory: string): Promise<void> {
     const entries = await opendir(directory);
     for await (const entry of entries) {
       const path = `${directory}/${entry.name}`;
       if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile() && extname(entry.name) === ".jsonl") files.push(path);
+      else if (entry.isFile() && accept(entry.name)) files.push(path);
     }
   }
   await visit(root);

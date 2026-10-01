@@ -10,6 +10,7 @@ import {
   DurableSpool,
   HookVault,
   StateStore,
+  SpoolProcessor,
   parseCaptureConfig,
 } from "../src/index.js";
 
@@ -39,10 +40,15 @@ describe("capture operator settings", () => {
     await engine.initialize();
     const artifact = await vault.store("codex", { session_id: "session-a", hook_event_name: "PostToolUse", output: "complete" }, 1);
     const update = vi.fn(async (patch) => ({ ...config, ...patch }));
-    const server = new CaptureHttpServer(config, engine, spool, update);
+    const delivery = new SpoolProcessor(config, spool);
+    const server = new CaptureHttpServer(config, engine, spool, update, undefined, () => delivery.snapshot());
     const address = await server.start();
     const url = `http://${address.host}:${address.port}/settings`;
     try {
+      const health = await fetch(`http://${address.host}:${address.port}/health`);
+      await expect(health.json()).resolves.toMatchObject({
+        status: "ok", delivery: { status: "idle", countersSinceStart: { attempted: 0, delivered: 0, failures: 0 } },
+      });
       expect((await fetch(url)).status).toBe(401);
       const processingUrl = `http://${address.host}:${address.port}/processing`;
       expect((await fetch(processingUrl, { headers: { "x-super-brain-token": "hook-token" } })).status).toBe(401);
@@ -70,6 +76,20 @@ describe("capture operator settings", () => {
         restartRequired: true,
       });
       expect(update).toHaveBeenCalledOnce();
+
+      const decisionUrl = `http://${address.host}:${address.port}/decision`;
+      const decision = { session_id: "decision-session", summary: "Checked the outcome", verdict: "success" };
+      expect((await fetch(decisionUrl, { method: "POST", headers: { "x-super-brain-hook-token": "hook-token" }, body: JSON.stringify(decision) })).status).toBe(401);
+      const accepted = await fetch(decisionUrl, { method: "POST", headers, body: JSON.stringify(decision) });
+      expect(accepted.status).toBe(202);
+      await expect(accepted.json()).resolves.toMatchObject({ accepted: true, receiptId: expect.any(String) });
+      // A caller-selected authority field on the agent hook interface cannot attest operator provenance.
+      const claimed = await fetch(`http://${address.host}:${address.port}/hook`, {
+        method: "POST", headers: { "x-super-brain-hook-token": "hook-token" },
+        body: JSON.stringify({ ...decision, hook_event_name: "HumanDecision", authority: "operator" }),
+      });
+      expect(claimed.status).toBe(401);
+      await expect(claimed.json()).resolves.toEqual({ error: "operator_authority_required" });
 
       const artifactUrl = `http://${address.host}:${address.port}/hook-artifacts/codex/${artifact.id}`;
       expect((await fetch(artifactUrl)).status).toBe(401);

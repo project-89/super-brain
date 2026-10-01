@@ -2,13 +2,18 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { derivationHash } from "@_89/fold-transcript";
 import { decryptVaultLine, encryptVaultLine, ensureVaultKey, withPrivateRootWrite } from "@_89/super-brain-importer";
+import { RULE_EXTRACTOR } from "./extractor.js";
 
-export type WorkerJobState = "pending" | "waiting" | "retry" | "completed" | "excluded" | "exhausted";
+/** `blocked` jobs stay active and preserved but are never drained until an operator explicitly retries them. */
+export type WorkerJobState = "pending" | "waiting" | "retry" | "blocked" | "completed" | "excluded" | "exhausted";
+/** Raised before a new job is admitted when the active ledger is full; transport progress must not advance. */
+export class ProcessingBackpressureError extends Error {}
 export interface WorkerJob {
   readonly version: 1;
   readonly id: string;
-  readonly kind: "extract-run" | "extract-turn" | "propose" | "verify-trajectory" | "cognition-plan" | "synthesis";
+  readonly kind: "extract-run" | "extract-turn" | "propose" | "verify-trajectory" | "cognition-plan" | "synthesis" | "episode";
   readonly state: WorkerJobState;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -21,6 +26,7 @@ export interface ProcessingCoverage {
   readonly pending: number;
   readonly waiting: number;
   readonly retry: number;
+  readonly blocked: number;
   readonly completed: number;
   readonly excluded: number;
   readonly exhausted: number;
@@ -28,10 +34,22 @@ export interface ProcessingCoverage {
   readonly byKind: Readonly<Record<WorkerJob["kind"], number>>;
 }
 
+/** Canonical digest of source evidence, independent of object key order (scheduler windows, sources). */
+export function processingDigest(value: unknown): string {
+  return derivationHash(value);
+}
+
 export function jobDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value, (_key, item: unknown) =>
     item !== null && typeof item === "object" && !Array.isArray(item)
       ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : item)).digest("hex");
+}
+
+/** One worker ledger (and lease) per principal, extractor and publication scope. */
+export function workerJobNamespace(identity: { readonly organizationId?: string; readonly workspaceId: string; readonly principalId: string },
+  scope: { readonly audience?: "personal" | "workspace"; readonly spaceId?: string } = {}): string {
+  return JSON.stringify([identity.organizationId ?? "local", identity.workspaceId, identity.principalId,
+    RULE_EXTRACTOR, scope.audience ?? "workspace", scope.spaceId ?? ""]);
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -63,7 +81,8 @@ export class DurableWorkerJobs {
   private opening: Promise<void> | undefined;
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(readonly root: string, readonly namespace: string) {
+  constructor(readonly root: string, readonly namespace: string, private readonly maxActiveJobs = 10_000) {
+    if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1 || maxActiveJobs > 10_000) throw new TypeError("Active job capacity must be within [1, 10000]");
     this.directory = join(root, jobDigest(namespace));
   }
 
@@ -112,6 +131,7 @@ export class DurableWorkerJobs {
       await privateDirectory(join(this.directory, "completed"));
       await privateDirectory(join(this.directory, "excluded"));
       await privateDirectory(join(this.directory, "exhausted"));
+      await privateDirectory(join(this.directory, "scheduler"));
     } catch (error) { await this.close(); throw error; }
   }
 
@@ -161,11 +181,16 @@ export class DurableWorkerJobs {
     } finally { await unlink(temporary).catch(() => undefined); }
   }
 
+  /** The stable job id for a source identity; enqueue of the same identity is idempotent. */
+  identify(kind: WorkerJob["kind"], identity: unknown): string { return jobDigest([this.namespace, kind, identity]); }
+
   async enqueue(kind: WorkerJob["kind"], identity: unknown, payload: unknown, now = Date.now()): Promise<WorkerJob> {
     return this.serialize(async () => {
-    const id = jobDigest([this.namespace, kind, identity]);
+    const id = this.identify(kind, identity);
     const existing = await this.get(id);
     if (existing !== undefined) return existing;
+    const active = (await readdir(join(this.directory, "active"))).filter((name) => /^[a-f0-9]{64}\.enc$/.test(name)).length;
+    if (active >= this.maxActiveJobs) throw new ProcessingBackpressureError(`Memory processing backlog reached ${this.maxActiveJobs} jobs; transport progress has not advanced`);
     const job: WorkerJob = { version: 1, id, kind, state: "pending", createdAt: now, updatedAt: now, attempts: 0, nextAttemptAt: now, payload };
     await this.putInternal(job);
     return job;
@@ -185,16 +210,62 @@ export class DurableWorkerJobs {
 
   async coverage(): Promise<ProcessingCoverage> {
     const jobs = await this.active();
-    const byKind = { "extract-run": 0, "extract-turn": 0, propose: 0, "verify-trajectory": 0, "cognition-plan": 0, synthesis: 0 };
+    const byKind = { "extract-run": 0, "extract-turn": 0, propose: 0, "verify-trajectory": 0, "cognition-plan": 0, synthesis: 0, episode: 0 };
     for (const job of jobs) byKind[job.kind] += 1;
     const count = async (state: "completed" | "excluded" | "exhausted") => (await readdir(join(this.directory, state))).filter((name) => /^[a-f0-9]{64}\.enc$/.test(name)).length;
     return {
       pending: jobs.filter(({ state }) => state === "pending").length,
       waiting: jobs.filter(({ state }) => state === "waiting").length,
       retry: jobs.filter(({ state }) => state === "retry").length,
+      blocked: jobs.filter(({ state }) => state === "blocked").length,
       completed: await count("completed"), excluded: await count("excluded"), exhausted: await count("exhausted"), byKind,
       ...(jobs.length === 0 ? {} : { oldestPendingAt: Math.min(...jobs.map(({ createdAt }) => createdAt)) }),
     };
+  }
+
+  /** Explicit operator recovery: blocked, waiting and retrying work becomes immediately runnable again. */
+  retryBlocked(now = Date.now()): Promise<number> {
+    return this.serialize(async () => {
+      let count = 0;
+      for (const job of await this.active()) {
+        if (job.state !== "blocked" && job.state !== "waiting" && job.state !== "retry") continue;
+        const { reason: _reason, ...rest } = job;
+        await this.putInternal({ ...rest, state: "pending", attempts: 0, nextAttemptAt: now, updatedAt: now });
+        count++;
+      }
+      return count;
+    });
+  }
+
+  private schedulerPath(id: string): string {
+    if (!/^[a-f0-9]{64}$/.test(id)) throw new TypeError("Invalid scheduler identity");
+    return join(this.directory, "scheduler", `${id}.enc`);
+  }
+
+  /** Durable window-scheduler checkpoints share the ledger's lease and encryption key. */
+  async readSchedulerState(id: string): Promise<unknown | undefined> {
+    if (!this.opened || this.key === undefined) throw new Error("Open the worker job store before reading scheduler state");
+    try { return JSON.parse(decryptVaultLine(await readFile(this.schedulerPath(id), "utf8"), this.key)) as unknown; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  }
+
+  writeSchedulerState(id: string, state: unknown): Promise<void> {
+    return this.serialize(async () => {
+      if (!this.opened || this.key === undefined) throw new Error("Open the worker job store before saving scheduler state");
+      const path = this.schedulerPath(id);
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        const handle = await open(temporary, "wx", 0o600);
+        try { await handle.writeFile(encryptVaultLine(JSON.stringify(state), this.key)); await handle.sync(); }
+        finally { await handle.close(); }
+        await rename(temporary, path);
+        await syncDirectory(dirname(path));
+      } finally { await unlink(temporary).catch(() => undefined); }
+    });
+  }
+
+  async schedulerStateIds(): Promise<string[]> {
+    return (await readdir(join(this.directory, "scheduler"))).flatMap((name) => /^([a-f0-9]{64})\.enc$/.exec(name)?.[1] ?? []).sort();
   }
 
   async close(): Promise<void> {

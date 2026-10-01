@@ -111,7 +111,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
       const summary = text(payload.summary);
       if (summary !== undefined) {
         append(artifact, {
-          nodeKind: "decision",
+          nodeKind: text(payload.decision) === undefined ? "observation" : "decision",
           role: "model_thought",
           content: bounded(summary, 2_000),
           ...(turnId === undefined ? {} : { turnId }),
@@ -146,7 +146,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         const summary = text(object(summaryInput)?.text);
         if (summary !== undefined) {
           append(artifact, {
-            nodeKind: "decision",
+            nodeKind: "observation",
             role: "model_thought",
             content: bounded(summary, 2_000),
             ...(turnId === undefined ? {} : { turnId }),

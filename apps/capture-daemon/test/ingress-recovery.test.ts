@@ -34,7 +34,7 @@ it("includes pre-boundary acknowledgements, journals held HTTP arrivals, and rep
     const engine=new CaptureEngine(f.config,new StateStore(f.config.stateRoot),new HookVault(f.config.vaultRoot,f.key),new DurableSpool(f.config.stateRoot));await engine.initialize();const queue=new CaptureReceiptQueue(engine,f.key);await queue.drain();
     expect((await journal.pending("receiver")).length).toBe(0);
     const retry=await queue.accept(occurrence("after"));expect(retry.artifactId).toMatch(/^[a-f0-9]{64}$/);expect(retry.deferred).toBeUndefined();
-    const stored=JSON.stringify(await engine.stateStore.load());expect(stored).toContain("after");
+    const stored=JSON.stringify(await engine.stateStore.load());expect(stored).toContain(retry.artifactId!);
     await sender.acknowledge("during");expect((await journal.pending("sender")).length).toBe(0);
   }finally{await seal.release();await server.close();await rm(f.base,{recursive:true,force:true});}
 });

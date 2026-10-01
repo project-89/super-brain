@@ -49,7 +49,9 @@ async function fixture(includeReasoning = false) {
   const options: CaptureAuthorityOptions = { stateRoot: config.stateRoot, vaultRoot: config.vaultRoot, receiptEncryptionKey: key, vaultEncryptionKey: key,
     trustedSensorId: config.sensorId, organizationId: config.organizationId, workspaceId: config.workspaceId };
   const witnessPath = join(config.stateRoot, "receipts", "receiver", "completed", `${createHash("sha256").update(receiptId).digest("hex")}.json.enc`);
-  const artifactPath = join(config.vaultRoot, "hooks", "codex", accepted.artifactId.slice(0, 2), `${accepted.artifactId}.json.enc`);
+  const artifactId = accepted.artifactId;
+  if (artifactId === undefined) throw new Error("accepted capture must retain its artifact");
+  const artifactPath = join(config.vaultRoot, "hooks", "codex", artifactId.slice(0, 2), `${artifactId}.json.enc`);
   const witness = JSON.parse(decryptVaultLine((await readFile(witnessPath, "utf8")).trim(), key)) as CaptureReceipt;
   return { root, queue, spool, repository, event, expected, key, options, witnessPath, artifactPath, witness, verify: createCapturedEventVerifier(options) };
 }

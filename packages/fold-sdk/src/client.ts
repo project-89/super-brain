@@ -2,6 +2,7 @@ import { BoundedCache, serializedCost, immutable, sha256 } from "./cache.js";
 import { MEMORY_CHECKPOINT_VERSION, encodeMemoryCheckpoint, decodeMemoryCheckpoint } from "./checkpoint.js";
 import {
   fold,
+  continueFold,
   forkAt,
   parseEvent,
   sortLog,
@@ -9,7 +10,11 @@ import {
   type FoldEvent,
   type FoldLogEntry,
 } from "@_89/fold";
+import { performance } from "node:perf_hooks";
+import { EpisodeService } from "./episodes.js";
+import { episodeWindowFromEvent, type EpisodePublication, type EpisodeWindowInput } from "@_89/fold-epistemic";
 import {
+  matchesMemoryProjects,
   makeMemoryForgottenEvent,
   makeMemoryEvidenceContributedEvent,
   makeMemoryCandidateEvidenceContributedEvent,
@@ -28,6 +33,10 @@ import {
   type MemoryFeedbackInputV2,
   type MemoryFeedbackRecord,
   makeMemoryCandidateAcceptedEvent,
+  makeMemoryCandidateEvidenceAddedEvent,
+  equivalentMemoryCandidateMeaning,
+  candidateSupportSourceMatches,
+  mergeMemoryCandidateEvidence,
   makeMemoryCandidateProposedEvent,
   makeMemoryCandidateRejectedEvent,
   makeMemoryRecordedEvent,
@@ -50,6 +59,7 @@ import {
   type MemoryInput,
   type MemoryFeedbackInput,
   type MemoryCandidateInput,
+  type MemoryCandidate,
   type MemoryCandidateProjection,
   type MemoryProjection,
   type MemoryRevisionPatch,
@@ -59,13 +69,17 @@ import {
 } from "@_89/fold-epistemic";
 import {
   analyzeTrajectoryTask,
+  effectiveTrajectoryRecord,
+  makeTrajectoryOutcomeRecordedEvent,
   makeTrajectoryRecordedEvent,
   makeTrajectoryTreeRecordedEvent,
   rebuildTrajectories,
+  continueTrajectories,
   trajectoryLogRecordsFromEvent,
   type TrajectoryEventContext,
   type TrajectoryEventStamp,
   type TrajectoryInput,
+  type TrajectoryOutcomeInput,
   type TrajectoryState,
   type TrajectoryTreeRecord,
   taskEvidenceRecordsFromEvent, makeTaskEvidenceEvent, rebuildTaskEvidence, TASK_EVIDENCE_KINDS,
@@ -107,6 +121,14 @@ import {
 import {
   transcriptRecordsFromEvent,
   makeTranscriptArtifactEvent,
+  canonicalProjectId,
+  identityRecordFromEvent,
+  identityRevisionEventId,
+  makeIdentityEvent,
+  rebuildIdentities,
+  resolveProjectIds,
+  type IdentityInput,
+  type ProjectAliasInput,
   makeTranscriptChunkEvent,
   makeTranscriptProjectEvent,
   makeTranscriptRunEvent,
@@ -115,6 +137,14 @@ import {
   transcriptImportBundleSchema,
   validateTranscriptEventEnvelope,
   validateTranscriptInterpretation,
+  derivationRecordFromEvent,
+  derivationHash,
+  makeTranscriptDerivationEvent,
+  transcriptDerivationManifestSchema,
+  transcriptDerivationChunkSchema,
+  type TranscriptDerivationManifest,
+  type TranscriptDerivationChunk,
+  type TranscriptDerivationRecord,
   type TranscriptCatalog,
   type TranscriptChunk,
   type TranscriptProject,
@@ -122,6 +152,7 @@ import {
 } from "@_89/fold-transcript";
 
 import { FoldSdkAccessError, assertCanAppendEvent, authorizeEventAccess } from "./access.js";
+import { identitySnapshotFromEvents, projectAliasPreview } from "./identity.js";
 import type {
   FoldSdkAccessContext,
   FoldSdkActivityContext,
@@ -129,6 +160,7 @@ import type {
   FoldSdkListOptions,
   FoldSdkProjectOptions,
   FoldSdkProjection,
+  FoldSdkSystemProjection,
   FoldSdkReadOptions,
   FoldSdkStore,
   FoldCommandReceipt,
@@ -169,6 +201,7 @@ const MEMORY_EVENT_KINDS = new Set([
   "memory.evidence-contributed",
 ]);
 const TRAJECTORY_EVENT_KINDS = new Set([
+  "trajectory.outcome-recorded",
   "trajectory.tree-recorded",
   "trajectory.recorded",
 ]);
@@ -178,6 +211,7 @@ const MEMORY_RECORD_TYPE_BY_KIND = {
   "memory.forgotten": "forgotten",
 } as const;
 const TRAJECTORY_RECORD_TYPE_BY_KIND = {
+  "trajectory.outcome-recorded": "outcome",
   "trajectory.tree-recorded": "tree",
   "trajectory.recorded": "trajectory",
 } as const;
@@ -300,6 +334,15 @@ function canonicalJson(value: unknown): string {
   });
 }
 
+let lastDerivationAt = 0;
+function derivationTimestamp(events: readonly FoldEvent[]): number {
+  const clock = performance.timeOrigin + performance.now();
+  const next = events.reduce((latest, event) => Math.max(latest, event.at.t + 1), Math.max(clock, lastDerivationAt + 0.001));
+  // Avoid ties with the capture clock's integer-millisecond timestamps.
+  lastDerivationAt = Number.isInteger(next) ? next + 0.5 : next;
+  return lastDerivationAt;
+}
+
 export class FoldSdk {
   private queue: Promise<void> = Promise.resolve();
   private storedEntries: FoldLogEntry[] | undefined;
@@ -318,11 +361,20 @@ export class FoldSdk {
   /** Release read accelerators; an in-flight command retains its own pinned snapshot. */
   releaseReadCaches(): void {
     this.storedEntries = undefined; this.storedRevision = undefined; this.sourceCacheBytes = 0;
-    this.validatedEntries = new WeakMap(); this.transcriptCatalogs.clear(); this.memoryProjections.clear(); this.candidateProjections.clear(); this.readProjections.clear();
+    this.validatedEntries = new WeakMap(); this.validatedStoredEvents = new WeakMap(); this.transcriptDerivationRecords = new WeakMap();
+    this.trajectoryProjections.clear(); this.trajectoryValidation = undefined; this.identityProjections.clear(); this.systemProjections.clear(); this.transcriptCatalogs.clear(); this.memoryProjections.clear(); this.candidateProjections.clear(); this.readProjections.clear();
   }
 
   private commandState: { entries?: FoldLogEntry[]; revision?: string; staged: FoldLogEntry[]; method: string } | undefined;
   private readonly localReceipts = new Map<string, FoldCommandReceipt>();
+  private validatedStoredEvents = new WeakMap<FoldEvent, FoldEvent>();
+  /** Trajectory state for the complete canonical log, shared by write validation and full-visibility reads. */
+  private trajectoryValidation: { readonly events: readonly FoldEvent[]; readonly state: TrajectoryState } | undefined;
+  private pendingTrajectoryValidation: { readonly events: readonly FoldEvent[]; readonly state: TrajectoryState } | undefined;
+  private readonly trajectoryProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly state: TrajectoryState }>();
+  private transcriptDerivationRecords = new WeakMap<FoldEvent, TranscriptDerivationRecord>();
+  private readonly identityProjections = new Map<string, { readonly revision?: string; readonly projection: ReturnType<typeof rebuildIdentities> }>();
+  private readonly systemProjections = new Map<string, { readonly entries: readonly FoldLogEntry[]; readonly projection: FoldSdkSystemProjection }>();
 
   constructor(private readonly store: FoldSdkStore) {}
 
@@ -362,6 +414,7 @@ export class FoldSdk {
             for (const contribution of memoryEvidenceContributionsFromEvent(event)) assertCanWritePersonalMemory({ ...contribution, creatorId: contribution.actorId }, access);
             for (const record of memoryCandidateLogRecordsFromEvent(event)) {
               if (record.recordType === "proposed") assertCanWritePersonalMemory({ ...record.candidate, creatorId: record.candidate.proposerId }, access);
+              else if (record.recordType === "evidence-added") assertCanWritePersonalMemory({ ...record, creatorId: record.actorId }, access);
               else {
                 assertCanWritePersonalMemory({ ...record, creatorId: record.decision.actorId }, access);
                 if (record.audience === "workspace" && access.workspaceRole !== "owner" && access.workspaceRole !== "admin") throw new FoldSdkAccessError("workspace candidate review requires an owner or admin role");
@@ -375,7 +428,7 @@ export class FoldSdk {
         let committed = false;
         try {
           // Pin exactly the snapshot used for every domain precondition in this command.
-          await this.readStoredEntries();
+          if (!(method === "append" && this.storeValidatesAppends())) await this.readStoredEntries();
           const result = await operation();
           const command = { commandId, request: normalized, result };
           if (this.store.commit !== undefined) {
@@ -384,9 +437,14 @@ export class FoldSdk {
             return receipt.result as T;
           }
           // Compatibility stores are single-writer; distributed CAS requires commit().
-          if (state.staged.length > 1 && this.store.appendMany !== undefined) await this.store.appendMany(state.staged);
+          // Store-validated appends re-check domain transitions under the store's own lock.
+          if (state.staged.length > 0 && this.store.appendManyValidated !== undefined) await this.store.appendManyValidated(state.staged);
+          else if (state.staged.length === 1 && this.store.appendValidated !== undefined) await this.store.appendValidated(state.staged[0]!);
+          else if (state.staged.length > 1 && this.store.appendMany !== undefined) await this.store.appendMany(state.staged);
           else for (const entry of state.staged) await this.store.append(entry);
           committed = true;
+          if (this.store.immutableEventReferences === true) for (const entry of state.staged) this.validatedStoredEvents.set(entry.event, entry.event);
+          if (this.pendingTrajectoryValidation !== undefined) this.trajectoryValidation = this.pendingTrajectoryValidation;
           this.localReceipts.set(commandId, { ...command, entries: state.staged, revision: "local" });
           return result;
         } catch (error) {
@@ -394,6 +452,7 @@ export class FoldSdk {
           throw error;
         } finally {
           this.commandState = undefined;
+          this.pendingTrajectoryValidation = undefined;
           this.storedEntries = committed && this.store.stableReads === true ? state.entries : undefined;
           this.storedRevision = undefined;
           this.transcriptCatalogs.clear();
@@ -402,6 +461,10 @@ export class FoldSdk {
         }
       }
     });
+  }
+
+  private storeValidatesAppends(): boolean {
+    return this.store.commit === undefined && this.store.appendValidated !== undefined;
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -419,6 +482,7 @@ export class FoldSdk {
   }
 
   private clearProjectionCachesFor(event: FoldEvent): void {
+    if (event.kind.startsWith("identity.")) this.identityProjections.clear();
     if (event.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
     if (event.kind.startsWith("memory.")) { this.memoryProjections.clear(); this.readProjections.clear(); }
     if (event.kind.startsWith("memory.candidate-")) this.candidateProjections.clear();
@@ -453,6 +517,8 @@ export class FoldSdk {
       const cached = this.store.immutableSnapshots === true ? this.validatedEntries.get(entry) : undefined;
       if (cached !== undefined) { snapshotBytes += cached.bytes; return cached.entry; }
       validateStatus(entry.status);
+      const prior = this.store.immutableEventReferences === true ? this.validatedStoredEvents.get(entry.event) : undefined;
+      if (prior !== undefined) return { event: prior, status: entry.status };
       const event = parseEvent(entry.event);
       validateMemoryEnvelope(event);
       memoryFeedbackRecordsFromEvent(event);
@@ -461,9 +527,12 @@ export class FoldSdk {
       validateActivityEventEnvelope(event);
       validateIntentionEventEnvelope(event);
       validateTranscriptEventEnvelope(event);
+      identityRecordFromEvent(event);
+      episodeWindowFromEvent(event);
       const parsed = immutable({ event, status: entry.status });
       const bytes = serializedCost(parsed); snapshotBytes += bytes;
       if (this.store.immutableSnapshots === true) this.validatedEntries.set(entry, { entry: parsed, bytes });
+      if (this.store.immutableEventReferences === true) this.validatedStoredEvents.set(entry.event, event);
       return parsed;
     });
     this.sourceCacheBytes = Math.max(this.sourceCacheBytes, snapshotBytes);
@@ -478,24 +547,37 @@ export class FoldSdk {
     return entries;
   }
 
+  private validateIncomingEntry(access: FoldSdkAccessContext, event: FoldEvent, status: FoldLogEntry["status"]): FoldLogEntry {
+    validateStatus(status);
+    const candidate = parseEvent(event);
+    validateMemoryEnvelope(candidate);
+    memoryFeedbackRecordsFromEvent(candidate);
+    if (candidate.kind === "memory.feedback-recorded" && !["recordMemoryFeedback", "recordMemoryFeedbackBatch"].includes(this.commandState?.method ?? "")) throw new FoldSdkAccessError("feedback must use the validated feedback command");
+    validateMemoryCandidateEnvelope(candidate);
+    validateTrajectoryEnvelope(candidate);
+    validateActivityEventEnvelope(candidate);
+    validateIntentionEventEnvelope(candidate);
+    validateTranscriptEventEnvelope(candidate);
+    identityRecordFromEvent(candidate);
+    if (episodeWindowFromEvent(candidate) !== undefined && this.commandState?.method !== "publishEpisodeWindow") throw new FoldSdkAccessError("Episodes require the episode publication API");
+    assertCanAppendEvent(candidate, access);
+    return { event: candidate, status };
+  }
+
+  /** A store that validates domain transitions atomically accepts a raw append without a client-side log replay. */
+  private storeValidatedAppend(access: FoldSdkAccessContext, event: FoldEvent, status: FoldLogEntry["status"]): FoldLogEntry {
+    const entry = this.validateIncomingEntry(access, event, status);
+    if (this.commandState === undefined) throw new FoldSdkError("append requires a command boundary");
+    this.commandState.staged.push(entry);
+    this.clearProjectionCachesFor(entry.event);
+    return entry;
+  }
+
   private async commitEntryBatch(
     access: FoldSdkAccessContext,
     input: readonly FoldLogEntry[],
   ): Promise<readonly FoldLogEntry[]> {
-    const parsed = input.map(({ event, status }) => {
-      validateStatus(status);
-      const candidate = parseEvent(event);
-      validateMemoryEnvelope(candidate);
-      memoryFeedbackRecordsFromEvent(candidate);
-      if (candidate.kind === "memory.feedback-recorded" && !["recordMemoryFeedback", "recordMemoryFeedbackBatch"].includes(this.commandState?.method ?? "")) throw new FoldSdkAccessError("feedback must use the validated feedback command");
-      validateMemoryCandidateEnvelope(candidate);
-      validateTrajectoryEnvelope(candidate);
-      validateActivityEventEnvelope(candidate);
-      validateIntentionEventEnvelope(candidate);
-      validateTranscriptEventEnvelope(candidate);
-      assertCanAppendEvent(candidate, access);
-      return { event: candidate, status };
-    });
+    const parsed = input.map(({ event, status }) => this.validateIncomingEntry(access, event, status));
     const entries = await this.readStoredEntries();
     const added: FoldLogEntry[] = [];
     const entriesById = new Map(entries.map((entry) => [entry.event.id, entry]));
@@ -522,7 +604,13 @@ export class FoldSdk {
     // Raw append and domain commands share the same invariant checks before any durable write.
     if (added.some(({ event, status }) => status === "canon" && (MEMORY_EVENT_KINDS.has(event.kind) || event.kind === "memory.feedback-recorded"))) rebuildMemories(canonicalEvents);
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("memory.candidate-"))) rebuildMemoryCandidates(canonicalEvents);
-    if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("trajectory."))) rebuildTrajectories(canonicalEvents);
+    if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("trajectory."))) {
+      // Validate the complete canonical log, extending the last validated prefix when source order allows.
+      const prior = this.trajectoryValidation;
+      const extendsPrior = prior !== undefined && prior.events.length <= canonicalEvents.length && prior.events.every((event, index) => canonicalEvents[index] === event);
+      const state = extendsPrior ? continueTrajectories(prior.state, canonicalEvents.slice(prior.events.length)) : rebuildTrajectories(canonicalEvents);
+      this.pendingTrajectoryValidation = { events: canonicalEvents, state };
+    }
     if (added.some(({ event, status }) => status === "canon" && event.kind.startsWith("transcript."))) rebuildTranscriptCatalog(canonicalEvents);
     if (this.commandState === undefined) throw new FoldSdkError("append requires a command boundary");
     this.commandState.staged.push(...added);
@@ -593,6 +681,15 @@ export class FoldSdk {
       }
     }
     for (const record of candidateRecords) {
+      if (record.recordType === "evidence-added") {
+        const candidate = candidates().candidates.get(record.candidateId);
+        if (candidate === undefined) throw new FoldSdkConflictError("candidate is unavailable");
+        const scope = { ...candidate, creatorId: candidate.proposerId };
+        assertCanWritePersonalMemory(scope, access);
+        if (record.actorId !== access.principalId) throw new FoldSdkAccessError("candidate support actor does not match authenticated actor");
+        assertEvidence(scope, record.evidence);
+        continue;
+      }
       const candidate = record.recordType === "proposed" ? record.candidate : candidates().candidates.get(record.decision.candidateId);
       if (candidate === undefined) throw new FoldSdkConflictError("candidate is unavailable");
       const scope = { ...candidate, creatorId: candidate.proposerId };
@@ -680,7 +777,13 @@ export class FoldSdk {
     event: FoldEvent,
     status: FoldLogEntry["status"] = "canon",
   ): Promise<FoldLogEntry> {
-    return this.command(access, "append", event.id, { event, status }, () => this.appendInternal(access, event, status));
+    return this.command(access, "append", event.id, { event, status }, () => {
+      if (identityRecordFromEvent(event) !== undefined) throw new FoldSdkAccessError("Identity records require the reviewed identity mutation API");
+      if (episodeWindowFromEvent(event) !== undefined) throw new FoldSdkAccessError("Episodes require the episode publication API");
+      if (event.kind === "memory.candidate-evidence-added") throw new FoldSdkAccessError("Candidate support requires the candidate evidence API");
+      if (this.storeValidatesAppends()) return Promise.resolve(this.storeValidatedAppend(access, event, status));
+      return this.appendInternal(access, event, status);
+    });
   }
 
   private async entriesForAccess(
@@ -755,6 +858,35 @@ export class FoldSdk {
     return current.projection;
   }
 
+  systemProjection(access: FoldSdkAccessContext, include: "canon" | "canon+draft" = "canon"): Promise<FoldSdkSystemProjection> {
+    return this.enqueue(async () => {
+      validateAccessContext(access);
+      validateReadOptions({ include });
+      if (this.store.systemProjection !== undefined) return this.store.systemProjection(access, include);
+      const entries = await this.entriesForAccess(access, { include });
+      const key = JSON.stringify([access.organizationId, include, transcriptCatalogCacheKey(access)]);
+      const previous = this.systemProjections.get(key);
+      const prefix = previous !== undefined && previous.entries.length <= entries.length && previous.entries.every((entry, index) =>
+        entry.event === entries[index]!.event && entry.status === entries[index]!.status);
+      if (prefix && previous.entries.length === entries.length) return previous.projection;
+      const options = { include: "canon+draft", existingCreate: "replace", retainApplied: false, validatedInput: true, orderedInput: true } as const;
+      const state = prefix ? continueFold({
+        nodes: new Map(previous.projection.state.nodes), values: new Map(previous.projection.state.values),
+        edges: new Map(previous.projection.state.edges), redirects: new Map(previous.projection.state.redirects),
+        diagnostics: [...previous.projection.state.diagnostics], appliedEvents: [], appliedChanges: [],
+      }, entries.slice(previous.entries.length), options) : fold(entries, options);
+      const projection = {
+        state,
+        appliedEventCount: entries.length,
+        appliedChangeCount: entries.reduce((count, entry) => count + entry.event.changes.length, 0),
+      };
+      this.systemProjections.delete(key);
+      this.systemProjections.set(key, { entries, projection });
+      while (this.systemProjections.size > 4) this.systemProjections.delete(this.systemProjections.keys().next().value!);
+      return projection;
+    });
+  }
+
   private async memoryProjection(
     access: FoldSdkAccessContext,
   ): Promise<{ readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }> {
@@ -788,9 +920,29 @@ export class FoldSdk {
   private async trajectoryProjection(
     access: FoldSdkAccessContext,
   ): Promise<{ readonly events: readonly FoldEvent[]; readonly state: TrajectoryState }> {
+    validateAccessContext(access);
+    const key = JSON.stringify([access.organizationId, transcriptCatalogCacheKey(access)]);
+    const cached = this.trajectoryProjections.get(key);
+    await this.readStoredEntries();
+    if (cached?.revision !== undefined && cached.revision === this.storedRevision) return cached;
     const entries = await this.entriesForAccess(access, { include: "canon" });
+    // Task evidence validation needs acceptance source events of any kind, so the projection folds all visible events.
     const events = entries.map((entry) => entry.event);
-    return { events, state: rebuildTrajectories(events) };
+    const samePrefix = (prior: readonly FoldEvent[]) => events.length >= prior.length && prior.every((event, index) => events[index] === event);
+    const full = this.trajectoryValidation;
+    const extendsPrefix = cached !== undefined && samePrefix(cached.events);
+    const state = full !== undefined && full.events.length === events.length && samePrefix(full.events)
+      ? full.state
+      : extendsPrefix
+        ? continueTrajectories(cached.state, events.slice(cached.events.length))
+        : rebuildTrajectories(events);
+    const canonical = (await this.readStoredEntries()).reduce((count, entry) => count + (entry.status === "canon" ? 1 : 0), 0);
+    if (canonical === events.length && this.commandState === undefined) this.trajectoryValidation = { events, state };
+    const result = { events, state, ...(this.storedRevision === undefined ? {} : { revision: this.storedRevision }) };
+    this.trajectoryProjections.delete(key);
+    this.trajectoryProjections.set(key, result);
+    while (this.trajectoryProjections.size > 16) this.trajectoryProjections.delete(this.trajectoryProjections.keys().next().value!);
+    return result;
   }
 
   private async transcriptProjection(access: FoldSdkAccessContext): Promise<TranscriptCatalog> {
@@ -800,7 +952,7 @@ export class FoldSdk {
     await this.readStoredEntries();
     if (cached !== undefined && this.projectionCacheIsCurrent(cached.revision)) return cached.catalog;
     const entries = await this.entriesForAccess(access, { include: "canon" });
-    const catalog = rebuildTranscriptCatalog(entries.map((entry) => entry.event));
+    const catalog = rebuildTranscriptCatalog(entries.map((entry) => entry.event).filter((event) => !event.kind.startsWith("transcript.derivation")));
     this.transcriptCatalogs.set(cacheKey, {
       catalog,
       ...(this.storedRevision === undefined ? {} : { revision: this.storedRevision }),
@@ -840,15 +992,17 @@ export class FoldSdk {
   ): Promise<readonly TranscriptRun[]> {
     return this.enqueue(async () => {
       const catalog = await this.transcriptProjection(access);
+      const projectIds = await this.expandedProjects(access, filters.projectId === undefined ? undefined : [filters.projectId]);
       return [...catalog.runs.values()]
         .filter((run) => filters.source === undefined || run.source === filters.source)
-        .filter((run) => filters.projectId === undefined ||
-          run.projectId === filters.projectId ||
-          run.segments.some((segment) => segment.projectId === filters.projectId))
-        .sort((left, right) =>
-          (right.endedAt ?? right.startedAt ?? "").localeCompare(left.endedAt ?? left.startedAt ?? "") ||
-          left.id.localeCompare(right.id),
-        );
+        .filter((run) => projectIds === undefined ||
+          (run.projectId !== undefined && projectIds.includes(run.projectId)) ||
+          run.segments.some((segment) => segment.projectId !== undefined && projectIds.includes(segment.projectId)))
+        .sort((left, right) => {
+          const leftAt = left.endedAt ?? left.startedAt ?? "";
+          const rightAt = right.endedAt ?? right.startedAt ?? "";
+          return leftAt < rightAt ? 1 : leftAt > rightAt ? -1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+        });
     });
   }
 
@@ -875,6 +1029,94 @@ export class FoldSdk {
         }),
         chunks: catalog.chunksByRun.get(run.id) ?? [],
       };
+    });
+  }
+
+  transcriptReprocessingSources(access: FoldSdkAccessContext) {
+    return this.enqueue(async () => {
+      const catalog = await this.transcriptProjection(access);
+      return [...catalog.runs.values()].map((run) => ({ run, artifact: catalog.artifacts.get(run.artifactId)! }));
+    });
+  }
+
+  private transcriptDerivationRecord(event: FoldEvent): TranscriptDerivationRecord | undefined {
+    if (!event.kind.startsWith("transcript.derivation")) return undefined;
+    const cached = this.transcriptDerivationRecords.get(event);
+    if (cached !== undefined) return cached;
+    const record = derivationRecordFromEvent(event);
+    if (record !== undefined) this.transcriptDerivationRecords.set(event, record);
+    return record;
+  }
+
+  transcriptDerivations(access: FoldSdkAccessContext, runId: string) {
+    return this.enqueue(async () => {
+      const catalog = await this.transcriptProjection(access);
+      if (!catalog.runs.has(runId)) throw new FoldSdkError("Transcript run is unavailable");
+      const entries = await this.entriesForAccess(access, { include: "canon" });
+      const records = entries.flatMap(({ event }) => {
+        const record = this.transcriptDerivationRecord(event);
+        return record === undefined ? [] : [{ record, eventId: event.id, recordedAt: event.at.t }];
+      });
+      return records.flatMap(({ record, eventId, recordedAt }) => {
+        if (record.recordType !== "derivation" || record.manifest.runId !== runId) return [];
+        const chunks = records.flatMap(({ record: item }) => item.recordType === "derivation-chunk" && item.chunk.derivationId === record.derivationId ? [item.chunk] : []).sort((a, b) => a.sequence - b.sequence);
+        let ordinal = 0;
+        for (const [sequence, chunk] of chunks.entries()) {
+          if (chunk.runId !== runId || chunk.sequence !== sequence || derivationHash(chunk.records) !== record.manifest.chunkHashes[sequence] || chunk.records.some((item) => item.ordinal !== ordinal++)) throw new FoldSdkConflictError("Stored derivation chunks failed integrity validation");
+        }
+        if (chunks.length === record.manifest.chunkHashes.length && ordinal !== record.manifest.records) throw new FoldSdkConflictError("Stored derivation record total is invalid");
+        return [{ ...record, eventId, recordedAt, complete: chunks.length === record.manifest.chunkHashes.length, chunks }];
+      });
+    });
+  }
+
+  recordTranscriptDerivation(context: FoldSdkTranscriptContext, input: { readonly manifest: TranscriptDerivationManifest } | { readonly chunk: TranscriptDerivationChunk }) {
+    return this.command(context.access, "recordTranscriptDerivation", derivationHash(input), { context, input }, async () => {
+      const entries = await this.entriesForAccess(context.access, { include: "canon" });
+      const events = entries.map(({ event }) => event);
+      const catalog = rebuildTranscriptCatalog(events.filter((event) => !event.kind.startsWith("transcript.derivation")));
+      let record: TranscriptDerivationRecord;
+      if ("manifest" in input) {
+        const manifest = transcriptDerivationManifestSchema.parse(input.manifest);
+        record = { recordType: "derivation", derivationId: derivationHash(manifest), manifest };
+      } else record = { recordType: "derivation-chunk", chunk: transcriptDerivationChunkSchema.parse(input.chunk) };
+      const runId = record.recordType === "derivation" ? record.manifest.runId : record.chunk.runId;
+      const run = catalog.runs.get(runId);
+      const artifact = run === undefined ? undefined : catalog.artifacts.get(run.artifactId);
+      const sourceEvent = events.find((event) => event.kind === "transcript.run-imported" && event.changes.some((change) => change.verb === "create" && change.after.run !== null && typeof change.after.run === "object" && !Array.isArray(change.after.run) && change.after.run.id === runId));
+      if (run === undefined || artifact === undefined || sourceEvent === undefined) throw new FoldSdkError("Transcript run is unavailable");
+      const prior = events.flatMap((event) => { const value = this.transcriptDerivationRecord(event); return value === undefined ? [] : [{ event, record: value }]; });
+      if (record.recordType === "derivation") {
+        const manifest = record.manifest;
+        const policy = { contentPolicy: artifact.contentPolicy, ...(artifact.reasoningPolicy === undefined ? {} : { reasoningPolicy: artifact.reasoningPolicy }), ...(artifact.encryptedReasoningPolicy === undefined ? {} : { encryptedReasoningPolicy: artifact.encryptedReasoningPolicy }), ...(artifact.anonymizationPolicy === undefined ? {} : { anonymizationPolicy: artifact.anonymizationPolicy }) };
+        if (!artifact.stored || artifact.contentPolicy !== "redacted" || manifest.artifactId !== run.artifactId || manifest.sourceSha256 !== artifact.sha256 || derivationHash(manifest.policy) !== derivationHash(policy)) throw new FoldSdkError("Derivation source or retention policy does not match the imported artifact");
+        if ((manifest.records === 0) !== (manifest.chunkHashes.length === 0)) throw new FoldSdkError("Derivation record and chunk counts disagree");
+        if (Object.values(manifest.byKind).reduce((sum, count) => sum + count, 0) !== manifest.records) throw new FoldSdkError("Derivation evidence counts disagree");
+      } else {
+        const chunk = record.chunk;
+        const parent = prior.find(({ record: item }) => item.recordType === "derivation" && item.derivationId === chunk.derivationId)?.record;
+        if (parent?.recordType !== "derivation" || parent.manifest.runId !== runId) throw new FoldSdkError("Derivation manifest is unavailable");
+        if (parent.manifest.chunkHashes[chunk.sequence] !== derivationHash(chunk.records)) throw new FoldSdkConflictError("Derivation chunk checksum does not match its manifest");
+        const earlier = prior.flatMap(({ record: item }) => item.recordType === "derivation-chunk" && item.chunk.derivationId === chunk.derivationId && item.chunk.sequence < chunk.sequence ? [item.chunk] : []);
+        if (earlier.length !== chunk.sequence) throw new FoldSdkConflictError("Derivation chunks must arrive in order");
+        const offset = earlier.reduce((sum, item) => sum + item.records.length, 0);
+        if (chunk.records.some((item, index) => item.ordinal !== offset + index)) throw new FoldSdkConflictError("Derived record ordinals must be contiguous");
+        if (chunk.sequence === parent.manifest.chunkHashes.length - 1 && offset + chunk.records.length !== parent.manifest.records) throw new FoldSdkConflictError("Derivation record total does not match its manifest");
+      }
+      const key = record.recordType === "derivation" ? `${record.derivationId}:manifest` : `${record.chunk.derivationId}:${record.chunk.sequence}`;
+      const eventId = `transcript-derivation:${key}`;
+      const existing = prior.find(({ event }) => event.id === eventId);
+      if (existing !== undefined) {
+        if (derivationHash(existing.record) !== derivationHash(record)) throw new FoldSdkConflictError("Derivation changed after recording");
+        return { imported: false, eventId };
+      }
+      const t = derivationTimestamp(events);
+      const event = makeTranscriptDerivationEvent({
+        author: context.author,
+        capture: { ...sourceEvent.capture, identity: { ...sourceEvent.capture.identity, principal: context.access.principalId, derivation: record.recordType === "derivation" ? record.derivationId : record.chunk.derivationId } },
+      }, { id: eventId, t, worldDate: new Date(t).toISOString().slice(0, 10) }, record);
+      await this.appendInternal(context.access, event, "canon");
+      return { imported: true, eventId };
     });
   }
 
@@ -1080,6 +1322,11 @@ export class FoldSdk {
           throw new FoldSdkConflictError(`trajectory tree revision is not additive for task ${tree.taskId}`);
         }
       }
+      const last = current.events.at(-1);
+      if (last !== undefined && (event.at.t < last.at.t || (event.at.t === last.at.t && event.id < last.id))) {
+        try { rebuildTrajectories(sortLog([...current.events, event].map((item) => ({ event: item, status: "canon" as const }))).map((entry) => entry.event)); }
+        catch { throw new FoldSdkConflictError(`trajectory tree revision conflicts with source-ordered history for task ${tree.taskId}`); }
+      }
       await this.appendInternal(context.access, event, "canon");
       const record = trajectoryLogRecordsFromEvent(event)[0];
       if (record?.recordType !== "tree") {
@@ -1117,6 +1364,52 @@ export class FoldSdk {
     });
   }
 
+  recordTrajectoryOutcome(
+    context: TrajectoryEventContext,
+    stamp: TrajectoryEventStamp,
+    input: TrajectoryOutcomeInput,
+  ) {
+    return this.command(context.access, "recordTrajectoryOutcome", stamp.id, { context, stamp, input }, async () => {
+      const current = await this.trajectoryProjection(context.access);
+      const run = current.state.trajectories.get(input.trajectoryId);
+      if (run === undefined || run.trajectory.taskId !== input.taskId) {
+        throw new TrajectoryTaskUnavailableError(input.taskId);
+      }
+      // A review inherits the run's visibility, never the caller's requested scope.
+      const scopedContext = {
+        ...context,
+        capture: {
+          scope: { workspace: run.workspaceId, ...(run.spaceId === undefined ? {} : { space: run.spaceId }) },
+          identity: { principal: context.access.principalId, workspace: run.workspaceId },
+        },
+      };
+      const event = makeTrajectoryOutcomeRecordedEvent(scopedContext, stamp, input);
+      const existing = current.events.find((candidate) => candidate.id === event.id);
+      const record = trajectoryLogRecordsFromEvent(event)[0];
+      if (record?.recordType !== "outcome") throw new FoldSdkError("missing trajectory outcome record");
+      if (existing !== undefined) {
+        if (JSON.stringify(existing) === JSON.stringify(event)) return { event: existing, record };
+        throw new FoldSdkConflictError(`event id is already used: ${event.id}`);
+      }
+      const previous = current.state.outcomes.get(input.trajectoryId)?.at(-1)?.eventId ?? null;
+      if (previous !== input.previousEventId) throw new FoldSdkConflictError("Outcome changed; reload before reviewing again");
+      const previousTime = current.state.outcomes.get(input.trajectoryId)?.at(-1)?.recordedAt ?? run.recordedAt;
+      if (stamp.t <= previousTime) throw new FoldSdkConflictError("Outcome review must be later than the run and its previous review");
+      await this.appendInternal(context.access, event, "canon");
+      return { event, record };
+    });
+  }
+
+  trajectoryOutcomes(access: FoldSdkAccessContext, taskId: string, trajectoryId: string) {
+    return this.enqueue(async () => {
+      const { state } = await this.trajectoryProjection(access);
+      if (state.trajectories.get(trajectoryId)?.trajectory.taskId !== taskId) {
+        throw new TrajectoryTaskUnavailableError(taskId);
+      }
+      return state.outcomes.get(trajectoryId) ?? [];
+    });
+  }
+
   trajectoryTasks(access: FoldSdkAccessContext): Promise<readonly TrajectoryTaskSummary[]> {
     return this.enqueue(async () => {
       const { state } = await this.trajectoryProjection(access);
@@ -1124,7 +1417,7 @@ export class FoldSdk {
         .map((treeRecord): TrajectoryTaskSummary => {
           const records = [...state.trajectories.values()].filter(
             (record) => record.trajectory.taskId === treeRecord.tree.taskId,
-          );
+          ).map((record) => effectiveTrajectoryRecord(state, record));
           return {
             taskId: treeRecord.tree.taskId,
             tree: treeRecord.tree,
@@ -1133,13 +1426,17 @@ export class FoldSdk {
             failureCount: records.filter((record) => record.trajectory.outcome === "failure").length,
             unknownCount: records.filter((record) => record.trajectory.outcome === "unknown").length,
             lastRecordedAt: records.reduce(
-              (latest, record) => Math.max(latest, record.recordedAt),
+              (latest, record) => Math.max(latest, record.recordedAt, record.outcomeReview?.recordedAt ?? 0),
               treeRecord.recordedAt,
             ),
           };
         })
         .sort((left, right) => right.lastRecordedAt - left.lastRecordedAt || left.taskId.localeCompare(right.taskId));
     });
+  }
+
+  trajectoryTree(access: FoldSdkAccessContext, taskId: string): Promise<TrajectoryTreeRecord | undefined> {
+    return this.enqueue(async () => (await this.trajectoryProjection(access)).state.trees.get(taskId));
   }
 
   trajectoryReport(
@@ -1300,6 +1597,87 @@ export class FoldSdk {
     ));
   }
 
+  private episodeService(access: FoldSdkAccessContext) {
+    return new EpisodeService(() => this.readStoredEntries(), async id => this.store.eventById === undefined ? (await this.readStoredEntries()).find(entry => entry.event.id === id) : this.store.eventById(id), event => this.appendInternal(access, event, "canon"), access);
+  }
+
+  episodeSources(access: FoldSdkAccessContext, eventIds: readonly string[], publication: EpisodePublication, options: { readonly maxBytes?: number } = {}) { return this.enqueue(() => this.episodeService(access).sources(eventIds, publication, options)); }
+  workEpisodes(access: FoldSdkAccessContext) { return this.enqueue(() => this.episodeService(access).list()); }
+  workEpisode(access: FoldSdkAccessContext, episodeId: string) { return this.enqueue(() => this.episodeService(access).get(episodeId)); }
+  episodeHistory(access: FoldSdkAccessContext, episodeId: string) { return this.enqueue(() => this.episodeService(access).history(episodeId)); }
+  episodeWindow(access: FoldSdkAccessContext, windowId: string) { return this.enqueue(() => this.episodeService(access).window(windowId)); }
+  episodeWindows(access: FoldSdkAccessContext) { return this.enqueue(() => this.episodeService(access).windows()); }
+  publishEpisodeWindow(context: { readonly access: FoldSdkAccessContext; readonly author: EpistemicEventContext["author"] }, input: EpisodeWindowInput) { return this.command(context.access, "publishEpisodeWindow", derivationHash(input), { context, input }, () => this.episodeService(context.access).publish(context.author, input)); }
+
+  private async identityEvents(access: FoldSdkAccessContext): Promise<FoldEvent[]> {
+    return (await this.entriesForAccess(access, { include: "canon" })).map(({ event }) => event);
+  }
+
+  private async expandedProjects(access: FoldSdkAccessContext, projectIds: readonly string[] | undefined): Promise<readonly string[] | undefined> {
+    if (projectIds === undefined || projectIds.length === 0) return projectIds;
+    const key = transcriptCatalogCacheKey(access);
+    const cached = this.identityProjections.get(key);
+    await this.readStoredEntries();
+    if (cached !== undefined && this.projectionCacheIsCurrent(cached.revision)) return resolveProjectIds(cached.projection, projectIds);
+    const projection = rebuildIdentities(await this.identityEvents(access));
+    this.identityProjections.set(key, { projection, ...(this.storedRevision === undefined ? {} : { revision: this.storedRevision }) });
+    while (this.identityProjections.size > 8) this.identityProjections.delete(this.identityProjections.keys().next().value!);
+    return resolveProjectIds(projection, projectIds);
+  }
+
+  resolveProjectFilter(access: FoldSdkAccessContext, projectIds: readonly string[]) {
+    return this.enqueue(async () => await this.expandedProjects(access, projectIds) ?? []);
+  }
+
+  identities(access: FoldSdkAccessContext) {
+    return this.enqueue(async () => {
+      const { projection, catalog, scope } = identitySnapshotFromEvents(await this.identityEvents(access), access.workspaceId);
+      return { revision: projection.revision, scope, entities: [...projection.entities.values()], attributions: [...projection.attributions.values()], aliases: [...projection.aliases.values()], history: projection.history,
+        projects: [...catalog.projects.values()].map(({ id, name }) => ({ id, name, canonicalProjectId: canonicalProjectId(projection, id) })) };
+    });
+  }
+
+  previewProjectAlias(access: FoldSdkAccessContext, input: ProjectAliasInput) {
+    return this.enqueue(async () => projectAliasPreview(await this.identityEvents(access), access.workspaceId, access.principalId, input));
+  }
+
+  reviseIdentity(context: { readonly access: FoldSdkAccessContext; readonly author: EpistemicEventContext["author"] },
+    expectedRevision: string | null, operation: IdentityInput, previewToken?: string) {
+    return this.command(context.access, "reviseIdentity", [expectedRevision, derivationHash(operation)], { context, expectedRevision, operation, ...(previewToken === undefined ? {} : { previewToken }) }, async () => {
+      if (context.access.platformDataAccess === true || !["owner", "admin"].includes(context.access.workspaceRole) || context.author.kind !== "human" || context.author.id !== context.access.principalId) {
+        throw new FoldSdkAccessError("Identity changes require a workspace administrator");
+      }
+      const events = await this.identityEvents(context.access);
+      const projection = rebuildIdentities(events);
+      const expectedId = identityRevisionEventId(context.access.workspaceId, expectedRevision);
+      const existing = events.find(({ id }) => id === expectedId);
+      if (existing !== undefined) {
+        const record = identityRecordFromEvent(existing);
+        if (record === undefined) throw new FoldSdkConflictError("Identity revision namespace is occupied by an invalid record");
+        if (record.actorId !== context.access.principalId || derivationHash({ kind: record.kind, input: record.input }) !== derivationHash(operation)) throw new FoldSdkConflictError("Identity revision changed; reload and review again");
+        return { event: existing, revision: projection.revision, record };
+      }
+      if (projection.revision !== expectedRevision) throw new FoldSdkConflictError("Identity revision changed; reload and review again");
+      if (operation.kind === "project-alias") {
+        const preview = projectAliasPreview(events, context.access.workspaceId, context.access.principalId, operation.input);
+        if (preview.conflicts.length > 0) throw new FoldSdkConflictError(preview.conflicts.join("; "));
+        if (previewToken !== preview.previewToken) throw new FoldSdkConflictError("Alias preview changed; preview the affected records again");
+      }
+      for (const id of operation.input.evidenceEventIds) {
+        const known = events.find((event) => event.id === id);
+        const entry = known === undefined ? await this.store.eventById?.(id) : { event: known, status: "canon" };
+        if (entry?.status !== "canon" || !authorizeEventAccess(entry.event, context.access).allowed || entry.event.capture.scope.creator !== undefined || entry.event.capture.scope.space !== undefined) {
+          throw new FoldSdkAccessError("Identity evidence must be available to the whole workspace");
+        }
+      }
+      const t = Math.max(Date.now(), (projection.history.at(-1)?.recordedAt ?? 0) + 1);
+      const event = makeIdentityEvent({ workspaceId: context.access.workspaceId, principalId: context.access.principalId, author: context.author }, { t, worldDate: new Date(t).toISOString().slice(0, 10) }, expectedRevision, operation);
+      rebuildIdentities([...events, event]);
+      await this.appendInternal(context.access, event, "canon");
+      return { event, revision: event.id, record: identityRecordFromEvent(event)! };
+    });
+  }
+
   recordMemory(
     context: EpistemicEventContext,
     stamp: EpistemicEventStamp,
@@ -1381,14 +1759,45 @@ export class FoldSdk {
   ) {
     return this.enqueue(async () => {
       const { projection } = await this.memoryCandidateProjection(access);
-      const requestedProjects = new Set(options.projectIds ?? []);
+      const projectIds = await this.expandedProjects(access, options.projectIds);
       const filtered = listMemoryCandidateViews(projection)
         .filter((view) => options.status === undefined || view.status === options.status)
-        .filter((view) => requestedProjects.size === 0 || view.candidate.projectIds.length === 0 || view.candidate.projectIds.some((id) => requestedProjects.has(id)));
+        .filter((view) => matchesMemoryProjects(view.candidate, projectIds));
       const offset = options.offset ?? 0;
       return options.limit === undefined
         ? filtered.slice(offset)
         : filtered.slice(offset, offset + options.limit);
+    });
+  }
+
+  addMemoryCandidateEvidence(
+    context: EpistemicEventContext,
+    stamp: EpistemicEventStamp,
+    candidateId: string,
+    incoming: MemoryCandidateInput,
+  ): Promise<{ readonly event?: FoldEvent; readonly candidate: MemoryCandidate }> {
+    return this.command(context.access, "addMemoryCandidateEvidence", stamp.id, { context, stamp, candidateId, incoming }, async () => {
+      const current = await this.memoryCandidateProjection(context.access);
+      const candidate = current.projection.candidates.get(candidateId);
+      if (candidate === undefined || current.projection.decisions.has(candidateId)) throw new FoldSdkConflictError("candidate support requires an undecided candidate");
+      if (!equivalentMemoryCandidateMeaning(candidate, incoming)) throw new FoldSdkConflictError("candidate support meaning or scope differs; retain a separate proposal");
+      const projectIds = await this.expandedProjects(context.access, candidate.projectIds) ?? [];
+      const knownProjectIds = [...rebuildTranscriptCatalog(current.events.filter((event) => event.kind === "transcript.project-recorded")).projects.keys()];
+      const events = new Map(current.events.map((event) => [event.id, event]));
+      for (const reference of incoming.evidence) {
+        const known = events.get(reference.eventId);
+        const entry = known === undefined ? await this.store.eventById?.(reference.eventId) : { event: known, status: "canon" };
+        const source = entry?.event;
+        if (source === undefined || entry?.status !== "canon" || !authorizeEventAccess(source, context.access).allowed || !candidateSupportSourceMatches(candidate, reference, source, projectIds, knownProjectIds)) {
+          throw new FoldSdkError("candidate support source is unavailable or incompatible with publication scope");
+        }
+      }
+      const merged = mergeMemoryCandidateEvidence(candidate.evidence, incoming.evidence);
+      if (merged.length === candidate.evidence.length) return { candidate };
+      const event = makeMemoryCandidateEvidenceAddedEvent(context, stamp, candidate, incoming.evidence);
+      const projection = rebuildMemoryCandidates([...current.events, event]);
+      await this.appendInternal(context.access, event, "canon");
+      return { event, candidate: projection.candidates.get(candidateId)! };
     });
   }
 
@@ -1410,6 +1819,7 @@ export class FoldSdk {
         id: memoryId,
         ...(candidate.spaceId === undefined ? {} : { spaceId: candidate.spaceId }),
         audience: candidate.audience,
+        ...(candidate.applicability === undefined ? {} : { applicability: candidate.applicability }),
         projectIds: candidate.projectIds,
         source: candidate.source,
         summary: candidate.summary,
@@ -1466,6 +1876,7 @@ export class FoldSdk {
           id: acceptance.memoryId,
           ...(candidate.spaceId === undefined ? {} : { spaceId: candidate.spaceId }),
           audience: candidate.audience,
+          ...(candidate.applicability === undefined ? {} : { applicability: candidate.applicability }),
           projectIds: candidate.projectIds,
           source: candidate.source,
           summary: candidate.summary,
@@ -1743,7 +2154,8 @@ export class FoldSdk {
   ): Promise<RecalledMemory[]> {
     return this.enqueue(async () => {
       const projection = await this.readMemoryProjection(access);
-      return recallProjectedMemories(projection, access, request);
+      const projectIds = await this.expandedProjects(access, request.projectIds);
+      return recallProjectedMemories(projection, access, { ...request, ...(projectIds === undefined ? {} : { projectIds }) });
     });
   }
 
@@ -1763,7 +2175,8 @@ export class FoldSdk {
         throw new FoldSdkError("memory page cursor is invalid");
       }
       const projection = await this.readMemoryProjection(access);
-      const corpus = recallMemoryCorpus(projection, access, filters);
+      const projectIds = await this.expandedProjects(access, filters.projectIds);
+      const corpus = recallMemoryCorpus(projection, access, { ...filters, ...(projectIds === undefined ? {} : { projectIds }) });
       const remaining = cursor === undefined
         ? corpus
         : corpus.filter((memory) =>
@@ -1798,7 +2211,9 @@ export class FoldSdk {
         throw new FoldSdkError("memory ranker id must not be empty");
       }
 
-      const { query: _query, limit, ...filters } = request;
+      const { query: _query, limit, ...originalFilters } = request;
+      const projectIds = await this.expandedProjects(access, originalFilters.projectIds);
+      const filters = { ...originalFilters, ...(projectIds === undefined ? {} : { projectIds }) };
       const requestedLimit = limit ?? DEFAULT_RECALL_LIMIT;
       if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > MAX_RECALL_LIMIT) {
         throw new FoldSdkError(`memory ranking limit must be an integer within [1, ${MAX_RECALL_LIMIT}]`);

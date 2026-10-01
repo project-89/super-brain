@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { MemoryCandidateInput, MemoryCandidateView, PersonalMemory } from "@_89/fold-epistemic";
-import type { SuperBrainClient } from "@_89/super-brain-client";
+import { SuperBrainApiError, type SuperBrainClient } from "@_89/super-brain-client";
 import type { TranscriptRun } from "@_89/fold-transcript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TranscriptMemoryWorker, consolidateCandidateEvidence, RULE_EXTRACTOR, type ExtractedCandidate } from "../src/index.js";
@@ -233,4 +233,51 @@ describe("durable memory processing", () => {
     expect(await readdir(join(root, "jobs", namespace))).not.toContain("lease.json");
   });
 
+});
+
+describe("operator evidence repair and restricted cognition", () => {
+  function acceptedFixture(memoryOverride: Partial<PersonalMemory> | undefined) {
+    const source = candidate(1);
+    const accepted: PersonalMemory | undefined = memoryOverride === undefined ? undefined : { ...memory(20, "project-a"), summary: "A user-edited summary", content: { retained: true }, evidence: [{ eventId: "existing-user-evidence" }], revision: 3, ...memoryOverride };
+    const view: MemoryCandidateView = { candidate: { ...source, workspaceId: "workspace-a", proposerId: "worker-a", audience: "workspace", projectIds: ["project-a"], tags: [], entities: [], proposedAt: 100, proposalEventId: "proposal" },
+      status: "accepted", decision: { kind: "accepted", candidateId: source.id, memoryId: memory(20, "project-a").id, actorId: "human-reviewer", eventId: "acceptance", atMs: 101 } };
+    return { fixture: clientFixture([view], accepted === undefined ? [] : [accepted]), source };
+  }
+
+  it("previews and idempotently repairs missing evidence through attributed contributions without changing content", async () => {
+    const { fixture, source } = acceptedFixture({});
+    const { instance } = await worker(fixture);
+    await expect(instance.repairAcceptedEvidence()).resolves.toMatchObject({ inspected: 1, repairable: 1, repaired: 0 });
+    expect(fixture.client.contributeMemoryEvidence).not.toHaveBeenCalled();
+    await expect(instance.repairAcceptedEvidence(true)).resolves.toMatchObject({ repairable: 1, repaired: 1 });
+    expect(fixture.client.contributeMemoryEvidence).toHaveBeenCalledWith(memory(20, "project-a").id, { evidence: source.evidence, expectedRevision: 3 }, { stamp: expect.objectContaining({ id: expect.stringMatching(/^memory-worker-repair-/) }) });
+    expect(fixture.memories[0]).toMatchObject({ summary: "A user-edited summary", content: { retained: true }, revision: 4, creatorId: "human-reviewer" });
+    await expect(instance.repairAcceptedEvidence(true)).resolves.toMatchObject({ repairable: 0, repaired: 0 });
+    expect(fixture.client.contributeMemoryEvidence).toHaveBeenCalledOnce();
+  });
+
+  it("retries rate-limited repair reads without duplicating contributions", async () => {
+    const { fixture } = acceptedFixture({});
+    const lookup = fixture.client.memoryById.getMockImplementation()!;
+    fixture.client.memoryById.mockRejectedValueOnce(new SuperBrainApiError(429, "rate_limited", "Retry later", { retryAfterSeconds: 0 })).mockImplementation(lookup);
+    const { instance } = await worker(fixture);
+    await expect(instance.repairAcceptedEvidence(true)).resolves.toMatchObject({ repaired: 1 });
+    expect(fixture.client.contributeMemoryEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not recreate a forgotten memory during evidence repair", async () => {
+    const { fixture } = acceptedFixture(undefined);
+    const { instance } = await worker(fixture);
+    await expect(instance.repairAcceptedEvidence(true)).resolves.toMatchObject({ missingMemories: 1, repaired: 0 });
+    expect(fixture.client.contributeMemoryEvidence).not.toHaveBeenCalled();
+    expect(fixture.client.proposeMemoryCandidate).not.toHaveBeenCalled();
+  });
+
+  it.each([{ audience: "personal" as const }, { audience: "workspace" as const, spaceId: "private-space" }])("does not synthesize broader output from current restricted memory: %s", async (scope) => {
+    const fixture = clientFixture([], [{ ...memory(21, "project-a"), ...scope }, { ...memory(22, "project-b"), ...scope }]);
+    const { instance } = await worker(fixture, { continuousCognition: true, cognitionEveryEvents: 1 });
+    await instance.synthesizeAcrossProjects({ id: "restricted-trigger", kind: "memory.recorded", at: { t: 100, worldDate: "2026-09-04" } });
+    expect(fixture.client.askReasoning).not.toHaveBeenCalled();
+    expect((await instance.coverage()).byKind.synthesis).toBe(0);
+  });
 });

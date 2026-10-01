@@ -26,6 +26,7 @@ export interface TrajectoryInput {
   readonly taskId: string;
   readonly model: RawTrajectory["model"];
   readonly outcome: RawTrajectory["outcome"];
+  readonly outcomeEvidence?: RawTrajectory["outcomeEvidence"];
   readonly steps: RawTrajectory["steps"];
   readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
   readonly reviewText?: string;
@@ -50,14 +51,35 @@ export interface TrajectoryRunRecord {
   readonly trajectory: RawTrajectory;
   readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
   readonly reviewText?: string;
+  /** Projection-only fields; the captured run remains immutable. */
+  readonly recordedOutcome?: RawTrajectory["outcome"];
+  readonly outcomeReview?: TrajectoryOutcomeRecord;
 }
 
-export type TrajectoryLogRecord = TrajectoryTreeRecord | TrajectoryRunRecord;
+export interface TrajectoryOutcomeInput {
+  readonly taskId: string;
+  readonly trajectoryId: string;
+  readonly outcome: RawTrajectory["outcome"];
+  readonly reason: string;
+  readonly previousEventId: string | null;
+}
+
+export interface TrajectoryOutcomeRecord extends TrajectoryOutcomeInput {
+  readonly recordType: "outcome";
+  readonly eventId: string;
+  readonly actorId: string;
+  readonly workspaceId: string;
+  readonly spaceId?: string;
+  readonly recordedAt: number;
+}
+
+export type TrajectoryLogRecord = TrajectoryTreeRecord | TrajectoryRunRecord | TrajectoryOutcomeRecord;
 
 export interface TrajectoryState {
   readonly trees: ReadonlyMap<string, TrajectoryTreeRecord>;
   readonly trajectories: ReadonlyMap<string, TrajectoryRunRecord>;
   readonly evidence?: readonly TaskEvidenceRecord[];
+  readonly outcomes: ReadonlyMap<string, readonly TrajectoryOutcomeRecord[]>;
 }
 
 export interface TrajectoryEvaluation {
@@ -74,6 +96,7 @@ export interface TrajectoryDivergence {
 
 export interface TrajectoryTaskReport {
   readonly taskId: string;
+  readonly outcomeCounts: Readonly<Record<"success" | "failure" | "unknown", number>>;
   readonly tree: SharedDecisionTree;
   readonly records: readonly TrajectoryRunRecord[];
   readonly projected: readonly ProjectedTrajectory[];

@@ -8,6 +8,8 @@ import { TranscriptBuilder } from "./builder.js";
 import { fileMetadata, sha256File, sha256Text } from "./files.js";
 import { recordValue } from "./json.js";
 import { NativeTranscriptNormalizer } from "./native.js";
+
+export { toolResultFailed } from "./native.js";
 import type { ParsedTranscript } from "./types.js";
 
 const PARSER_VERSION = "2";
@@ -59,14 +61,16 @@ async function visitJsonl(
   const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
   for await (const line of lines) {
     if (line.trim().length === 0) continue;
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(line) as unknown;
-      const record = recordValue(parsed);
-      if (record === undefined) invalid();
-      else visitor(record);
+      parsed = JSON.parse(line) as unknown;
     } catch {
       invalid();
+      continue;
     }
+    const record = recordValue(parsed);
+    if (record === undefined) invalid();
+    else visitor(record);
   }
 }
 
@@ -86,7 +90,7 @@ async function parseNativeTranscript(path: string, source: TranscriptSource): Pr
     builder.countUnknown();
   });
   const artifact = await artifactFor(path, source, source === "codex" ? "codex-jsonl" : "claude-jsonl", parsedMetadata);
-  return { sourcePath: path, bundle: builder.finish(artifact) };
+  return { sourcePath: path, bundle: builder.finish(artifact), diagnostics: builder.diagnostics() };
 }
 
 export function parseClaudeTranscript(path: string): Promise<ParsedTranscript> {

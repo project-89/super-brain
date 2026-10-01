@@ -137,6 +137,25 @@ it("retains the redacted encrypted sender payload through downtime and a lost ac
   } finally { await server.close(); }
 });
 
+it("relays operator decisions with the separate operator credential and hooks with the agent credential", async () => {
+  const { config, key, root } = await setup();
+  const outbox = new HookOutbox(config.stateRoot, key);
+  for (const [endpoint, credential, other] of [
+    ["/decision", "x-super-brain-operator-token", "x-super-brain-hook-token"],
+    ["/hook", "x-super-brain-hook-token", "x-super-brain-operator-token"],
+    ["/checkpoint", "x-super-brain-hook-token", "x-super-brain-operator-token"],
+  ] as const) {
+    const occurrence = await outbox.persist("codex", { session_id: "credentials", cwd: root, summary: "checked" }, endpoint);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ accepted: true, receiptId: occurrence.id }, { status: 202 }));
+    await deliverOccurrence(config, outbox, occurrence, fetcher);
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(fetcher.mock.calls[0]?.[0]).toContain(endpoint);
+    expect(headers.get(credential)).toBe(credential === "x-super-brain-operator-token" ? config.operatorToken : config.hookToken);
+    expect(headers.has(other)).toBe(false);
+  }
+  expect(await outbox.pending()).toHaveLength(0);
+});
+
 it("recovers a prepared receipt after a crash between state and spool publication without new event identities", async () => {
   const { engine, config, spool, state, vault, root, queue, key } = await setup();
   const occurrence = { version: 1 as const, id: "crash-receipt", source: "codex" as const, occurredAt: new Date().toISOString(), endpoint: "/hook" as const,

@@ -25,6 +25,67 @@ async function fixture(name: string, records: readonly unknown[]): Promise<strin
 }
 
 describe("transcript source adapters", () => {
+  it("accounts for every record by type without hiding unsupported metadata", async () => {
+    const path = await fixture("diagnostics.jsonl", [
+      { type: "session_meta", payload: { cwd: "/work/example" } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: "call-a", output: { exit_code: 1 } } },
+      { type: "token_usage_record", payload: { total: 42 } },
+      { type: "response_item", payload: { type: "new_future_item" } },
+      { type: "private arbitrary content must not become a diagnostic label" },
+      null,
+    ]);
+    const parsed = await parseCodexTranscript(path);
+    expect(parsed.diagnostics).toMatchObject({
+      recordTypes: { session_meta: 1, "response_item:function_call_output": 1, token_usage_record: 1, "response_item:new_future_item": 1, "<missing-or-invalid-type>": 1, "<invalid>": 1 },
+      unknownRecordTypes: { token_usage_record: 1, "response_item:new_future_item": 1, "<missing-or-invalid-type>": 1, "<invalid>": 1 },
+      toolResults: { completed: 0, failed: 1, unknown: 0 },
+    });
+    expect(Object.values(parsed.diagnostics!.recordTypes).reduce((sum, count) => sum + count, 0)).toBe(parsed.bundle.run.counts.records);
+    expect(Object.values(parsed.diagnostics!.unknownRecordTypes).reduce((sum, count) => sum + count, 0)).toBe(parsed.bundle.run.counts.unknown);
+    expect(JSON.stringify(parsed.diagnostics)).not.toContain("private arbitrary content");
+    const report = await scanTranscripts({ roots: { codex: path.substring(0, path.lastIndexOf("/")) } });
+    expect(report.diagnostics.codex).toEqual(parsed.diagnostics);
+  });
+
+  it("classifies explicit Codex failures without treating arbitrary tool output as success", async () => {
+    const outputs = [
+      { exit_code: 0, output: "passed" },
+      JSON.stringify({ output: "failed", metadata: { exit_code: 1 } }),
+      { isError: true },
+      "Chunk ID: a\nWall time: 1 seconds\nProcess exited with code 2\nFinal output:\nfailed",
+      "Chunk ID: b\nWall time: 1 seconds\nProcess exited with code 0\nFinal output:\nProcess exited with code 1",
+      "done",
+      "Chunk ID: c\nProcess running with session ID 123\nOutput:\nProcess exited with code 1",
+    ];
+    const path = await fixture("tool-outcomes.jsonl", outputs.map((output, index) => ({
+      type: "response_item", payload: { type: "function_call_output", call_id: `call-${index}`, output },
+    })));
+    const parsed = await parseCodexTranscript(path);
+    expect(parsed.bundle.chunks.flatMap(({ actions }) => actions.map(({ status }) => status)))
+      .toEqual(["completed", "failed", "failed", "failed", "completed", "unknown", "unknown"]);
+    expect(parsed.bundle.artifact.parser.version).toBe("2");
+  });
+
+  it("captures native web search calls as observable actions", async () => {
+    const path = await fixture("search.jsonl", [{
+      type: "response_item", payload: { type: "web_search_call", id: "search-a", status: "completed", action: { type: "search" } },
+    }]);
+    const parsed = await parseCodexTranscript(path);
+    expect(parsed.bundle.run.counts).toMatchObject({ actions: 2, unknown: 0 });
+    expect(parsed.bundle.chunks[0]?.actions).toMatchObject([
+      { kind: "tool-call", name: "web_search", status: "started" },
+      { kind: "tool-result", name: "web_search", status: "completed" },
+    ]);
+  });
+
+  it("does not swallow parser errors as malformed JSON", async () => {
+    const { TranscriptBuilder } = await import("../src/builder.js");
+    const path = await fixture("visitor-error.jsonl", [{ type: "user", message: { content: "hello" } }]);
+    const spy = vi.spyOn(TranscriptBuilder.prototype, "addMessage").mockImplementation(() => { throw new Error("parser defect"); });
+    try { await expect(parseClaudeTranscript(path)).rejects.toThrow("parser defect"); }
+    finally { spy.mockRestore(); }
+  });
+
   it("uses a sanitized repository remote as the stable project identity", () => {
     const first = projectForRoot(
       "/work/checkout-a",
@@ -313,9 +374,19 @@ describe("transcript source adapters", () => {
       fetcher: fetcher as unknown as typeof fetch,
     })).resolves.toEqual(new Set([run.id]));
     expect(fetcher).toHaveBeenCalledWith(
-      "http://127.0.0.1:3000/v1/workspaces/workspace%2Fone/transcript-runs",
-      { headers: { authorization: "Bearer private-token" } },
+      "http://127.0.0.1:3000/v1/workspaces/workspace%2Fone/transcript-runs?limit=100",
+      { headers: { authorization: "Bearer private-token" }, signal: expect.any(AbortSignal) },
     );
+    fetcher.mockReset();
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ runs: [run], nextCursor: "page+two" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ runs: [{ ...run, id: "second-run" }] })));
+    await expect(listDeliveredTranscriptRunIds({ apiUrl: "http://localhost", organizationId: "org", workspaceId: "workspace", bearerToken: "private-token", fetcher: fetcher as unknown as typeof fetch })).resolves.toEqual(new Set([run.id, "second-run"]));
+    expect((fetcher.mock.calls[1] as unknown as [string])[0]).toBe("http://localhost/v1/organizations/org/workspaces/workspace/transcript-runs?limit=100&pageCursor=page%2Btwo");
+  });
+
+  it("bounds stalled catalog requests", async () => {
+    const fetcher: typeof fetch = async (_url, init) => new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true }));
+    await expect(listDeliveredTranscriptRunIds({ apiUrl: "http://localhost", workspaceId: "workspace", bearerToken: "private-token", fetcher, requestTimeoutMs: 10 })).rejects.toThrow(/timeout/i);
   });
 
   it("honors a rate-limit retry before delivering the same bundle", async () => {

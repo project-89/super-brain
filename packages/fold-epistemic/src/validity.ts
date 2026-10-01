@@ -14,7 +14,18 @@ export function memoryRevision(value: unknown): number {
   return value;
 }
 export function normalizeMemoryApplicability(value: unknown, legacyProjects: readonly string[] = []): MemoryApplicability {
-  if (value === undefined) return legacyProjects.length ? { kind: "projects", projectIds: [...new Set(legacyProjects)].sort() } : { kind: "unresolved" };
+  const legacy = () => [...new Set(legacyProjects.map((id) => text(id).trim()))].sort();
+  if (value === undefined) return legacyProjects.length ? { kind: "projects", projectIds: legacy() } : { kind: "unresolved" };
+  // Legacy string encoding pairs a label with separate project IDs.
+  if (value === "project") {
+    if (legacyProjects.length === 0) throw new TypeError("project applicability requires at least one projectId");
+    return { kind: "projects", projectIds: legacy() };
+  }
+  if (value === "general" || value === "unresolved") {
+    if (legacyProjects.length > 0) throw new TypeError(`${value} applicability requires empty projectIds`);
+    return { kind: value === "general" ? "global" : "unresolved" };
+  }
+  if (typeof value === "string" || value === null) throw new TypeError("memory applicability must be project, general, or unresolved");
   const record = object(value, ["kind", "projectIds"]);
   if (record.kind === "global" || record.kind === "unresolved") {
     if (record.projectIds !== undefined) throw new TypeError("only project applicability may contain projectIds");

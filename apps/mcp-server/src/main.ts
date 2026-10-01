@@ -5,9 +5,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SuperBrainClient } from "@_89/super-brain-client";
 import { CaptureBridge } from "./capture.js";
 import { NodeTelemetryOutbox } from "./outbox.js";
+import { configuredProjectIds } from "./project-scope.js";
 import { createSuperBrainMcpServer } from "./server.js";
 
 const required = (value: string | undefined, label: string) => { if (!value?.trim()) throw new TypeError(`${label} is required`); return value; };
+const workspaceId = required(process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE");
+// Explicit project context only; never inferred from SUPER_BRAIN_PROJECT_ROOT, names, or paths.
+const defaultProjectIds = configuredProjectIds(process.env.SUPER_BRAIN_PROJECT_IDS);
 let api: SuperBrainClient;
 const outbox = new NodeTelemetryOutbox({
   directory: process.env.SUPER_BRAIN_TELEMETRY_STATE_ROOT ?? join(homedir(), ".local", "state", "super-brain", "mcp-telemetry"),
@@ -17,7 +21,7 @@ const outbox = new NodeTelemetryOutbox({
 api = new SuperBrainClient({
   baseUrl: required(process.env.SUPER_BRAIN_URL ?? process.env.FOLD_API_URL, "SUPER_BRAIN_URL"),
   organizationId: process.env.SUPER_BRAIN_ORGANIZATION ?? process.env.FOLD_API_ORGANIZATION ?? "local",
-  workspaceId: required(process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE"),
+  workspaceId,
   token: () => process.env.SUPER_BRAIN_TOKEN ?? process.env.FOLD_API_TOKEN,
   telemetryOutbox: outbox,
   recallTelemetry: { ...(process.env.SUPER_BRAIN_SESSION_ID === undefined ? {} : { sessionId: process.env.SUPER_BRAIN_SESSION_ID }),
@@ -30,7 +34,7 @@ if (source !== "codex" && source !== "claude-code" && source !== "hermes") throw
 const capture = captureUrl === undefined || captureToken === undefined ? undefined : new CaptureBridge({ baseUrl: captureUrl, token: captureToken, source,
   ...(process.env.SUPER_BRAIN_SESSION_ID === undefined ? {} : { sessionId: process.env.SUPER_BRAIN_SESSION_ID }),
   ...(process.env.SUPER_BRAIN_PROJECT_ROOT === undefined ? {} : { cwd: process.env.SUPER_BRAIN_PROJECT_ROOT }) });
-const server = createSuperBrainMcpServer({ api, telemetry: outbox, ...(capture === undefined ? {} : { capture }) });
+const server = createSuperBrainMcpServer({ api, telemetry: outbox, workspaceId, ...(defaultProjectIds === undefined ? {} : { defaultProjectIds }), ...(capture === undefined ? {} : { capture }) });
 const timer = setInterval(() => { void outbox.flush({ maxBatches: 10 }).catch(() => undefined); }, 5000);
 timer.unref();
 let closing = false;

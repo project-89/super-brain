@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createCapturedEventVerifier } from "./authority.js";
 import { createCapturedTrajectoryVerifier } from "@_89/super-brain-capture-daemon";
+import { readFile } from "node:fs/promises";
+import { workerJobNamespace } from "./jobs.js";
+import { migrateWorkerCursor, resetWorkerCursor } from "./cursor-migration.js";
 
 import { installMemoryWorkerLaunchAgent } from "./install.js";
 import { TranscriptMemoryWorker } from "./worker.js";
@@ -37,8 +40,9 @@ async function main(): Promise<void> {
     process.stdout.write(`${path}\n`);
     return;
   }
-  if (command !== "scan" && command !== "backfill" && command !== "watch" && command !== "retry") {
-    throw new TypeError("supported commands: scan, backfill, watch, retry, install-service");
+  const commands = ["scan", "backfill", "queue-backfill", "queue-episodes", "watch", "retry", "retry-jobs", "jobs", "repair-evidence", "migrate-cursor", "reset-cursor"];
+  if (!commands.includes(command)) {
+    throw new TypeError(`supported commands: ${commands.join(", ")}, install-service`);
   }
   if (command === "backfill" && !args.includes("--confirm")) {
     throw new TypeError("backfill requires --confirm; run scan first to review counts");
@@ -47,26 +51,45 @@ async function main(): Promise<void> {
   const organizationId = option("--organization") ?? process.env.SUPER_BRAIN_ORGANIZATION ?? process.env.FOLD_API_ORGANIZATION ?? "local";
   const workspaceId = required(option("--workspace") ?? process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE");
   const token = required(process.env.SUPER_BRAIN_TOKEN ?? process.env.FOLD_API_TOKEN, "SUPER_BRAIN_TOKEN");
-  const vaultRoot = required(option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT, "FOLD_TRANSCRIPT_VAULT");
+  const client = new SuperBrainClient({ baseUrl, organizationId, workspaceId, token });
+  const consumerId = option("--consumer") ?? "transcript-memory-extractor-v1";
+  const stateRoot = option("--state-root") ?? option("--processing-root") ?? process.env.SUPER_BRAIN_WORKER_STATE_ROOT ?? process.env.FOLD_MEMORY_PROCESSING_ROOT;
+  const resolvedStateRoot = stateRoot ?? join(homedir(), ".local", "state", "super-brain", "memory-worker", "jobs");
+  const spaceId = option("--space") ?? process.env.SUPER_BRAIN_WORKER_SPACE;
+  const audience = option("--audience") ?? "workspace";
+  if (audience !== "personal" && audience !== "workspace") throw new TypeError("--audience must be personal or workspace");
+  if (command === "migrate-cursor" || command === "reset-cursor") {
+    // Confirmed cursor changes hold the watcher's own ledger lease, so they fail while it runs.
+    const namespace = workerJobNamespace(await client.identity(), { audience, ...(spaceId === undefined ? {} : { spaceId }) });
+    const common = { client, consumerId, organizationId, workspaceId, audience, stateRoot: resolvedStateRoot, namespace, confirm: args.includes("--confirm") } as const;
+    const result = command === "migrate-cursor" ? await migrateWorkerCursor(common) : await resetWorkerCursor({ ...common,
+      expectedSequence: required(option("--expected-sequence"), "--expected-sequence"), reason: required(option("--reason"), "--reason") });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  const localOnly = ["queue-backfill", "queue-episodes", "jobs", "retry-jobs", "repair-evidence"].includes(command);
+  const vaultRoot = localOnly ? option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT ?? "" : required(option("--vault") ?? process.env.FOLD_TRANSCRIPT_VAULT, "FOLD_TRANSCRIPT_VAULT");
   const vaultKeyPath = option("--vault-key") ?? process.env.FOLD_TRANSCRIPT_VAULT_KEY_FILE;
-  const vaultEncryptionKey = vaultKeyPath === undefined ? undefined : await readVaultKey(vaultKeyPath);
+  const vaultEncryptionKey = vaultKeyPath === undefined || localOnly ? undefined : await readVaultKey(vaultKeyPath);
   const maxValue = option("--max-per-run");
   const maxCandidatesPerRun = maxValue === undefined ? 25 : Number(maxValue);
+  if (!Number.isInteger(maxCandidatesPerRun) || maxCandidatesPerRun < 1 || maxCandidatesPerRun > 500) throw new TypeError("--max-per-run must be a dispatch budget within [1, 500]");
   const limitValue = option("--limit");
   const limit = limitValue === undefined ? undefined : Number(limitValue);
-  const audience = option("--audience") ?? "workspace";
   const sampleValue = option("--sample");
   const sample = sampleValue === undefined ? 0 : Number(sampleValue);
   const cognitionEveryValue = option("--cognition-every");
   const cognitionEveryEvents = cognitionEveryValue === undefined ? 25 : Number(cognitionEveryValue);
-  if (audience !== "personal" && audience !== "workspace") throw new TypeError("--audience must be personal or workspace");
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new TypeError("--limit must be a positive integer");
   if (!Number.isInteger(sample) || sample < 0 || sample > 100) throw new TypeError("--sample must be an integer within [0, 100]");
   if (!Number.isInteger(cognitionEveryEvents) || cognitionEveryEvents < 1 || cognitionEveryEvents > 100_000) {
     throw new TypeError("--cognition-every must be an integer within [1, 100000]");
   }
+  const episodeEveryEvents = Number(option("--episode-every") ?? 25);
+  const episodeElapsedMs = Number(option("--episode-elapsed-ms") ?? 300_000);
+  if (!Number.isSafeInteger(episodeEveryEvents) || episodeEveryEvents < 1 || episodeEveryEvents > 100_000) throw new TypeError("--episode-every must be an integer within [1, 100000]");
+  if (!Number.isSafeInteger(episodeElapsedMs) || episodeElapsedMs < 1 || episodeElapsedMs > 86_400_000) throw new TypeError("--episode-elapsed-ms must be an integer within [1, 86400000]");
 
-  const client = new SuperBrainClient({ baseUrl, organizationId, workspaceId, token });
   const autoPromote = args.includes("--auto-promote");
   const trustedSensorId = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_SENSOR;
   const captureStateRoot = process.env.SUPER_BRAIN_TRUSTED_CAPTURE_STATE_ROOT;
@@ -81,8 +104,7 @@ async function main(): Promise<void> {
   const verifyCapturedTrajectory = trustedSensorId && captureStateRoot && captureReceiptKey
     ? createCapturedTrajectoryVerifier({ organizationId, workspaceId, trustedSensorId, stateRoot: captureStateRoot, receiptEncryptionKey: captureReceiptKey }) : undefined;
   if (autoPromote && verifyCapturedEvent === undefined) console.error("[memory-worker] Promotion is disabled until an explicit capture witness verifier is configured");
-  const stateRoot = option("--state-root") ?? process.env.SUPER_BRAIN_WORKER_STATE_ROOT;
-  const spaceId = option("--space") ?? process.env.SUPER_BRAIN_WORKER_SPACE;
+  const statusFile = process.env.SUPER_BRAIN_WORKER_STATUS_FILE ?? join(resolvedStateRoot, "processing-status.json");
   const worker = new TranscriptMemoryWorker({
     client,
     vaultRoot,
@@ -91,8 +113,11 @@ async function main(): Promise<void> {
     autoPromote,
     continuousCognition: (command === "watch" || command === "retry") && !args.includes("--no-continuous-cognition"),
     cognitionEveryEvents,
+    episodeFormation: ["watch", "retry", "retry-jobs", "queue-episodes"].includes(command) && !args.includes("--no-episodes"),
+    episodeEveryEvents,
+    episodeElapsedMs,
     ...(stateRoot === undefined ? {} : { stateRoot }),
-    statusFile: process.env.SUPER_BRAIN_WORKER_STATUS_FILE ?? join(stateRoot ?? join(homedir(), ".local", "state", "super-brain", "memory-worker", "jobs"), "processing-status.json"),
+    statusFile,
     ...(spaceId === undefined ? {} : { spaceId }),
     ...(verifyCapturedEvent === undefined ? {} : { verifyCapturedEvent }),
     ...(verifyCapturedTrajectory === undefined ? {} : { verifyCapturedTrajectory }),
@@ -100,6 +125,39 @@ async function main(): Promise<void> {
     reportWarning: (message) => console.error(`[memory-worker] ${message}`),
     ...(vaultEncryptionKey === undefined ? {} : { vaultEncryptionKey }),
   });
+  if (command === "jobs") {
+    try { process.stdout.write(`${JSON.stringify({ coverage: await worker.coverage(), scheduling: await worker.schedulingCoverage() }, null, 2)}\n`); }
+    catch (error) {
+      if (!(error instanceof Error) || !/owns this processing namespace|acquired the processing namespace/.test(error.message)) throw error;
+      // A running watcher owns the ledger; report its last sanitized status publication instead.
+      process.stdout.write(`${JSON.stringify({ source: "running-worker-status", status: JSON.parse(await readFile(statusFile, "utf8")) as unknown }, null, 2)}\n`);
+    } finally { await worker.close(); }
+    return;
+  }
+  if (command === "retry-jobs") {
+    if (!args.includes("--confirm")) throw new TypeError("retry-jobs requires --confirm; inspect jobs first and stop the worker before retrying");
+    try { process.stdout.write(`${JSON.stringify({ requeued: await worker.retryBlocked() })}\n`); }
+    finally { await worker.close(); }
+    return;
+  }
+  if (command === "repair-evidence") {
+    const apply = args.includes("--confirm");
+    try { process.stdout.write(`${JSON.stringify({ mode: apply ? "apply" : "dry-run", ...await worker.repairAcceptedEvidence(apply) }, null, 2)}\n`); }
+    finally { await worker.close(); }
+    return;
+  }
+  if (command === "queue-episodes") {
+    const eventIds = args.flatMap((arg, index) => arg === "--event-id" ? [required(args[index + 1]?.startsWith("--") === true ? undefined : args[index + 1], "--event-id")] : []);
+    const projectId = required(option("--project-id"), "--project-id");
+    try { process.stdout.write(`${JSON.stringify(await worker.queueEpisodeSources(eventIds, projectId, args.includes("--confirm")), null, 2)}\n`); }
+    finally { await worker.close(); }
+    return;
+  }
+  if (command === "queue-backfill") {
+    try { process.stdout.write(`${JSON.stringify(await worker.queueTranscriptBackfill(args.includes("--confirm"), limit), null, 2)}\n`); }
+    finally { await worker.close(); }
+    return;
+  }
   if (command === "retry") {
     try { await worker.retryJob(required(option("--job"), "--job")); await worker.drainModelJobs(); await worker.drainJobs(); process.stdout.write(`${JSON.stringify(await worker.coverage())}\n`); }
     finally { await worker.close(); }
@@ -111,7 +169,7 @@ async function main(): Promise<void> {
     process.once("SIGINT", stop); process.once("SIGTERM", stop);
     try { await worker.watch({
       signal: shutdown.signal,
-      consumerId: option("--consumer") ?? "transcript-memory-extractor-v1",
+      consumerId,
       ...(args.includes("--replay-all") ? { replay: "all" } : {}),
     }); } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); await worker.close(); }
     return;

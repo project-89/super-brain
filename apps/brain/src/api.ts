@@ -1,7 +1,9 @@
 import { SuperBrainClient, SuperBrainApiError, nextEventStamp, uuidV7, type EventStamp, type EventPageOptions, type RecallProvenance } from "@_89/super-brain-client";
 import type { RecallRequest } from "@_89/fold-epistemic";
 import { localCaptureRequest } from "./local-capture";
-import type { ConnectionSettings, CaptureHealth, CursorPage, HookArtifact, HookSource, MemoryDraft, MemoryCandidateView, PersonalMemory, ProjectionSection, SharedDecisionTree, SteeringCandidateDraft, SteeringIntentionEnd, TrajectoryImportBundle, TrajectoryInput, TrajectoryTaskSummary, TranscriptArtifactRecord, TranscriptSource, ProcessingStatus } from "./types";
+import type { Episode, EpisodePage, EpisodeSourceRecord, EpisodeWindow, EpisodeWindowSummary } from "./episode-types";
+import type { IdentityAttribution, IdentityAttributionInput, IdentityEntity, IdentityEntityInput, IdentityHistory, IdentityKind, IdentityPage, IdentityProject, ProjectAlias, ProjectAliasInput, ProjectAliasPreview } from "./identity-types";
+import type { ConnectionSettings, CaptureHealth, CursorPage, HookArtifact, HookSource, MemoryDraft, MemoryCandidateView, PersonalMemory, ProjectionSection, SharedDecisionTree, SteeringCandidateDraft, SteeringIntentionEnd, TrajectoryImportBundle, TrajectoryInput, TrajectoryTaskSummary, TranscriptArtifactRecord, TranscriptSource, ProcessingStatus, DataQualityReport, DerivedTranscriptRecord, TranscriptDerivation, TrajectoryOutcomeRecord, TrajectoryTaskReport } from "./types";
 
 // Preserve the existing UI error import while sharing the canonical transport classification.
 export { SuperBrainApiError as FoldApiError } from "@_89/super-brain-client";
@@ -27,6 +29,32 @@ export class FoldApiClient {
     }
     const result = await action(stamps); this.pendingCommands.delete(key); for (const stamp of stamps) this.entityIds.delete(stamp.id); return result;
   }
+  /**
+   * Workspace-scoped read models that the shared client does not expose yet (episodes, identities, data quality,
+   * transcript derivations, trajectory outcome review). They use the same connection, credentials and error type.
+   */
+  private workspacePath(resource: string): string {
+    const workspace = encodeURIComponent(this.settings.workspaceId.trim());
+    const organization = this.settings.organizationId?.trim();
+    return organization ? `/v1/organizations/${encodeURIComponent(organization)}/workspaces/${workspace}/${resource}` : `/v1/workspaces/${workspace}/${resource}`;
+  }
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    let token: string | undefined;
+    try { token = (await (this.settings.tokenSupplier?.(this.signal) ?? this.settings.token))?.trim(); }
+    catch (error) { throw new SuperBrainApiError(0, "token_unavailable", error instanceof Error ? error.message : "A current access token is unavailable"); }
+    if (!token) throw new SuperBrainApiError(0, "token_unavailable", "A current access token is unavailable");
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    if (init.body !== undefined) headers.set("content-type", "application/json");
+    let response: Response;
+    try { response = await fetch(`${this.settings.baseUrl.replace(/\/+$/, "")}${path}`, { ...init, headers, ...(this.signal === undefined ? {} : { signal: this.signal }) }); }
+    catch (error) { throw new SuperBrainApiError(0, this.signal?.aborted ? "aborted" : "network_error", error instanceof Error ? error.message : "API network request failed"); }
+    let body: { readonly error?: { readonly code?: string; readonly message?: string; readonly details?: unknown } };
+    try { body = await response.json() as typeof body; }
+    catch { throw new SuperBrainApiError(response.status, "invalid_response", "API returned an invalid JSON response"); }
+    if (!response.ok) throw new SuperBrainApiError(response.status, body.error?.code ?? "request_failed", body.error?.message ?? `Super Brain request failed with HTTP ${response.status}`, body.error?.details);
+    return body as T;
+  }
   identity() { return this.canonical.identity(); }
   telemetryStatus() { return this.canonical.telemetryStatus(); }
   captureHealth(): Promise<CaptureHealth> { return localCaptureRequest(this.settings, "/health", { operator: false, signal: this.signal }); }
@@ -43,7 +71,7 @@ export class FoldApiClient {
   projection(includeDrafts = false, section: ProjectionSection = "nodes", options: { readonly cursor?: string; readonly query?: string } = {}) { return this.canonical.projection(includeDrafts, section, options); }
   listTrajectoryTaskPage(options: { readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.listTrajectoryTaskPage(options); }
   async listTrajectoryTasks() { return (await this.listTrajectoryTaskPage()).items; }
-  trajectoryReport(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.trajectoryReport(taskId, options); }
+  trajectoryReport(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<TrajectoryTaskReport> { return this.canonical.trajectoryReport(taskId, options); }
   taskEvidencePage(taskId: string, options: { readonly limit?: number; readonly cursor?: string } = {}) { return this.canonical.taskEvidence(taskId, options); }
   fleet() { return this.canonical.fleet(); }
   listTranscriptProjects() { return this.canonical.listTranscriptProjects(); }
@@ -82,7 +110,7 @@ export class FoldApiClient {
   async forgetMemory(memoryId: string, reason: string): Promise<void> { await this.command("memory.forget", { memoryId, reason }, ([stamp]) => this.canonical.forgetMemory(memoryId, reason, undefined, { stamp })); }
   memoryEvidencePage(memoryId: string, options: { readonly revision?: number; readonly offset?: number; readonly contributionOffset?: number; readonly limit?: number } = {}) { return this.canonical.memoryEvidencePage(memoryId, options); }
   memoryFeedbackSummary(memoryId: string, revision: number) { return this.canonical.memoryFeedbackSummary(memoryId, revision); }
-  async recordMemoryFeedback(memory: Pick<PersonalMemory, "id" | "revision">, judgment: "helpful" | "unhelpful", provenance?: RecallProvenance): Promise<void> {
+  async recordMemoryFeedback(memory: Pick<PersonalMemory, "id" | "revision">, judgment: "helpful" | "unhelpful" | "superseded", provenance?: RecallProvenance): Promise<void> {
     const key = JSON.stringify([memory.id, memory.revision, judgment]);
     let command = this.judgments.get(key);
     if (command === undefined) {
@@ -95,5 +123,85 @@ export class FoldApiClient {
     }
     await this.canonical.recordMemoryFeedbackBatch([command.item], { stamp: command.stamp, expectedSubject: command.subject });
     this.judgments.delete(key);
+  }
+  episodePage<T>(resource: "work-episodes" | "work-episode-windows", options: { cursor?: string; projectId?: string; id?: string; section?: "sources" | "history"; eventId?: string; revision?: string } = {}): Promise<EpisodePage<T>> {
+    const params = new URLSearchParams({ limit: options.section === "sources" ? "1" : "100" });
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    if (options.projectId !== undefined) params.set("projectId", options.projectId);
+    if (options.eventId !== undefined) params.set("eventId", options.eventId);
+    if (options.revision !== undefined) params.set("revision", options.revision);
+    const path = `${resource}${options.id === undefined ? "" : `/${encodeURIComponent(options.id)}`}${options.section === undefined ? "" : `/${options.section}`}`;
+    return this.request(this.workspacePath(`${path}?${params}`));
+  }
+  workEpisodes(options: { cursor?: string; projectId?: string } = {}) { return this.episodePage<Episode>("work-episodes", options); }
+  episodeWindows(options: { cursor?: string; projectId?: string } = {}) { return this.episodePage<EpisodeWindowSummary>("work-episode-windows", options); }
+  workEpisode(id: string): Promise<Episode> { return this.request(this.workspacePath(`work-episodes/${encodeURIComponent(id)}`)); }
+  episodeWindow(id: string): Promise<EpisodeWindow> { return this.request(this.workspacePath(`work-episode-windows/${encodeURIComponent(id)}`)); }
+  episodeSources(id: string, window = false, cursor?: string, eventId?: string, revision?: string) { return this.episodePage<EpisodeSourceRecord>(window ? "work-episode-windows" : "work-episodes", { id, section: "sources", ...(cursor === undefined ? {} : { cursor }), ...(eventId === undefined ? {} : { eventId }), ...(revision === undefined ? {} : { revision }) }); }
+  episodeHistory(id: string, cursor?: string) { return this.episodePage<Episode>("work-episodes", { id, section: "history", ...(cursor === undefined ? {} : { cursor }) }); }
+
+  private identityPage<T>(resource: "entities" | "attributions" | "aliases" | "history" | "projects", options: { readonly cursor?: string; readonly kind?: IdentityKind; readonly active?: boolean } = {}): Promise<IdentityPage<T>> {
+    const params = new URLSearchParams({ limit: "100" });
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    if (options.kind !== undefined) params.set("kind", options.kind);
+    if (options.active !== undefined) params.set("active", String(options.active));
+    return this.request(this.workspacePath(`identities/${resource}?${params}`));
+  }
+  identityEntities(options: { readonly cursor?: string; readonly kind?: IdentityKind; readonly active?: boolean } = {}) { return this.identityPage<IdentityEntity>("entities", options); }
+  identityAttributions(options: { readonly cursor?: string; readonly active?: boolean } = {}) { return this.identityPage<IdentityAttribution>("attributions", options); }
+  projectAliases(options: { readonly cursor?: string; readonly active?: boolean } = {}) { return this.identityPage<ProjectAlias>("aliases", options); }
+  identityHistory(cursor?: string) { return this.identityPage<IdentityHistory>("history", { cursor }); }
+  identityProjects(cursor?: string) { return this.identityPage<IdentityProject>("projects", { cursor }); }
+  saveIdentityEntity(input: IdentityEntityInput, expectedRevision: string | null): Promise<unknown> { return this.request(this.workspacePath("identities/entities"), { method: "POST", body: JSON.stringify({ expectedRevision, input }) }); }
+  saveIdentityAttribution(input: IdentityAttributionInput, expectedRevision: string | null): Promise<unknown> { return this.request(this.workspacePath("identities/attributions"), { method: "POST", body: JSON.stringify({ expectedRevision, input }) }); }
+  previewProjectAlias(input: ProjectAliasInput): Promise<ProjectAliasPreview> { return this.request(this.workspacePath("identities/alias-preview"), { method: "POST", body: JSON.stringify({ input }) }); }
+  saveProjectAlias(input: ProjectAliasInput, preview: ProjectAliasPreview): Promise<unknown> { return this.request(this.workspacePath("identities/aliases"), { method: "POST", body: JSON.stringify({ expectedRevision: preview.revision, previewToken: preview.previewToken, input }) }); }
+
+  async dataQuality(): Promise<DataQualityReport> { return (await this.request<{ readonly report: DataQualityReport }>(this.workspacePath("data-quality"))).report; }
+
+  async transcriptDerivations(runId: string, cursor?: string): Promise<CursorPage<TranscriptDerivation>> {
+    const params = new URLSearchParams({ runId, limit: "100" });
+    if (cursor !== undefined) params.set("pageCursor", cursor);
+    const response = await this.request<{ derivations: TranscriptDerivation[]; total: number; nextCursor?: string }>(`${this.workspacePath("transcript-derivations")}?${params}`);
+    return { items: response.derivations, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
+  }
+  async transcriptDerivedRecords(runId: string, derivationId: string, cursor?: string): Promise<CursorPage<DerivedTranscriptRecord>> {
+    const params = new URLSearchParams({ runId, limit: "100" });
+    if (cursor !== undefined) params.set("pageCursor", cursor);
+    const response = await this.request<{ records: DerivedTranscriptRecord[]; total: number; nextCursor?: string }>(`${this.workspacePath("transcript-derivations")}/${encodeURIComponent(derivationId)}?${params}`);
+    const items = response.records.map((record) => {
+      if (record.dataEncoding !== "base64-json-utf8") return record;
+      if (typeof record.data.base64 !== "string") throw new Error("Encoded evidence payload is invalid");
+      const data: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(record.data.base64), (character) => character.charCodeAt(0))));
+      if (data === null || typeof data !== "object" || Array.isArray(data)) throw new Error("Decoded evidence payload is invalid");
+      return { ...record, data: data as Readonly<Record<string, unknown>> };
+    });
+    return { items, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
+  }
+
+  async recordTrajectoryOutcome(input: Pick<TrajectoryOutcomeRecord, "taskId" | "trajectoryId" | "outcome" | "reason" | "previousEventId">): Promise<TrajectoryOutcomeRecord> {
+    return this.command("trajectory.outcome", input, async ([stamp]) => (await this.request<{ readonly record: TrajectoryOutcomeRecord }>(this.workspacePath("trajectory-outcomes"), { method: "POST", body: JSON.stringify({ stamp, input }) })).record);
+  }
+  async trajectoryOutcomes(taskId: string, trajectoryId: string, cursor?: string): Promise<CursorPage<TrajectoryOutcomeRecord>> {
+    const query = new URLSearchParams({ taskId, trajectoryId, limit: "100" });
+    if (cursor !== undefined) query.set("pageCursor", cursor);
+    const result = await this.request<{ readonly records: readonly TrajectoryOutcomeRecord[]; readonly total: number; readonly nextCursor?: string }>(`${this.workspacePath("trajectory-outcomes")}?${query}`);
+    return { items: result.records, total: result.total, ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }) };
+  }
+
+  /** Bulk proposal acceptance with stable per-command stamps so a retried batch replays the same events. */
+  async acceptMemoryCandidates(candidateIds: readonly string[], options: { readonly audience: "personal" | "workspace"; readonly spaceId?: string }): Promise<readonly PersonalMemory[]> {
+    if (candidateIds.length < 1 || candidateIds.length > 100) throw new TypeError("candidateIds must contain 1 to 100 IDs");
+    return this.command("memory.accept-many", { candidateIds, options }, async (stamps) => {
+      const acceptances = candidateIds.map((candidateId, index) => {
+        const stamp = stamps[index * 2]!; const memoryStamp = stamps[index * 2 + 1]!;
+        return { candidateId, stamp, memoryStamp, memoryId: this.entityId(memoryStamp) };
+      });
+      const response = await this.request<{ readonly accepted: readonly { readonly memory: PersonalMemory }[] }>(this.workspacePath("memory-candidate-promotions"), {
+        method: "POST",
+        body: JSON.stringify({ audience: options.audience, ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }), acceptances }),
+      });
+      return response.accepted.map(({ memory }) => memory);
+    }, candidateIds.length * 2);
   }
 }

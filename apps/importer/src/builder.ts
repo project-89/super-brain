@@ -13,6 +13,7 @@ import {
 } from "@_89/fold-transcript";
 
 import { sha256Text } from "./files.js";
+import type { TranscriptParserDiagnostics } from "./types.js";
 
 interface MutableTurn {
   readonly id: string;
@@ -95,6 +96,9 @@ export class TranscriptBuilder {
   private messages = 0;
   private records = 0;
   private unknown = 0;
+  private currentRecordType = "<invalid>";
+  private readonly recordTypes = new Map<string, number>();
+  private readonly unknownRecordTypes = new Map<string, number>();
   private startedAt: string | undefined;
   private endedAt: string | undefined;
   private model: string | undefined;
@@ -106,7 +110,7 @@ export class TranscriptBuilder {
   ) {}
 
   consume(record: NormalizedNativeRecord): void {
-    this.countRecord(record.at);
+    this.countRecord(record.at, record.recordType);
     if (record.unknown) this.countUnknown();
     this.observeContext(record.cwd, record.branch, record.at, record.remote);
     this.setClientVersion(record.clientVersion);
@@ -129,8 +133,10 @@ export class TranscriptBuilder {
     }
   }
 
-  countRecord(timestamp?: string): void {
+  countRecord(timestamp?: string, recordType = "<invalid>"): void {
     this.records += 1;
+    this.currentRecordType = recordType;
+    this.recordTypes.set(recordType, (this.recordTypes.get(recordType) ?? 0) + 1);
     if (timestamp !== undefined) {
       if (this.startedAt === undefined || timestamp < this.startedAt) this.startedAt = timestamp;
       if (this.endedAt === undefined || timestamp > this.endedAt) this.endedAt = timestamp;
@@ -139,6 +145,21 @@ export class TranscriptBuilder {
 
   countUnknown(): void {
     this.unknown += 1;
+    this.unknownRecordTypes.set(this.currentRecordType, (this.unknownRecordTypes.get(this.currentRecordType) ?? 0) + 1);
+  }
+
+  diagnostics(): TranscriptParserDiagnostics {
+    const toolResults = { completed: 0, failed: 0, unknown: 0 };
+    for (const action of this.actions) {
+      if (action.kind !== "tool-result") continue;
+      const status = action.status;
+      toolResults[status === "completed" || status === "failed" ? status : "unknown"] += 1;
+    }
+    return {
+      recordTypes: Object.fromEntries([...this.recordTypes].sort(([left], [right]) => left.localeCompare(right))),
+      unknownRecordTypes: Object.fromEntries([...this.unknownRecordTypes].sort(([left], [right]) => left.localeCompare(right))),
+      toolResults,
+    };
   }
 
   setModel(model: string | undefined): void {
@@ -236,7 +257,8 @@ export class TranscriptBuilder {
     turn.actionCount += 1;
   }
 
-  addToolResult(name: string | undefined, at: string | undefined, result: EvidenceResult | boolean = "unknown", nativeId?: string): void {
+  /** `true`/`false` are legacy failed flags; `null` means the source did not establish a result. */
+  addToolResult(name: string | undefined, at: string | undefined, result: EvidenceResult | boolean | null = "unknown", nativeId?: string): void {
     if (this.currentTurn === undefined) this.startTurn(undefined, at);
     const actionKey = nativeId === undefined ? undefined : `result:${nativeId}`;
     if (actionKey !== undefined && this.actionIds.has(actionKey)) return;

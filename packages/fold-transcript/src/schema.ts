@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const transcriptSourceSchema = z.enum(["claude-code", "codex"]);
+export const transcriptSourceSchema = z.enum(["claude-code", "codex", "gemini", "hermes"]);
 export const identityResolutionSchema = z.enum(["resolved", "estimated", "unassigned"]);
 const timestampSchema = z.string().datetime({ offset: true });
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);

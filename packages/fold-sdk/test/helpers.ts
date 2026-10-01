@@ -53,6 +53,7 @@ interface EventOptions {
   readonly actorId?: string;
   readonly kind?: string;
   readonly subject?: string;
+  readonly identity?: Readonly<Record<string, string>>;
 }
 
 export function event(options: EventOptions): FoldEvent {
@@ -72,7 +73,7 @@ export function event(options: EventOptions): FoldEvent {
         ...(options.spaceId === undefined ? {} : { space: options.spaceId }),
         ...(options.creatorId === undefined ? {} : { creator: options.creatorId }),
       },
-      identity: { principal: actorId, workspace: workspaceId },
+      identity: { ...options.identity, principal: actorId, workspace: workspaceId },
     },
     changes: [
       {

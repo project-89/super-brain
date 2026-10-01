@@ -4,6 +4,7 @@ import type { EventStamp } from "@_89/super-brain-client";
 import type { AnonymizationPolicy } from "@_89/super-brain-importer";
 
 export type HookSource = "claude-code" | "codex" | "hermes" | "unknown";
+export type CaptureAuthority = "agent" | "operator";
 export type ReasoningPolicy = "exclude" | "include";
 export type ReasoningTreePolicy = "exclude" | "summaries";
 export type TrajectoryFinalizationReason = "stop" | "prompt-boundary" | "session-end" | "orphan-timeout";
@@ -137,6 +138,7 @@ export interface CaptureSession {
   readonly checks?: readonly VerificationEvidence[];
   readonly lastVerification?: "success" | "failure";
   readonly explicitOutcome?: "success" | "failure";
+  readonly outcomeEvidence?: TrajectoryInput["outcomeEvidence"];
   readonly reviewText?: string;
   readonly lastEventId?: string;
   readonly finalized: boolean;
@@ -205,6 +207,8 @@ export type SpoolJob =
       readonly source: HookSource;
       readonly path: string;
       readonly ownedSnapshot?: true;
+      readonly nativeSessionId?: string;
+      readonly originalPath?: string;
     };
 
 export interface VaultArtifact {
