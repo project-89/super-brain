@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PostgresTenantAdministration, PostgresVectorMemoryRanker } from "@_89/fold-postgres";
+import { PostgresTenantAdministration, PostgresVectorMemoryRanker, PostgresOperations, grantPostgresRuntimePrivileges } from "@_89/fold-postgres";
 
 import { CompositeAuthenticator, PostgresMembershipResolver, StaticIdentityDirectory } from "./auth.js";
 import {
@@ -26,6 +26,8 @@ import {
 import { createApiServer } from "./server.js";
 import { HttpMemoryEmbeddingProvider } from "./embeddings.js";
 import { installApiLaunchAgent } from "./install.js";
+import { loadEnvironmentSecretFiles, postgresStartupPolicy } from "./environment.js";
+import { ApiOperations, BoundedDependencyProbe } from "./operations.js";
 
 function portFromEnvironment(value: string | undefined): number {
   const port = value === undefined ? 3000 : Number(value);
@@ -94,7 +96,9 @@ async function main(): Promise<void> {
     process.stdout.write(`${await installApiLaunchAgent(fileURLToPath(import.meta.url))}\n`);
     return;
   }
-  if (command !== "serve") throw new TypeError("supported commands: serve, install-service");
+  if (command !== "serve" && command !== "migrate" && command !== "bootstrap") throw new TypeError("supported commands: serve, migrate, bootstrap, install-service");
+  await loadEnvironmentSecretFiles(process.env);
+  const startup = postgresStartupPolicy(command, process.env);
   const credentials = process.env.FOLD_API_CREDENTIALS_JSON;
   const directory = credentials === undefined || credentials.trim().length === 0
     ? undefined
@@ -107,11 +111,13 @@ async function main(): Promise<void> {
     process.env.FOLD_CLERK_BINDINGS_JSON,
     process.env.CLERK_WEBHOOK_SIGNING_SECRET,
   ].some((value) => value !== undefined);
-  if (directory === undefined && !clerkEnabled) {
+  if (directory === undefined && !clerkEnabled && command !== "migrate") {
     throw new TypeError("FOLD_API_CREDENTIALS_JSON or CLERK_SECRET_KEY is required");
   }
   const dataDirectory = process.env.FOLD_DATA_DIR ?? join(process.cwd(), ".data", "fold");
   const databaseUrl = process.env.FOLD_DATABASE_URL;
+  const schema = process.env.FOLD_POSTGRES_SCHEMA ?? "public";
+  if (command !== "serve" && !databaseUrl?.trim()) throw new TypeError("Migration/bootstrap requires FOLD_DATABASE_URL");
   if (clerkEnabled && (databaseUrl === undefined || databaseUrl.trim().length === 0)) {
     throw new TypeError("Clerk authentication requires FOLD_DATABASE_URL");
   }
@@ -121,10 +127,10 @@ async function main(): Promise<void> {
   );
   const registry = databaseUrl === undefined || databaseUrl.trim().length === 0
     ? new JournalSdkRegistry(dataDirectory)
-    : new PostgresSdkRegistry({ connectionString: databaseUrl, requireRlsEnforcement });
+    : new PostgresSdkRegistry({ connectionString: databaseUrl, schema, schemaMode: startup.schemaMode, requireRlsEnforcement });
   const tenantAdministration = databaseUrl === undefined || databaseUrl.trim().length === 0
     ? undefined
-    : new PostgresTenantAdministration({ connectionString: databaseUrl, requireRlsEnforcement });
+    : new PostgresTenantAdministration({ connectionString: databaseUrl, schema, schemaMode: startup.schemaMode, requireRlsEnforcement });
   let clerkConfiguration: ReturnType<typeof parseClerkBindingConfiguration> | undefined;
   let clerkAuthenticator: ClerkAuthenticator | undefined;
   let clerkProvisioningWebhook: ClerkProvisioningWebhook | undefined;
@@ -171,7 +177,9 @@ async function main(): Promise<void> {
   const authenticators = [directory, clerkAuthenticator].filter(
     (provider): provider is NonNullable<typeof provider> => provider !== undefined,
   );
-  const authenticator = authenticators.length === 1
+  const authenticator = authenticators.length === 0 && command === "migrate"
+    ? { authenticate: async () => undefined }
+    : authenticators.length === 1
     ? authenticators[0]!
     : new CompositeAuthenticator(authenticators);
   const embeddingUrl = process.env.FOLD_EMBEDDING_URL;
@@ -185,6 +193,7 @@ async function main(): Promise<void> {
     if (model === undefined) throw new TypeError("FOLD_EMBEDDING_MODEL is required when embeddings are enabled");
     vectorRanker = new PostgresVectorMemoryRanker({
       connectionString: databaseUrl,
+      schema, schemaMode: startup.schemaMode,
       provider: new HttpMemoryEmbeddingProvider({
         url: embeddingUrl,
         model,
@@ -247,10 +256,17 @@ async function main(): Promise<void> {
     known: knownProviders,
     defaultProvider: process.env.FOLD_REASONING_DEFAULT_PROVIDER ?? (geminiKey?.trim() ? "gemini" : "local"),
   });
+  const postgresOperations = databaseUrl?.trim() ? new PostgresOperations({ connectionString: databaseUrl, schema,
+    embeddings: vectorRanker !== undefined, verifyRuntimeRole: startup.schemaMode === "verify" }) : undefined;
+  const operations = new ApiOperations({ canonicalStore: new BoundedDependencyProbe(async (signal) => {
+    if (postgresOperations !== undefined) await postgresOperations.probe(signal);
+    else { signal.throwIfAborted(); await registry.open(); }
+  }, 3_000, 2_000) }, { captureWorker: undefined, memoryWorker: undefined, recentBackup: undefined },
+    postgresOperations === undefined ? undefined : (tenant) => postgresOperations.consumerLag(tenant));
   let server: ReturnType<typeof createApiServer>;
   try {
-    await registry.open();
-    if (tenantAdministration !== undefined) {
+    await Promise.all([registry.open(), tenantAdministration?.open(), vectorRanker?.open()]);
+    if (tenantAdministration !== undefined && startup.seedMemberships) {
       await tenantAdministration.replaceStaticMemberships(directory?.configuredMemberships() ?? []);
       if (clerkConfiguration !== undefined) {
         await tenantAdministration.replaceExternalIdentityBindings(
@@ -260,6 +276,15 @@ async function main(): Promise<void> {
         );
         await tenantAdministration.replaceProviderMemberships("clerk", clerkConfiguration.memberships);
       }
+    }
+    if (command !== "serve") {
+      const runtimeRole = process.env.FOLD_RUNTIME_ROLE;
+      if (runtimeRole !== undefined) await grantPostgresRuntimePrivileges({ connectionString: databaseUrl!, schema, runtimeRole,
+        ...(process.env.FOLD_RECOVERY_ROLE === undefined ? {} : { recoveryRole: process.env.FOLD_RECOVERY_ROLE }), embeddings: vectorRanker !== undefined });
+      operations.close();
+      await Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close(), postgresOperations?.close()]);
+      console.log(JSON.stringify({ status: "completed", operation: command, schemaMode: "migrate", membershipsSeeded: startup.seedMemberships }));
+      return;
     }
     server = createApiServer({
       authenticator,
@@ -272,16 +297,23 @@ async function main(): Promise<void> {
       ...(tenantAdministration === undefined ? {} : { tenantAdministration }),
       ...(clerkProvisioningWebhook === undefined ? {} : { identityProvisioningWebhook: clerkProvisioningWebhook }),
       ...(rateLimit === 0 ? {} : { rateLimiter: new FixedWindowRateLimiter(rateLimit) }),
+      principalRateLimiter: new FixedWindowRateLimiter(nonNegativeIntegerFromEnvironment("FOLD_API_PRINCIPAL_RATE_LIMIT_PER_MINUTE", process.env.FOLD_API_PRINCIPAL_RATE_LIMIT_PER_MINUTE, 300)),
+      tenantRateLimiter: new FixedWindowRateLimiter(nonNegativeIntegerFromEnvironment("FOLD_API_TENANT_RATE_LIMIT_PER_MINUTE", process.env.FOLD_API_TENANT_RATE_LIMIT_PER_MINUTE, 3_000)),
+      operations,
+      eventStreamMaxConnections: nonNegativeIntegerFromEnvironment("FOLD_API_STREAM_MAX_CONNECTIONS", process.env.FOLD_API_STREAM_MAX_CONNECTIONS, 100),
+      eventStreamMaxPerPrincipal: nonNegativeIntegerFromEnvironment("FOLD_API_STREAM_MAX_PER_PRINCIPAL", process.env.FOLD_API_STREAM_MAX_PER_PRINCIPAL, 5),
+      eventStreamMaxPerTenant: nonNegativeIntegerFromEnvironment("FOLD_API_STREAM_MAX_PER_TENANT", process.env.FOLD_API_STREAM_MAX_PER_TENANT, 25),
       ...(corsOrigins === undefined ? {} : { corsOrigins }),
       fleetOrphanAfterMs,
-      reportError: (error) => console.error(error),
+      reportError: () => console.error(JSON.stringify({ level: "error", code: "api_request_failed" })),
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, host, resolve);
     });
   } catch (error) {
-    await Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close()]);
+    operations.close();
+    await Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close(), postgresOperations?.close()]);
     throw error;
   }
   console.log(`Fold API listening at http://${host}:${port}`);
@@ -290,11 +322,12 @@ async function main(): Promise<void> {
   const close = () => {
     if (closing) return;
     closing = true;
+    operations.close();
     const forceClose = setTimeout(() => server.closeAllConnections(), 10_000);
     forceClose.unref();
     server.close((error) => {
       clearTimeout(forceClose);
-      void Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close()]).then(() => {
+      void Promise.all([registry.close(), vectorRanker?.close(), tenantAdministration?.close(), postgresOperations?.close()]).then(() => {
         if (error !== undefined) {
           console.error(error);
           process.exitCode = 1;

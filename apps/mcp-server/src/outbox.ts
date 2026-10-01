@@ -3,7 +3,7 @@ import { chmod, mkdir, lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
-import { decryptVaultLine, encryptVaultLine, ensureVaultKey } from "@_89/super-brain-importer";
+import { decryptVaultLine, encryptVaultLine, ensureVaultKey, withPrivateRootWrite } from "@_89/super-brain-importer";
 import { SuperBrainApiError, type AuthorizedReadSubject, type TelemetryBatch, type TelemetryOutbox, type TelemetryOutboxStatus } from "@_89/super-brain-client";
 
 const id = z.string().min(1).max(500);
@@ -52,7 +52,7 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
   }
   private open(): Promise<DatabaseSync> {
     if (this.closing) return Promise.reject(new Error("outbox-closed"));
-    if (this.opening === undefined) this.opening = (async () => {
+    if (this.opening === undefined) this.opening = withPrivateRootWrite(this.options.directory,"node-outbox",async () => {
       await mkdir(this.options.directory, { recursive: true, mode: 0o700 });
       if (!(await lstat(this.options.directory)).isDirectory()) throw new Error("outbox-directory-invalid");
       await chmod(this.options.directory, 0o700);
@@ -69,7 +69,7 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
         this.database = db;
         return db;
       } catch (error) { db.close(); throw error; }
-    })().catch((error) => { this.opening = undefined; this.unavailable = "storage-unavailable"; throw error; });
+    }).catch((error) => { this.opening = undefined; this.unavailable = "storage-unavailable"; throw error; });
     return this.opening;
   }
   private track<T>(work: Promise<T>): Promise<T> {
@@ -79,7 +79,7 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
   }
   enqueue(input: TelemetryBatch): Promise<void> {
     if (this.closing) return Promise.reject(new Error("outbox-closed"));
-    return this.track(this.persist(input));
+    return this.track(withPrivateRootWrite(this.options.directory,"node-outbox",()=>this.persist(input)));
   }
   private async persist(input: TelemetryBatch): Promise<void> {
     // Even a warm SQLite connection runs after the successful read's delivery turn.
@@ -120,7 +120,7 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
   }
   flush(options: { readonly signal?: AbortSignal; readonly maxBatches?: number } = {}): Promise<void> {
     if (!Number.isInteger(options.maxBatches ?? 10) || (options.maxBatches ?? 10) < 0 || (options.maxBatches ?? 10) > 100) return Promise.reject(new TypeError("flush batch bound must be 0..100"));
-    if (this.flushing === undefined) this.flushing = this.drain(options).finally(() => { this.flushing = undefined; });
+    if (this.flushing === undefined) this.flushing = withPrivateRootWrite(this.options.directory,"node-outbox",()=>this.drain(options)).finally(() => { this.flushing = undefined; });
     return this.flushing;
   }
   private async request<T>(operation: (signal: AbortSignal) => Promise<T>, outer?: AbortSignal): Promise<T> {
@@ -177,12 +177,12 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
       }
     }
   }
-  retryTerminal(): Promise<number> { return this.track(this.retryFailed()); }
+  retryTerminal(): Promise<number> { return this.track(withPrivateRootWrite(this.options.directory,"node-outbox",()=>this.retryFailed())); }
   private async retryFailed(): Promise<number> {
     const db = await this.open(); const current = subject.parse(await this.request((signal) => this.options.identity(signal)));
     return Number(db.prepare("UPDATE batches SET state='pending',attempts=0,next_at=?,lease=NULL,lease_until=0 WHERE namespace=? AND state IN ('denied','exhausted')").run(this.now(), namespace(current)).changes);
   }
-  discardTerminal(): Promise<number> { return this.track(this.discardFailed()); }
+  discardTerminal(): Promise<number> { return this.track(withPrivateRootWrite(this.options.directory,"node-outbox",()=>this.discardFailed())); }
   private async discardFailed(): Promise<number> {
     const db = await this.open(); const current = subject.parse(await this.request((signal) => this.options.identity(signal)));
     const removed = Number(db.prepare("DELETE FROM batches WHERE namespace=? AND state IN ('denied','exhausted')").run(namespace(current)).changes);
@@ -193,6 +193,6 @@ export class NodeTelemetryOutbox implements TelemetryOutbox {
     this.closing = true;
     for (const request of this.requests) request.abort(new Error("outbox-closed"));
     await Promise.allSettled([...this.operations, this.flushing, this.opening]);
-    this.database?.close(); this.database = undefined;
+    await withPrivateRootWrite(this.options.directory,"node-outbox",async()=>{ this.database?.close(); this.database = undefined; });
   }
 }

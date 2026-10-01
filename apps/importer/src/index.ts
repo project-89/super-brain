@@ -10,3 +10,4 @@ export * from "./types.js";
 export * from "./native.js";
 export * from "./stored.js";
 export * from "./reinterpret.js";
+export * from "./private-fence.js";

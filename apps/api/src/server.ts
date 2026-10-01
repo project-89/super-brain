@@ -642,9 +642,7 @@ function applyRateLimit(
   dependencies: ApiDependencies,
 ): void {
   if (dependencies.rateLimiter === undefined) return;
-  const credential = request.headers.authorization ?? "anonymous";
-  const fingerprint = createHash("sha256").update(credential).digest("hex").slice(0, 24);
-  const decision = dependencies.rateLimiter.consume(`${request.socket.remoteAddress ?? "unknown"}:${fingerprint}`);
+  const decision = dependencies.rateLimiter.consume(request.socket.remoteAddress ?? "unknown");
   response.setHeader("ratelimit-limit", decision.limit.toString());
   response.setHeader("ratelimit-remaining", decision.remaining.toString());
   response.setHeader("ratelimit-reset", Math.ceil(decision.resetAt / 1_000).toString());
@@ -657,6 +655,15 @@ function applyRateLimit(
     "Request rate limit exceeded",
     { retryAfterSeconds },
   );
+}
+
+function applyAuthorizedRateLimit(response: ServerResponse, limiter: ApiDependencies["principalRateLimiter"], key: string): void {
+  if (limiter === undefined) return;
+  const decision = limiter.consume(key);
+  if (decision.allowed) return;
+  const retryAfterSeconds = decision.retryAfterSeconds ?? 1;
+  response.setHeader("retry-after", String(retryAfterSeconds));
+  throw new ApiHttpError(429, "rate_limited", "Authorized request budget exceeded", { retryAfterSeconds });
 }
 
 function sendError(response: ServerResponse, error: ApiHttpError): void {
@@ -981,21 +988,24 @@ async function streamBatch(dependencies: ApiDependencies, tenant: TenantKey, acc
   return dependencies.sdks.streamEntries(tenant, access, options);
 }
 
-const streamCounts = new WeakMap<ApiDependencies, { total: number; principals: Map<string, number> }>();
+const streamCounts = new WeakMap<ApiDependencies, { total: number; principals: Map<string, number>; tenants: Map<string, number> }>();
 
 function startEventStream(request: IncomingMessage, response: ServerResponse, dependencies: ApiDependencies,
   tenant: TenantKey, subject: AuthenticatedSubject, initialCursor: FoldConsumerCursor | undefined,
   includeDrafts: boolean, kinds: readonly string[] | undefined): void {
   let counts = streamCounts.get(dependencies);
-  if (counts === undefined) { counts = { total: 0, principals: new Map() }; streamCounts.set(dependencies, counts); }
+  if (counts === undefined) { counts = { total: 0, principals: new Map(), tenants: new Map() }; streamCounts.set(dependencies, counts); }
   const countState = counts;
-  const principalKey = JSON.stringify([tenant.organizationId, tenant.workspaceId, subject.principalId]);
+  const principalKey = JSON.stringify([tenant.organizationId, subject.principalId]);
+  const tenantKey = JSON.stringify([tenant.organizationId, tenant.workspaceId]);
   const principalCount = counts.principals.get(principalKey) ?? 0;
-  if (counts.total >= (dependencies.eventStreamMaxConnections ?? 100) || principalCount >= (dependencies.eventStreamMaxPerPrincipal ?? 5)) {
+  const tenantCount = counts.tenants.get(tenantKey) ?? 0;
+  if (counts.total >= (dependencies.eventStreamMaxConnections ?? 100) || principalCount >= (dependencies.eventStreamMaxPerPrincipal ?? 5) || tenantCount >= (dependencies.eventStreamMaxPerTenant ?? 25)) {
     throw new ApiHttpError(429, "stream_limit", "Event stream connection limit reached", { retryAfterSeconds: 5 });
   }
   counts.total += 1;
   counts.principals.set(principalKey, principalCount + 1);
+  counts.tenants.set(tenantKey, tenantCount + 1);
   response.writeHead(200, { "cache-control": "no-store, no-transform", "connection": "keep-alive",
     "content-type": "text/event-stream; charset=utf-8", "x-accel-buffering": "no", "x-content-type-options": "nosniff" });
   response.write(": connected\n\n");
@@ -1009,6 +1019,8 @@ function startEventStream(request: IncomingMessage, response: ServerResponse, de
     countState.total -= 1;
     const remaining = (countState.principals.get(principalKey) ?? 1) - 1;
     if (remaining === 0) countState.principals.delete(principalKey); else countState.principals.set(principalKey, remaining);
+    const tenantRemaining = (countState.tenants.get(tenantKey) ?? 1) - 1;
+    if (tenantRemaining === 0) countState.tenants.delete(tenantKey); else countState.tenants.set(tenantKey, tenantRemaining);
   };
   const fail = (error: unknown) => {
     if (closed) return;
@@ -1342,6 +1354,7 @@ async function handleRequest(
   response: ServerResponse,
   dependencies: ApiDependencies,
   allowedOrigins: ReadonlySet<string> | undefined,
+  requestSignal: AbortSignal,
 ): Promise<void> {
   const method = request.method ?? "";
   const url = new URL(request.url ?? "/", "http://localhost");
@@ -1349,6 +1362,13 @@ async function handleRequest(
   if (url.pathname === "/health") {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     sendJson(response, 200, { status: "ok" });
+    return;
+  }
+  if (url.pathname === "/ready") {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const readiness = await dependencies.operations?.readiness();
+    // Public readiness discloses only availability, never dependency details.
+    sendJson(response, readiness?.status === "ready" ? 200 : 503, { status: readiness?.status ?? "unavailable" });
     return;
   }
   applyRateLimit(request, response, dependencies);
@@ -1372,6 +1392,7 @@ async function handleRequest(
     return;
   }
   const subject = await authenticate(request, dependencies);
+  applyAuthorizedRateLimit(response, dependencies.principalRateLimiter, JSON.stringify([subject.organizationId ?? "unbound", subject.principalId]));
   if (segments.length === 2 && segments[1] === "session") {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const organizationId = subject.organizationId;
@@ -1450,6 +1471,19 @@ async function handleRequest(
   }
   if (access === undefined) {
     throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+  }
+  applyAuthorizedRateLimit(response, dependencies.tenantRateLimiter, JSON.stringify([access.organizationId, workspaceId]));
+  if (resource === "operations" && resourceSegments.length === 1 && method === "GET") {
+    if (!subject.capabilities?.includes("operations:read") || (access.organizationRole !== "owner" && access.organizationRole !== "admin")) {
+      throw new ApiHttpError(403, "operations_access_denied", "Operations diagnostics require an explicit operator credential and current organization administration access");
+    }
+    if (dependencies.operations?.diagnostics === undefined) throw new ApiHttpError(503, "operations_unavailable", "Operations diagnostics are unavailable");
+    const result = await dependencies.operations.diagnostics({ organizationId: access.organizationId, workspaceId });
+    const current = await authenticate(request, dependencies);
+    const currentAccess = await dependencies.memberships.resolveAccess(current, access.organizationId, workspaceId);
+    if (!current.capabilities?.includes("operations:read") || (currentAccess?.organizationRole !== "owner" && currentAccess?.organizationRole !== "admin")) throw new ApiHttpError(403, "operations_access_denied", "Operations access was revoked");
+    sendJson(response, 200, result);
+    return;
   }
   if (resource === "identity" && resourceSegments.length === 1 && method === "GET") {
     sendJson(response, 200, { principalId: subject.principalId, organizationId: access.organizationId, workspaceId: access.workspaceId, workspaceRole: access.workspaceRole, spaceRoles: access.spaceRoles, capabilities: subject.capabilities ?? API_CAPABILITIES, ...(subject.taskEvidenceAuthority === undefined ? {} : { taskEvidenceAuthority: subject.taskEvidenceAuthority }), ...(access.platformDataAccess === true ? { platformDataAccess: true } : {}) });
@@ -2003,7 +2037,7 @@ async function handleRequest(
           ...(body.from === undefined ? {} : { from: body.from }),
           ...(body.to === undefined ? {} : { to: body.to }),
           limit: body.limit ?? 5,
-        }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker())
+        }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker(), { signal: requestSignal })
       : await (async () => {
           const memories = body.memoryRefs !== undefined ? await sdk.memoryRevisions(access, body.memoryRefs, body.includeNeedsReview === true) : await Promise.all(explicitMemoryIds.map((memoryId) => sdk.memoryById(access, memoryId)));
           if (memories.some((memory) => memory === undefined)) {
@@ -2039,14 +2073,8 @@ async function handleRequest(
       throw new ApiHttpError(400, "reasoning_provider_unavailable", error instanceof Error ? error.message : "Reasoning provider is unavailable");
     }
     if (body.providerConfigRevision !== undefined && reasoner.descriptor.configRevision !== body.providerConfigRevision) throw new ApiHttpError(409, "reasoning_config_changed", "Reasoning provider configuration changed");
-    const providerController = new AbortController();
-    const abortProvider = () => { if (!response.writableEnded) providerController.abort(new Error("reasoning caller disconnected")); };
-    response.once("close", abortProvider);
-    if (response.destroyed) abortProvider();
-    let result;
-    try {
-      result = validateReasoningResult(await reasoner.answer({ question: body.question, evidence, signal: providerController.signal, ...(steering === undefined ? {} : { steering }) }), evidence);
-    } finally { response.removeListener("close", abortProvider); }
+    requestSignal.throwIfAborted();
+    const result = validateReasoningResult(await reasoner.answer({ question: body.question, evidence, signal: requestSignal, ...(steering === undefined ? {} : { steering }) }), evidence);
     const freshAccess = organizationId === undefined ? await dependencies.memberships.resolveLegacyAccess(subject, workspaceId) : await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
     if (freshAccess === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
     await sdk.memoryRevisions(freshAccess, evidence.map(({ memoryId, revision }) => ({ memoryId, revision })), body.includeNeedsReview === true);
@@ -2264,7 +2292,7 @@ async function handleRequest(
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const recall = parsedRankedRecallRequest(await readJsonBody(request, maxBodyBytes));
     const ranker = dependencies.memoryRanker ?? new LocalLexicalMemoryRanker();
-    const result = await sdk.rankMemories(access, recall, ranker);
+    const result = await sdk.rankMemories(access, recall, ranker, { signal: requestSignal });
     const freshAccess = organizationId === undefined ? await dependencies.memberships.resolveLegacyAccess(subject, workspaceId) : await dependencies.memberships.resolveAccess(subject, organizationId, workspaceId);
     if (freshAccess === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
     await sdk.memoryRevisions(freshAccess, result.memories.map(({ memory }) => ({ memoryId: memory.id, revision: memory.revision })), recall.includeNeedsReview === true);
@@ -2410,6 +2438,9 @@ async function handleRequest(
 }
 
 export function createApiServer(dependencies: ApiDependencies): Server {
+  for (const value of [dependencies.eventStreamMaxConnections, dependencies.eventStreamMaxPerPrincipal, dependencies.eventStreamMaxPerTenant]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new TypeError("Event stream limits must be positive integers");
+  }
   if (
     dependencies.maxBodyBytes !== undefined &&
     (!Number.isInteger(dependencies.maxBodyBytes) || dependencies.maxBodyBytes <= 0)
@@ -2424,12 +2455,17 @@ export function createApiServer(dependencies: ApiDependencies): Server {
   }
   const allowedOrigins = corsOriginSet(dependencies.corsOrigins);
   const server = createServer((request, response) => {
-    void handleRequest(request, response, dependencies, allowedOrigins).catch((error: unknown) => {
+    const startedAt = performance.now();
+    response.once("finish", () => dependencies.operations?.observeResponse?.(response.statusCode, performance.now() - startedAt));
+    const controller = new AbortController();
+    const abort = () => { if (!response.writableEnded) controller.abort(new Error("API caller disconnected")); };
+    request.once("aborted", abort); response.once("close", abort);
+    void handleRequest(request, response, dependencies, allowedOrigins, controller.signal).catch((error: unknown) => {
       const httpError = asHttpError(error);
       if (httpError.status === 500) dependencies.reportError?.(error);
       if (!response.headersSent) sendError(response, httpError);
       else response.destroy();
-    });
+    }).finally(() => { request.off("aborted", abort); response.off("close", abort); });
   });
   server.requestTimeout = DEFAULT_REQUEST_TIMEOUT_MS;
   server.headersTimeout = DEFAULT_HEADERS_TIMEOUT_MS;

@@ -1,3 +1,4 @@
+import { withPrivateRootWrites } from "@_89/super-brain-importer";
 import { CaptureReceiptQueue, receiptEncryptionKey, type CaptureReceipt } from "./receipts.js";
 import { createHash } from "node:crypto";
 import { basename, relative, resolve } from "node:path";
@@ -312,6 +313,7 @@ export class CaptureEngine {
   ) {}
 
   async initialize(): Promise<void> {
+    return withPrivateRootWrites([this.config.stateRoot, this.config.vaultRoot], "capture", async () => {
     await new CaptureReceiptQueue(this, await receiptEncryptionKey(this.config)).restorePrepared();
     this.state = await this.stateStore.load();
     await this.stepStore.initialize();
@@ -359,6 +361,8 @@ export class CaptureEngine {
     if (changed) {
       await this.saveState();
     }
+  
+    });
   }
 
   private saveState(): Promise<void> {
@@ -371,7 +375,7 @@ export class CaptureEngine {
   }
 
   processReceipt(receipt: CaptureReceipt, prepare: (prepared: NonNullable<CaptureReceipt["prepared"]>) => Promise<void>): Promise<void> {
-    const operation = this.chain.then(async () => {
+    const operation = this.chain.then(() => withPrivateRootWrites([this.config.stateRoot, this.config.vaultRoot], "capture", async () => {
       if (this.blockedReceiptId !== undefined && this.blockedReceiptId !== receipt.occurrence.id) throw new Error("an earlier receipt commit must be recovered first");
       let prepared = receipt.prepared;
       if (prepared === undefined) {
@@ -398,7 +402,7 @@ export class CaptureEngine {
       this.state = prepared.state;
       for (const job of prepared.jobs) await this.spool.enqueue(job);
       this.blockedReceiptId = undefined;
-    });
+    }));
     this.chain = operation.catch(() => undefined);
     return operation;
   }
@@ -442,16 +446,16 @@ export class CaptureEngine {
   }
 
   ingest(source: HookSource, payloadInput: unknown, authority?: HookAuthority): Promise<{ readonly artifactId: string }> {
-    const operation = this.chain.then(() => {
+    const operation = this.chain.then(() => withPrivateRootWrites([this.config.stateRoot, this.config.vaultRoot], "capture", async () => {
       if (this.blockedReceiptId !== undefined) throw new Error("capture receipt recovery is pending");
       return this.ingestInternal(source, payloadInput, authority);
-    });
+    }));
     this.chain = operation.catch(() => undefined);
     return operation;
   }
 
   heartbeat(nowMs = Date.now()): Promise<void> {
-    const operation = this.chain.then(() => this.blockedReceiptId === undefined ? this.heartbeatInternal(nowMs) : undefined);
+    const operation = this.chain.then(() => withPrivateRootWrites([this.config.stateRoot, this.config.vaultRoot], "capture", async () => this.blockedReceiptId === undefined ? this.heartbeatInternal(nowMs) : undefined));
     this.chain = operation.catch(() => undefined);
     return operation;
   }

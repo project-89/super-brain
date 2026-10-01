@@ -75,7 +75,25 @@ export interface FoldCommitOptions {
   readonly command: Omit<FoldCommandReceipt, "entries" | "revision">;
 }
 
+/** Derived read state bound to the exact immutable ingestion snapshot and current access. */
+export interface FoldSdkProjectionCheckpoint {
+  readonly formatVersion: 2;
+  readonly projection: string;
+  readonly stateVersion: string;
+  readonly sourceRevision: string;
+  readonly ingestionSequence: string;
+  readonly accessDigest: string;
+  readonly configurationDigest: string;
+  readonly through: FoldSdkCursor;
+  readonly state: unknown;
+}
+export type FoldSdkProjectionCheckpointKey = Pick<FoldSdkProjectionCheckpoint, "projection" | "stateVersion" | "sourceRevision" | "accessDigest" | "configurationDigest">;
+
 export interface FoldSdkStore {
+  /** Entries and all nested values are frozen; unchanged snapshots retain object identity. */
+  readonly immutableSnapshots?: boolean;
+  readProjectionCheckpoint?(key: FoldSdkProjectionCheckpointKey): Promise<FoldSdkProjectionCheckpoint | undefined>;
+  writeProjectionCheckpoint?(checkpoint: FoldSdkProjectionCheckpoint): Promise<boolean>;
   readonly stableReads?: boolean;
   readonly requireDurableCommands?: boolean;
   read(options?: { readonly missing?: "error" | "empty" }): Promise<{
@@ -198,15 +216,19 @@ export interface MemoryRankingDocument {
   readonly revision: number;
 }
 
+export interface MemoryEmbeddingRequestOptions { readonly signal?: AbortSignal; readonly timeoutMs?: number }
+
 export interface MemoryEmbeddingProvider {
   readonly descriptor: {
     readonly id: string;
     readonly dimensions: number;
   };
-  embed(inputs: readonly string[]): Promise<readonly (readonly number[])[]>;
+  embed(inputs: readonly string[], options?: MemoryEmbeddingRequestOptions): Promise<readonly (readonly number[])[]>;
+  close?(): Promise<void>;
 }
 
 export interface MemoryRankingRequest {
+  readonly signal?: AbortSignal;
   readonly organizationId?: string;
   readonly workspaceId: string;
   readonly query: string;
@@ -214,9 +236,12 @@ export interface MemoryRankingRequest {
   readonly limit: number;
 }
 
+export interface MemoryRankingResult { readonly candidates: readonly SemanticMemoryCandidate[]; readonly ranking: MemoryRankerDescriptor }
+
 export interface MemoryRanker {
   readonly descriptor: MemoryRankerDescriptor;
   rank(request: MemoryRankingRequest): Promise<readonly SemanticMemoryCandidate[]>;
+  rankWithMetadata?(request: MemoryRankingRequest): Promise<MemoryRankingResult>;
 }
 
 export type RankedMemoryRecallRequest = Omit<RecallRequest, "candidates"> & {

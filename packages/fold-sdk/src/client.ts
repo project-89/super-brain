@@ -1,3 +1,5 @@
+import { BoundedCache, serializedCost, immutable, sha256 } from "./cache.js";
+import { MEMORY_CHECKPOINT_VERSION, encodeMemoryCheckpoint, decodeMemoryCheckpoint } from "./checkpoint.js";
 import {
   fold,
   forkAt,
@@ -280,6 +282,7 @@ function validateReadOptions(options: FoldSdkReadOptions): "canon" | "canon+draf
 
 function transcriptCatalogCacheKey(access: FoldSdkAccessContext): string {
   return JSON.stringify([
+    access.organizationId ?? "local",
     access.principalId,
     access.workspaceId,
     access.workspaceRole,
@@ -301,9 +304,22 @@ export class FoldSdk {
   private queue: Promise<void> = Promise.resolve();
   private storedEntries: FoldLogEntry[] | undefined;
   private storedRevision: string | undefined;
-  private readonly transcriptCatalogs = new Map<string, { readonly revision?: string; readonly catalog: TranscriptCatalog }>();
-  private readonly memoryProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }>();
-  private readonly candidateProjections = new Map<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryCandidateProjection }>();
+  private readonly transcriptCatalogs = new BoundedCache<string, { readonly revision?: string; readonly catalog: TranscriptCatalog }>(16 * 1024 * 1024, 8, (item) => serializedCost(item.catalog));
+  private readonly memoryProjections = new BoundedCache<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryProjection }>(32 * 1024 * 1024, 8, (item) => item.events.length * 8 + serializedCost(item.projection));
+  private readonly candidateProjections = new BoundedCache<string, { readonly revision?: string; readonly events: readonly FoldEvent[]; readonly projection: MemoryCandidateProjection }>(32 * 1024 * 1024, 8, (item) => item.events.length * 8 + serializedCost(item.projection));
+  private readonly readProjections = new BoundedCache<string, { readonly revision: string; readonly projection: MemoryProjection }>(16 * 1024 * 1024, 8, (item) => serializedCost(item.projection));
+  private validatedEntries = new WeakMap<FoldLogEntry, { entry: FoldLogEntry; bytes: number }>();
+  private sourceCacheBytes = 0;
+
+  cacheUsageBytes(): number {
+    return this.sourceCacheBytes + this.transcriptCatalogs.bytes + this.memoryProjections.bytes + this.candidateProjections.bytes + this.readProjections.bytes;
+  }
+
+  /** Release read accelerators; an in-flight command retains its own pinned snapshot. */
+  releaseReadCaches(): void {
+    this.storedEntries = undefined; this.storedRevision = undefined; this.sourceCacheBytes = 0;
+    this.validatedEntries = new WeakMap(); this.transcriptCatalogs.clear(); this.memoryProjections.clear(); this.candidateProjections.clear(); this.readProjections.clear();
+  }
 
   private commandState: { entries?: FoldLogEntry[]; revision?: string; staged: FoldLogEntry[]; method: string } | undefined;
   private readonly localReceipts = new Map<string, FoldCommandReceipt>();
@@ -382,7 +398,7 @@ export class FoldSdk {
           this.storedRevision = undefined;
           this.transcriptCatalogs.clear();
           this.memoryProjections.clear();
-          this.candidateProjections.clear();
+          this.candidateProjections.clear(); this.readProjections.clear();
         }
       }
     });
@@ -404,7 +420,7 @@ export class FoldSdk {
 
   private clearProjectionCachesFor(event: FoldEvent): void {
     if (event.kind.startsWith("transcript.")) this.transcriptCatalogs.clear();
-    if (event.kind.startsWith("memory.")) this.memoryProjections.clear();
+    if (event.kind.startsWith("memory.")) { this.memoryProjections.clear(); this.readProjections.clear(); }
     if (event.kind.startsWith("memory.candidate-")) this.candidateProjections.clear();
   }
 
@@ -431,7 +447,11 @@ export class FoldSdk {
       }
       return this.storedEntries;
     }
+    if (this.sourceCacheBytes > 128 * 1024 * 1024) this.releaseReadCaches();
+    let snapshotBytes = 0;
     const entries = read.entries.map((entry) => {
+      const cached = this.store.immutableSnapshots === true ? this.validatedEntries.get(entry) : undefined;
+      if (cached !== undefined) { snapshotBytes += cached.bytes; return cached.entry; }
       validateStatus(entry.status);
       const event = parseEvent(entry.event);
       validateMemoryEnvelope(event);
@@ -441,10 +461,14 @@ export class FoldSdk {
       validateActivityEventEnvelope(event);
       validateIntentionEventEnvelope(event);
       validateTranscriptEventEnvelope(event);
-      return { event, status: entry.status };
+      const parsed = immutable({ event, status: entry.status });
+      const bytes = serializedCost(parsed); snapshotBytes += bytes;
+      if (this.store.immutableSnapshots === true) this.validatedEntries.set(entry, { entry: parsed, bytes });
+      return parsed;
     });
+    this.sourceCacheBytes = Math.max(this.sourceCacheBytes, snapshotBytes);
     validateProducerOrder(entries.map((entry) => entry.event));
-    if (this.store.stableReads === true || read.revision !== undefined) this.storedEntries = entries;
+    if ((this.store.stableReads === true || read.revision !== undefined) && snapshotBytes <= 128 * 1024 * 1024) this.storedEntries = entries;
     this.storedRevision = read.revision;
     if (this.commandState !== undefined) {
       this.commandState.entries = [...entries];
@@ -474,13 +498,14 @@ export class FoldSdk {
     });
     const entries = await this.readStoredEntries();
     const added: FoldLogEntry[] = [];
+    const entriesById = new Map(entries.map((entry) => [entry.event.id, entry]));
     for (const entry of parsed) {
-      const existing = [...entries, ...added].find(({ event }) => event.id === entry.event.id);
+      const existing = entriesById.get(entry.event.id);
       if (existing !== undefined) {
         if (canonicalJson(existing) !== canonicalJson(entry)) {
           throw new FoldSdkConflictError(`event id is already used: ${entry.event.id}`);
         }
-      } else added.push(entry);
+      } else { added.push(entry); entriesById.set(entry.event.id, entry); }
     }
     validateProducerOrder([...entries, ...added].map(({ event }) => event));
     const canonicalEvents = sortLog([...entries, ...added]).filter(({ status }) => status === "canon").map(({ event }) => event);
@@ -507,17 +532,27 @@ export class FoldSdk {
   }
 
   private validateMemoryReferences(access: FoldSdkAccessContext, event: FoldEvent, allEvents: readonly FoldEvent[]): void {
+    const records = memoryLogRecordsFromEvent(event);
+    const candidateRecords = memoryCandidateLogRecordsFromEvent(event);
+    const contributions = memoryEvidenceContributionsFromEvent(event);
+    // Feedback is validated by its authenticated command and full historical replay.
+    // It carries no memory/source mutation requiring these prefix projections.
+    if (records.length === 0 && candidateRecords.length === 0 && contributions.length === 0) return;
     const eventIndex = allEvents.findIndex(({ id }) => id === event.id);
     const before = allEvents.slice(0, eventIndex).filter((item) => authorizeEventAccess(item, access).allowed);
-    const projection = rebuildMemories(before);
-    const candidates = rebuildMemoryCandidates(before);
+    const beforeById = new Map(before.map((item) => [item.id, item]));
+    let projected: MemoryProjection | undefined;
+    let projectedCandidates: MemoryCandidateProjection | undefined;
+    const projection = () => projected ??= rebuildMemories(before);
+    const candidates = () => projectedCandidates ??= rebuildMemoryCandidates(before);
     type Scope = { workspaceId: string; spaceId?: string; audience: "personal" | "workspace"; creatorId: string };
     const contains = (source: FoldEvent["capture"]["scope"], target: Scope) => source.workspace === target.workspaceId && (source.space === undefined || source.space === target.spaceId) && (source.creator === undefined || (target.audience === "personal" && source.creator === target.creatorId));
     const assertEvidence = (target: Scope, evidence: readonly MemoryCandidateEvidence[]) => {
       if (evidence.length === 0) return;
-      const catalog = rebuildTranscriptCatalog(before.filter((source) => contains(source.capture.scope, target)));
+      const needsCatalog = evidence.some((ref) => ref.runId !== undefined || ref.turnId !== undefined || ref.projectId !== undefined);
+      const catalog = rebuildTranscriptCatalog(needsCatalog ? before.filter((source) => contains(source.capture.scope, target)) : []);
       for (const ref of evidence) {
-        const source = before.find(({ id }) => id === ref.eventId);
+        const source = beforeById.get(ref.eventId);
         if (source === undefined || !contains(source.capture.scope, target)) throw new FoldSdkAccessError("memory evidence is unavailable in the target audience and space");
         const records = transcriptRecordsFromEvent(source);
         const run = ref.runId === undefined ? undefined : catalog.runs.get(ref.runId);
@@ -539,12 +574,12 @@ export class FoldSdk {
     const assertValidity = (target: Scope, input: MemoryValidityInput) => {
       const normalized = memoryValidity(input);
       for (const ref of [...normalized.sourceMemoryRefs, ...normalized.supersedes, ...normalized.contradicts]) {
-        const source = projection.memories.get(ref.memoryId);
+        const source = projection().memories.get(ref.memoryId);
         if (source === undefined || source.revision !== ref.revision || !contains({ workspace: source.workspaceId, ...(source.spaceId === undefined ? {} : { space: source.spaceId }), ...(source.audience === "personal" ? { creator: source.creatorId } : {}) }, target)) throw new FoldSdkAccessError("source memory revision is unavailable in the target audience and space");
       }
     };
-    for (const record of memoryLogRecordsFromEvent(event)) {
-      const memory = record.recordType === "recorded" ? record.memory : projection.memories.get(record.memoryId);
+    for (const record of records) {
+      const memory = record.recordType === "recorded" ? record.memory : projection().memories.get(record.memoryId);
       if (memory === undefined) throw new FoldSdkConflictError("memory mutation references an inactive memory");
       assertCanWritePersonalMemory(memory, access);
       if (record.actorId !== access.principalId || (record.recordType !== "recorded" && record.authority !== undefined && record.authority !== memoryWriteAuthority(memory, access))) throw new FoldSdkAccessError("memory mutation authority does not match its authenticated actor");
@@ -552,13 +587,13 @@ export class FoldSdk {
       const input = record.recordType === "recorded" ? record.memory : record.patch;
       assertValidity(memory, input); assertEvidence(memory, input.evidence ?? []);
       if (record.recordType === "recorded" && record.memory.sourceCandidate !== undefined) {
-        const source = candidates.candidates.get(record.memory.sourceCandidate.candidateId);
+        const source = candidates().candidates.get(record.memory.sourceCandidate.candidateId);
         if (source === undefined) throw new FoldSdkAccessError("source candidate is unavailable");
         assertEvidence(memory, source.evidence); assertValidity(memory, source);
       }
     }
-    for (const record of memoryCandidateLogRecordsFromEvent(event)) {
-      const candidate = record.recordType === "proposed" ? record.candidate : candidates.candidates.get(record.decision.candidateId);
+    for (const record of candidateRecords) {
+      const candidate = record.recordType === "proposed" ? record.candidate : candidates().candidates.get(record.decision.candidateId);
       if (candidate === undefined) throw new FoldSdkConflictError("candidate is unavailable");
       const scope = { ...candidate, creatorId: candidate.proposerId };
       assertCanWritePersonalMemory(scope, access);
@@ -567,8 +602,8 @@ export class FoldSdk {
       if (record.recordType !== "proposed" && record.decision.actorId !== access.principalId) throw new FoldSdkAccessError("candidate decision actor does not match authenticated actor");
       if (record.recordType !== "rejected") { assertValidity(scope, candidate); assertEvidence(scope, candidate.evidence); }
     }
-    for (const contribution of memoryEvidenceContributionsFromEvent(event)) {
-      const scope = contribution.target === "memory" ? projection.memories.get(contribution.targetId) : (() => { const candidate = candidates.candidates.get(contribution.targetId); return candidate === undefined ? undefined : { ...candidate, creatorId: candidate.proposerId }; })();
+    for (const contribution of contributions) {
+      const scope = contribution.target === "memory" ? projection().memories.get(contribution.targetId) : (() => { const candidate = candidates().candidates.get(contribution.targetId); return candidate === undefined ? undefined : { ...candidate, creatorId: candidate.proposerId }; })();
       if (scope === undefined || contribution.actorId !== access.principalId) throw new FoldSdkAccessError("evidence contribution target or actor is unavailable");
       if (contribution.authority !== memoryWriteAuthority(scope, access)) throw new FoldSdkAccessError("evidence contribution authority does not match authenticated access");
       assertEvidence(scope, contribution.evidence);
@@ -688,6 +723,36 @@ export class FoldSdk {
       });
       return { entries, state };
     });
+  }
+
+  private async readMemoryProjection(access: FoldSdkAccessContext): Promise<MemoryProjection> {
+    validateAccessContext(access);
+    if (this.commandState !== undefined || this.store.revision === undefined) return (await this.memoryProjection(access)).projection;
+    const revision = await this.store.revision();
+    const cacheKey = transcriptCatalogCacheKey(access);
+    const cached = this.readProjections.get(cacheKey);
+    if (cached?.revision === revision) return cached.projection;
+    const accessDigest = await sha256(cacheKey);
+    const key = { projection: `memory-read:${accessDigest}`, stateVersion: MEMORY_CHECKPOINT_VERSION,
+      sourceRevision: revision, accessDigest, configurationDigest: MEMORY_CHECKPOINT_VERSION };
+    const checkpoint = await this.store.readProjectionCheckpoint?.(key).catch(() => undefined);
+    if (checkpoint !== undefined && checkpoint.formatVersion === 2 && checkpoint.sourceRevision === revision && checkpoint.stateVersion === key.stateVersion && checkpoint.accessDigest === accessDigest && checkpoint.configurationDigest === key.configurationDigest) {
+      const projection = await decodeMemoryCheckpoint(checkpoint.state);
+      if (projection !== undefined) { this.readProjections.set(cacheKey, { revision, projection }); return projection; }
+    }
+    // Any ingestion change, including a late canonical insertion, takes the complete replay path.
+    const current = await this.memoryProjection(access);
+    const sourceRevision = this.storedRevision;
+    if (sourceRevision !== undefined) {
+      this.readProjections.set(cacheKey, { revision: sourceRevision, projection: current.projection });
+      const through = this.storedEntries?.at(-1)?.event;
+      const state = await encodeMemoryCheckpoint(current.projection);
+      if (through !== undefined && state !== undefined && /^(0|[1-9][0-9]*)$/.test(sourceRevision)) {
+        await this.store.writeProjectionCheckpoint?.({ ...key, formatVersion: 2, sourceRevision,
+          ingestionSequence: sourceRevision, through: { t: through.at.t, eventId: through.id }, state }).catch(() => false);
+      }
+    }
+    return current.projection;
   }
 
   private async memoryProjection(
@@ -1502,7 +1567,7 @@ export class FoldSdk {
 
   memoryRevisions(access: FoldSdkAccessContext, refs: readonly MemoryRevisionRef[], includeNeedsReview = false): Promise<readonly PersonalMemory[]> {
     return this.enqueue(async () => {
-      const { projection } = await this.memoryProjection(access);
+      const projection = await this.readMemoryProjection(access);
       return refs.map((ref) => {
         const memory = recallProjectedMemoryById(projection, access, ref.memoryId);
         if (memory === undefined) throw new PersonalMemoryUnavailableError(ref.memoryId);
@@ -1677,7 +1742,7 @@ export class FoldSdk {
     request: RecallRequest = {},
   ): Promise<RecalledMemory[]> {
     return this.enqueue(async () => {
-      const { projection } = await this.memoryProjection(access);
+      const projection = await this.readMemoryProjection(access);
       return recallProjectedMemories(projection, access, request);
     });
   }
@@ -1697,7 +1762,7 @@ export class FoldSdk {
       if (cursor !== undefined && (!Number.isFinite(cursor.createdAt) || cursor.memoryId.trim().length === 0)) {
         throw new FoldSdkError("memory page cursor is invalid");
       }
-      const { projection } = await this.memoryProjection(access);
+      const projection = await this.readMemoryProjection(access);
       const corpus = recallMemoryCorpus(projection, access, filters);
       const remaining = cursor === undefined
         ? corpus
@@ -1717,12 +1782,14 @@ export class FoldSdk {
     });
   }
 
-  rankMemories(
+  async rankMemories(
     access: FoldSdkAccessContext,
     request: RankedMemoryRecallRequest,
     ranker: MemoryRanker,
+    options: { readonly signal?: AbortSignal } = {},
   ): Promise<RankedMemoryRecallResult> {
-    return this.enqueue(async () => {
+    options.signal?.throwIfAborted();
+    const prepared = await this.enqueue(async () => {
       const query = request.query.trim();
       if (query.length === 0 || query.length > 500) {
         throw new FoldSdkError("memory ranking query must contain 1 to 500 characters");
@@ -1738,7 +1805,13 @@ export class FoldSdk {
       }
       const { projection } = await this.memoryProjection(access);
       const corpus = recallMemoryCorpus(projection, access, filters);
-      const candidates = await ranker.rank({
+      return { query, limit, filters, requestedLimit, projection, corpus };
+    });
+    const { query, limit, filters, requestedLimit, projection, corpus } = prepared;
+    // Provider I/O runs outside the SDK's canonical command queue.
+    const rankingRequest = {
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+
         ...(access.organizationId === undefined ? {} : { organizationId: access.organizationId }),
         workspaceId: access.workspaceId,
         query,
@@ -1754,7 +1827,14 @@ export class FoldSdk {
           updatedAt: memory.updatedAt,
           revision: memory.revision,
         })),
-      });
+      };
+    const result = ranker.rankWithMetadata === undefined
+      ? { candidates: await ranker.rank(rankingRequest), ranking: ranker.descriptor }
+      : await ranker.rankWithMetadata(rankingRequest);
+    options.signal?.throwIfAborted();
+    return this.enqueue(async () => {
+      options.signal?.throwIfAborted();
+      const candidates = result.candidates;
       if (candidates.length > MAX_RECALL_LIMIT) {
         throw new FoldSdkError(`memory ranker returned more than ${MAX_RECALL_LIMIT} candidates`);
       }
@@ -1764,9 +1844,9 @@ export class FoldSdk {
         candidates,
       });
       // Ranking may await a remote embedder while another process changes or forgets a claim.
-      const fresh = await this.memoryProjection(access);
+      const fresh = await this.readMemoryProjection(access);
       for (const { memory } of memories) {
-        const current = recallProjectedMemoryById(fresh.projection, access, memory.id);
+        const current = recallProjectedMemoryById(fresh, access, memory.id);
         if (current === undefined || current.revision !== memory.revision || (request.includeNeedsReview !== true && current.currentness?.status !== "current")) throw new FoldSdkConflictError("memory changed while ranking; repeat the search");
       }
       const judgments = new Map<string, MemoryFeedbackInputV2>();
@@ -1775,7 +1855,7 @@ export class FoldSdk {
       const ordered = memories.map((row, index) => ({ row, index })).sort((a, b) => (b.row.score ?? 0) - (a.row.score ?? 0) || preference(b.row.memory) - preference(a.row.memory) || a.index - b.index).map(({ row }) => row);
       return {
         memories: ordered,
-        ranking: { ...ranker.descriptor, corpusSize: corpus.length },
+        ranking: { ...result.ranking, corpusSize: corpus.length },
         feedback: { basis: "requester-latest-judgment-tiebreak-v1", items: ordered.filter(({ memory }) => preference(memory) !== 0).map(({ memory }) => ({ memoryId: memory.id, memoryRevision: memory.revision, preference: preference(memory) })) },
       };
     });
@@ -1800,7 +1880,7 @@ export class FoldSdk {
     memoryId: string,
   ): Promise<PersonalMemory | undefined> {
     return this.enqueue(async () => {
-      const { projection } = await this.memoryProjection(access);
+      const projection = await this.readMemoryProjection(access);
       return recallProjectedMemoryById(projection, access, memoryId);
     });
   }

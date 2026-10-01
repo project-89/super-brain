@@ -40,8 +40,10 @@ The pgvector table is derived and is never authoritative over the Fold log.
 All tenant tables have forced PostgreSQL row-level security. Operations set
 `app.organization_id` transaction-locally and also include explicit
 organization/workspace predicates. Shared deployments must construct stores
-with `requireRlsEnforcement: true`; this rejects superuser and `BYPASSRLS`
-application roles at startup.
+with `schemaMode: "verify"` and `requireRlsEnforcement: true`. Runtime verification
+performs no DDL and rejects owner/admin/schema-creation privileges, RLS bypass,
+unexpected policies and incompatible component versions. Use a separate migration
+owner and explicit API `migrate`/`bootstrap` commands; see [the deployment runbook](../../deploy/README.md).
 
 External identity bindings are control-plane lookup tables because they must be
 resolved before a tenant is known. They contain mappings only, never Fold
@@ -64,7 +66,8 @@ A legacy event-time stream cursor, or an existing offset row without a delivery 
 replays from sequence zero and emits v2 cursors. This intentionally permits duplicate delivery
 to repair possible late-event gaps; consumers must make processing idempotent before upgrading.
 Legacy offset writes are rejected. Stop old workers/API processes before upgrading, start the
-new API once to apply additive DDL, then restart upgraded consumers. Persisted v2 acknowledgments
+explicit API migration with the migration identity, then start verified runtime
+services and upgraded consumers. Persisted v2 acknowledgments
 cannot regress or exceed the committed workspace delivery head. Do not roll back consumers to
 old binaries against upgraded offsets without a fresh replay consumer identity.
 

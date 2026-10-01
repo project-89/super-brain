@@ -126,6 +126,9 @@ importers:
       '@_89/fold-activity':
         specifier: workspace:*
         version: link:../../packages/fold-activity
+      '@_89/fold-postgres':
+        specifier: workspace:*
+        version: link:../../packages/fold-postgres
       '@_89/fold-trace':
         specifier: workspace:*
         version: link:../../packages/fold-trace

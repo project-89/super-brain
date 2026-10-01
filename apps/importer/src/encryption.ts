@@ -1,3 +1,4 @@
+import { withPrivateRootWrite } from "./private-fence.js";
 import { createHash, createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
@@ -33,6 +34,7 @@ export async function readVaultKey(pathInput: string): Promise<Uint8Array> {
 }
 
 export async function ensureVaultKey(pathInput: string): Promise<{ readonly path: string; readonly key: Uint8Array }> {
+    return withPrivateRootWrite(dirname(resolve(pathInput)), "configuration", async () => {
   const path = resolve(pathInput);
   const created = await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);
@@ -64,7 +66,9 @@ export async function ensureVaultKey(pathInput: string): Promise<{ readonly path
     await unlink(temporary).catch(() => undefined);
   }
   return { path, key: await readVaultKey(path) };
-}
+
+    });
+  }
 
 export function encryptVaultLine(plaintext: string, key: Uint8Array): string {
   if (key.byteLength !== 32) throw new TypeError("vault key must contain exactly 32 bytes");

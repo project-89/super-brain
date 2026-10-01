@@ -1,5 +1,8 @@
 # Super Brain Operations
 
+The private pilot deployment, explicit schema/bootstrap steps, nonowner runtime roles,
+TLS proxy, bounded readiness and alert probe are documented in [the deployment runbook](../deploy/README.md).
+
 ## Credential Profiles
 
 Static credentials can be restricted independently from workspace roles with a
@@ -66,7 +69,7 @@ Configure Clerk to deliver organization created, updated, deleted, and
 organization membership created, updated, and deleted events to
 `POST /v1/webhooks/clerk`. Deliveries are signature-verified, transactionally
 applied, durably deduplicated, and audited. `FOLD_CLERK_BINDINGS_JSON` remains a
-mutually exclusive restart-loaded migration mode; its format is defined in
+mutually exclusive explicit bootstrap input in deployed verify mode (legacy local migrate mode can still load it at startup); its format is defined in
 `apps/api/README.md`. Clerk user IDs
 use `user:<id>`, organization API keys use `api-key:<id>`, and M2M identities
 use `machine:<id>`. A token is rejected unless both its external principal and
@@ -121,13 +124,17 @@ read requires `platform:data-read`, a ticket-quality reason, and an expiry no
 more than 15 minutes away. The audit record is committed before the read and is
 visible to the affected organization's owners and admins at `audit-log`.
 
-For a shared deployment, set `FOLD_REQUIRE_TENANT_RLS=true` and use a dedicated
-PostgreSQL application role without `SUPERUSER` or `BYPASSRLS`. Do not enable
-that guard with a local development superuser.
+For a shared deployment, use `FOLD_POSTGRES_SCHEMA_MODE=verify` and
+`FOLD_REQUIRE_TENANT_RLS=true` with a nonowner runtime role. It must have no schema
+creation, administrative-role membership, superuser or RLS-bypass privileges.
+The separate migration identity owns DDL. Runtime startup verifies schema and
+privileges without replacing static or Clerk memberships; revocation survives restart.
 
 The organization-key migration changes primary keys and forces RLS. Stop old
-API and worker processes before first rollout, migrate by starting the new API,
-then start the new workers. Old binaries are intentionally incompatible with
+API and worker processes before first rollout, run the explicit API `migrate`
+command with the migration identity, then start verified runtime services and
+upgraded workers. Run `bootstrap` only for a deliberate initial/replacement enrollment.
+Old binaries are intentionally incompatible with
 the enforced tenant schema.
 
 After building, install the API and memory worker as persistent macOS services.
@@ -226,14 +233,11 @@ pnpm --filter @_89/super-brain-capture-daemon start -- resolve-failed \
   --job capture-... --reason "source transcript was deleted" --confirm
 ```
 
-If the API accepted later events before an older quarantined event, canonical
-ordering will correctly reject the original timestamp. Review that job, then
-reissue it at a fresh timestamp while retaining its source ID:
-
-```sh
-pnpm --filter @_89/super-brain-capture-daemon start -- retry-failed \
-  --rebase-events --rebase-trajectories --confirm
-```
+Late observations keep their original event time and arrive through the versioned
+ingestion cursor. A later accepted observation alone does not require rebasing an
+older delivery. Domain mutations still must be valid in canonical replay order;
+inspect an actual domain conflict before using any explicit repair/rebase option.
+Retry the original durable command identity for transient failures.
 
 ## PostgreSQL Backup
 

@@ -11,6 +11,7 @@ import type {
 import type { FoldLogEntry } from "@_89/fold";
 import type { ReasoningProvider, ReasoningProviderCatalog } from "./reasoning.js";
 import type { RequestRateLimiter } from "./rate-limit.js";
+import type { OperationsProvider } from "./operations.js";
 import type {
   ExternalIdentityProvisioningEvent,
   IdentityProvisioningAuditRecord,
@@ -49,6 +50,7 @@ export const API_CAPABILITIES = [
   "consumers:write",
   "organization:admin",
   "platform:data-read",
+  "operations:read",
 ] as const;
 
 export type ApiCapability = (typeof API_CAPABILITIES)[number];
@@ -168,11 +170,15 @@ export interface ApiDependencies {
   readonly reasoner?: ReasoningProvider;
   readonly reasoners?: ReasoningProviderCatalog;
   readonly rateLimiter?: RequestRateLimiter;
+  readonly principalRateLimiter?: RequestRateLimiter;
+  readonly tenantRateLimiter?: RequestRateLimiter;
+  readonly operations?: OperationsProvider;
   readonly corsOrigins?: readonly string[];
   readonly reportError?: (error: unknown) => void;
   readonly eventStreamPollMs?: number;
   readonly eventStreamMaxConnections?: number;
   readonly eventStreamMaxPerPrincipal?: number;
+  readonly eventStreamMaxPerTenant?: number;
   readonly eventStreamMaxAgeMs?: number;
   readonly eventStreamDrainTimeoutMs?: number;
   readonly fleetOrphanAfterMs?: number;

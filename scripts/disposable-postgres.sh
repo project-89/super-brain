@@ -24,7 +24,8 @@ if [[ "${1:-}" == "--help" ]]; then
 Usage: scripts/disposable-postgres.sh [--] [command [arguments...]]
 
 Start isolated PostgreSQL 17/pgvector on a random loopback port, create a
-NOSUPERUSER NOBYPASSRLS test role, export FOLD_TEST_DATABASE_URL to the command,
+NOSUPERUSER NOBYPASSRLS test role, export FOLD_TEST_DATABASE_URL and the isolated
+FOLD_TEST_ADMIN_DATABASE_URL (for generated-role regressions) to the command,
 then remove only this invocation's container on success, failure, or interrupt.
 Default command: pnpm --filter @_89/super-brain-api test test/postgres-concurrency.test.ts
 Build the API and its workspace dependencies before running integration tests.
@@ -64,6 +65,7 @@ if [[ ! "$test_port" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 export FOLD_TEST_DATABASE_URL="postgres://fold_app:fold_test@127.0.0.1:${test_port}/super_brain_test"
+export FOLD_TEST_ADMIN_DATABASE_URL="postgres://postgres:disposable_admin@127.0.0.1:${test_port}/super_brain_test"
 unset FOLD_DATABASE_URL
 if [[ $# == 0 ]]; then
   set -- pnpm --filter @_89/super-brain-api test test/postgres-concurrency.test.ts

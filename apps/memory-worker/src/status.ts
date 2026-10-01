@@ -1,3 +1,5 @@
+import { dirname } from "node:path";
+import { withPrivateRootWrite } from "@_89/super-brain-importer";
 import { atomicPrivateText } from "@_89/super-brain-capture-daemon";
 import type { ProcessingCoverage } from "./jobs.js";
 
@@ -24,5 +26,5 @@ export async function publishWorkerProcessingStatus(path: string, input: WorkerP
     },
     ...(oldestPendingAt === undefined ? {} : { lagMs: Math.max(0, Date.parse(observedAt) - oldestPendingAt) }),
   };
-  await atomicPrivateText(path, JSON.stringify(payload));
+  await withPrivateRootWrite(dirname(path),"worker-status",()=>atomicPrivateText(path, JSON.stringify(payload)));
 }

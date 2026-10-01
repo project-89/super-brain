@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "requestTimeoutMs": 5000,
+  "maxCheckpointAgeMsWhenBehind": 120000,
+  "maxErrorsSinceStart": 100,
+  "maxBackupAgeMs": 90000000,
+  "requireConsumer": true,
+  "requireVerifiedBackup": true
+}
