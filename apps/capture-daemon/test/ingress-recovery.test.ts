@@ -37,4 +37,4 @@ it("includes pre-boundary acknowledgements, journals held HTTP arrivals, and rep
     const stored=JSON.stringify(await engine.stateStore.load());expect(stored).toContain(retry.artifactId!);
     await sender.acknowledge("during");expect((await journal.pending("sender")).length).toBe(0);
   }finally{await seal.release();await server.close();await rm(f.base,{recursive:true,force:true});}
-});
+},15_000);

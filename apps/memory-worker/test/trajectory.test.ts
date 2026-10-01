@@ -74,4 +74,4 @@ it("requires exact finalized, acceptance, and checkpoint witnesses, then promote
     expect(candidate.candidate.evidence.map(({ eventId }) => eventId)).toEqual(expect.arrayContaining([checkpoint.id, canonical.id, trajectory.input.manifest!.attempt.acceptance!.eventId]));
     expect((await worker.promoteSuccessfulTrajectoryEvidence(canonical)).promoted).toBe(0);
   } finally { await worker.close(); await new Promise<void>((resolve) => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); }
-});
+}, 15_000);

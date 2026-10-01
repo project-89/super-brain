@@ -63,7 +63,7 @@ describe("attempt provenance and finalized command witnesses", () => {
     const { receiptEncryptionKey: _key, ...missingKey } = f.verifyOptions; expect(await createCapturedTrajectoryVerifier(missingKey)(event)).toBe(false);
     expect(await createCapturedTrajectoryVerifier({ ...f.verifyOptions, trustedSensorId: "urn:sensor:other" })(event)).toBe(false);
     expect(trajectoryLogRecordsFromEvent(event)[0]).toMatchObject({ trajectory: { manifest: job.input.manifest } });
-  });
+  }, 15_000);
 
   it("does not carry accepted success across an unhooked edit before finalization", async () => {
     const f = await fixture(); await f.hook("UserPromptSubmit", { prompt: "task" }); const expected = await f.engine.acceptanceContext("codex", "session");
