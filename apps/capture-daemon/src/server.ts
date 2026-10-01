@@ -5,7 +5,6 @@ import { readProcessingStatus } from "./processing-status.js";
 import { normalizeHookEvidence } from "./evidence.js";
 import { CaptureReceiptQueue, receiptEncryptionKey } from "./receipts.js";
 import { CaptureEngine } from "./capture.js";
-import { HookInbox } from "./inbox.js";
 import { DurableSpool, readHookVaultArtifact, readRelayFailureSummary } from "./storage.js";
 import { readTranscriptArtifactPage, type TranscriptVaultSource } from "./transcript-vault.js";
 import type { CaptureConfig, CapturePolicyPatch, CapturePolicySettings, HookSource } from "./types.js";
@@ -98,7 +97,6 @@ export class CaptureHttpServer {
     private readonly spool: DurableSpool,
     private readonly updatePolicy?: (patch: CapturePolicyPatch) => Promise<CaptureConfig>,
     private readonly vaultEncryptionKey?: Uint8Array,
-    private readonly inbox?: HookInbox,
   ) {}
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
@@ -135,11 +133,10 @@ export class CaptureHttpServer {
     try {
       const url = new URL(request.url ?? "/", "http://capture.local");
       if (request.method === "GET" && url.pathname === "/health") {
-        const [spool, relayFailures, receipts, inbox] = await Promise.all([
+        const [spool, relayFailures, receipts] = await Promise.all([
           this.spool.snapshot(),
           readRelayFailureSummary(this.config.stateRoot),
           this.receipts!.snapshot(),
-          this.inbox?.snapshot(),
         ]);
         send(response, 200, {
           status: "ok",
@@ -147,7 +144,6 @@ export class CaptureHttpServer {
           ...spool,
           relayFailures,
           receipts,
-          ...(inbox === undefined ? {} : { inbox }),
           policy: {
             reasoning: this.config.reasoningPolicy,
             encryptedReasoning: this.config.retainEncryptedReasoning ? "retain" : "exclude",

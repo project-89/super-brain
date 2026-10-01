@@ -4,12 +4,9 @@ The capture daemon is a headless, harness-neutral local sensor. Claude Code,
 Codex, and other harnesses can POST lifecycle and tool hooks to its loopback-only
 HTTP listener. Every accepted hook is secret-redacted into a private artifact
 vault and its canonical events are durably spooled before delivery to Super Brain.
-The installed relay retries one refused loopback connection within the host's
-five-second hook budget, while slow requests stop after one attempt. Hooks are
-acknowledged from an encrypted or secret-redacted durable local inbox before
-normalization and API delivery; the relay writes to the same inbox if the daemon
-is restarting. Only terminal local-persistence misses enter the failure audit.
-Delivery uses bounded recovery batches and backend backoff so a large offline
+The installed relay persists each hook as a durable encrypted receipt before
+contacting the daemon, so a hook sent while the daemon is restarting is replayed
+rather than lost (see "Receipt durability and authority" below). Delivery uses bounded recovery batches and backend backoff so a large offline
 queue cannot starve live hook ingestion.
 
 It captures session/project identity, prompts as private artifact references,

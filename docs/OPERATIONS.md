@@ -147,7 +147,7 @@ pnpm --filter @_89/super-brain-memory-worker start -- install-service
 ```
 
 Service logs are under `~/.local/state/super-brain/{api,memory-worker,capture}`.
-The capture service accepts hooks into a durable local inbox even while the API
+The capture service accepts hooks as durable local receipts even while the API
 is unavailable. The API and memory worker still require PostgreSQL. When local
 PostgreSQL runs in Docker, configure its container to return with Docker after a
 host restart; substitute the installation's actual container name:
@@ -157,7 +157,7 @@ docker update --restart unless-stopped super-brain-postgres
 docker start super-brain-postgres
 ```
 
-After a reboot, `GET /health` on the capture service reports both `inbox` and
+After a reboot, `GET /health` on the capture service reports both `receipts` and
 delivery-spool counts. A healthy recovered installation reaches zero pending and
 failed items in both layers without increasing the terminal relay-failure audit.
 

@@ -160,7 +160,9 @@ describe("SDK personal memory API", () => {
   });
 
   it("ranks the complete authorized corpus beyond the response limit", async () => {
-    const sdk = new FoldSdk(new MemoryStore());
+    // A stable store lets the SDK reuse parsed entries; re-parsing the whole log
+    // on each of the 125 setup writes made this test quadratic and slow.
+    const sdk = new FoldSdk(new MemoryStore(true));
     for (let index = 0; index < 125; index += 1) {
       const memoryId = `01890f47-7d00-7000-8000-${index.toString(16).padStart(12, "0")}`;
       await sdk.recordMemory(memoryContext(), stamp(`event-${index.toString().padStart(3, "0")}`, 1_000 + index), {

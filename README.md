@@ -89,8 +89,9 @@ tests.
   restrictive local vault, and delivers confirmed canonical bundles through
   the authenticated API without modifying source histories.
 - `@_89/super-brain-capture-daemon` is the loopback-only live sensor for Claude
-  Code, Codex, and compatible harnesses. It acknowledges lifecycle hooks from a
-  durable encrypted/redacted local inbox, then spools prompt, tool, file,
+  Code, Codex, and compatible harnesses. The relay persists each hook as an
+  encrypted/redacted receipt before delivery, and the daemon replays pending
+  receipts after downtime, then spools prompt, tool, file,
   verification, structured-reasoning, decision, trajectory, and final
   transcript-import work. Raw prompt and tool bodies stay in its secret-redacted
   private vault rather than canonical Fold.

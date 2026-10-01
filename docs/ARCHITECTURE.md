@@ -68,11 +68,11 @@ for Codex, Claude, Hermes, or a future harness.
 
 For local coding agents, `apps/capture-daemon` is the default producer. It binds
 only to loopback, authenticates hook relays with a separate local secret, and
-acknowledges hooks after an encrypted or secret-redacted `0600` inbox receipt is
-durable. The daemon drains that inbox into secret-redacted hook artifacts and a
-separate durable API-delivery spool. A relay can write the same inbox directly
-during daemon restart, and bounded delivery batches with backend backoff keep
-live receipt responsive during outage recovery. A fixed machine sensor credential
+acknowledges hooks after an encrypted or secret-redacted `0600` receipt is
+durable. The relay persists a sender receipt before contacting the daemon and
+the daemon replays pending sender receipts after downtime. Accepted receipts
+become secret-redacted hook artifacts and a separate durable API-delivery spool,
+and bounded delivery batches with backend backoff keep live receipt responsive during outage recovery. A fixed machine sensor credential
 authors Fleet events while session, harness, project, branch, and comparison
 identities remain attached to capture metadata. Restored sessions are not
 heartbeated until a fresh hook proves they are still alive.
