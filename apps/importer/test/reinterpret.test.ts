@@ -69,7 +69,7 @@ describe("explicit immutable transcript reinterpretation", () => {
     const item = await fixture("none", true);
     await expect(reinterpretStoredTranscript(item.previous, { vaultRoot: item.root, parserVersion: "2" })).rejects.toThrow("key-unavailable");
     await expect(reinterpretStoredTranscript({ ...item.previous, chunks: [] }, { vaultRoot: item.root, parserVersion: "2", encryptionKey: item.key })).rejects.toThrow("previous-turn-origin-unavailable");
-    await writeFile(item.path, item.bytes.replace(/ciphertext":"./, 'ciphertext":"X'));
+    await writeFile(item.path, item.bytes.replace(/ciphertext":"(.)/, (_, first: string) => `ciphertext":"${first === "X" ? "Y" : "X"}`));
     await expect(reinterpretStoredTranscript(item.previous, { vaultRoot: item.root, parserVersion: "2", encryptionKey: item.key })).rejects.toThrow();
   });
 });
