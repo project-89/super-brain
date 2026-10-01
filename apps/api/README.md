@@ -227,10 +227,12 @@ request, so revocation applies immediately to raw records and every projection.
 
 Transcript imports accept only the strict `@_89/fold-transcript` bundle. The
 server derives ingest authorship and workspace capture identity, appends missing
-records in project/artifact/run/chunk order, rejects changed immutable identity,
-and makes an exact retry a no-op. Transcript and intention event kinds are
-reserved from generic append. The API journal contains metadata only; a local
-redacted artifact vault is owned by the importer and is not served by this API.
+records in project/artifact/run/chunk order, preserves a resumed native run over
+a changed source artifact as a deterministic immutable snapshot, rejects
+inconsistent changes for the same artifact, and makes an exact retry a no-op.
+Transcript and intention event kinds are reserved from generic append. The API
+journal contains metadata only; a local redacted artifact vault is owned by the
+importer and is not served by this API.
 Project/run reads follow normal workspace authorization, while import requires
 an owner or admin role.
 

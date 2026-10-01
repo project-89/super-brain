@@ -67,12 +67,15 @@ and other non-retryable client failures fail closed. This is the same contract
 for Codex, Claude, Hermes, or a future harness.
 
 For local coding agents, `apps/capture-daemon` is the default producer. It binds
-only to loopback, authenticates hook relays with a separate local secret, stores
-secret-redacted raw hook artifacts with `0600` permissions, and acknowledges a
-hook only after canonical delivery work is on disk. A fixed machine sensor
-credential authors Fleet events while session, harness, project, branch, and
-comparison identities remain attached to capture metadata. Restored sessions
-are not heartbeated until a fresh hook proves they are still alive.
+only to loopback, authenticates hook relays with a separate local secret, and
+acknowledges hooks after an encrypted or secret-redacted `0600` inbox receipt is
+durable. The daemon drains that inbox into secret-redacted hook artifacts and a
+separate durable API-delivery spool. A relay can write the same inbox directly
+during daemon restart, and bounded delivery batches with backend backoff keep
+live receipt responsive during outage recovery. A fixed machine sensor credential
+authors Fleet events while session, harness, project, branch, and comparison
+identities remain attached to capture metadata. Restored sessions are not
+heartbeated until a fresh hook proves they are still alive.
 Freshness becomes unknown after the declared heartbeat window; orphan recovery
 is a separate 24-hour threshold by default, avoiding action on an idle or
 recently restarted local harness.

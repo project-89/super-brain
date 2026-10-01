@@ -61,6 +61,7 @@ export const transcriptContextSegmentSchema = z.object({
 
 export const transcriptRunSchema = z.object({
   id: z.string().trim().min(1).max(500),
+  snapshotOfRunId: z.string().trim().min(1).max(500).optional(),
   nativeId: z.string().trim().min(1).max(500),
   source: transcriptSourceSchema,
   artifactId: z.string().trim().min(1).max(300),
@@ -81,7 +82,15 @@ export const transcriptRunSchema = z.object({
   }).strict(),
   segments: z.array(transcriptContextSegmentSchema).max(10_000),
   interpretation: transcriptInterpretationSchema.optional(),
-}).strict();
+}).strict().superRefine((run, context) => {
+  if (run.snapshotOfRunId === run.id) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["snapshotOfRunId"],
+      message: "snapshotOfRunId must reference a different run",
+    });
+  }
+});
 
 export const transcriptTurnSchema = z.object({
   id: z.string().trim().min(1).max(500),

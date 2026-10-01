@@ -14,6 +14,7 @@ import {
 } from "./config.js";
 import { SpoolProcessor } from "./delivery.js";
 import { installHermesHook, installHooks, installLaunchAgent } from "./install.js";
+import { HookInbox, HookInboxProcessor } from "./inbox.js";
 import { CaptureHttpServer } from "./server.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
 import { exportCaptureData, pruneHookArtifacts, verifyCaptureExport } from "./maintenance.js";
@@ -78,6 +79,7 @@ async function run(args: readonly string[]): Promise<void> {
     : await readVaultKey(config.anonymizationKeyPath!);
   const anonymizer = new RecordAnonymizer(config.anonymizationPolicy, anonymizationKey);
   const spool = new DurableSpool(config.stateRoot);
+  const inbox = new HookInbox(config.stateRoot, vaultEncryptionKey);
   const engine = new CaptureEngine(
     config,
     new StateStore(config.stateRoot),
@@ -89,6 +91,8 @@ async function run(args: readonly string[]): Promise<void> {
     anonymizer,
   );
   await engine.initialize();
+  await inbox.initialize();
+  const inboxProcessor = new HookInboxProcessor(inbox, engine);
   const processor = new SpoolProcessor(config, spool, vaultEncryptionKey, anonymizer);
   const server = new CaptureHttpServer(config, engine, spool, async (patch) => {
     if (
@@ -101,8 +105,9 @@ async function run(args: readonly string[]): Promise<void> {
     const result = await updateCaptureConfig(path, patch);
     setTimeout(() => process.kill(process.pid, "SIGTERM"), 100).unref();
     return result.config;
-  }, vaultEncryptionKey);
+  }, vaultEncryptionKey, inbox);
   await server.start();
+  inboxProcessor.start();
   processor.start();
   const outbox = new HookOutbox(config.stateRoot, await receiptEncryptionKey(config), config.reasoningPolicy === "include" && config.retainEncryptedReasoning);
   let replaying = false;
@@ -128,6 +133,7 @@ async function run(args: readonly string[]): Promise<void> {
   clearInterval(heartbeats);
   clearInterval(relayRetries);
   await server.close();
+  await inboxProcessor.stop();
   await processor.stop();
 }
 
@@ -331,6 +337,7 @@ async function main(): Promise<void> {
       {
         rebaseEvents: args.includes("--rebase-events"),
         rebaseTrajectories: args.includes("--rebase-trajectories"),
+        ...(option(args, "--job") === undefined ? {} : { jobId: option(args, "--job")! }),
       },
     );
     process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "retry" : "dry-run", ...result }, null, 2)}\n`);
@@ -340,7 +347,11 @@ async function main(): Promise<void> {
     const reason = option(args, "--reason");
     if (reason === undefined) throw new TypeError("resolve-failed requires --reason TEXT");
     const config = await readCaptureConfig(configPath(args));
-    const result = await new DurableSpool(config.stateRoot).resolveFailed(reason, args.includes("--confirm"));
+    const result = await new DurableSpool(config.stateRoot).resolveFailed(
+      reason,
+      args.includes("--confirm"),
+      { ...(option(args, "--job") === undefined ? {} : { jobId: option(args, "--job")! }) },
+    );
     process.stdout.write(`${JSON.stringify({ mode: args.includes("--confirm") ? "resolve" : "dry-run", ...result }, null, 2)}\n`);
     return;
   }

@@ -202,6 +202,7 @@ export interface TranscriptContextSegment {
 
 export interface TranscriptRun {
   readonly id: string;
+  readonly snapshotOfRunId?: string;
   readonly nativeId: string;
   readonly source: TranscriptSource;
   readonly artifactId: string;

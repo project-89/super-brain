@@ -10,7 +10,7 @@ criteria live in [`EXECUTION_BACKLOG.md`](./EXECUTION_BACKLOG.md).
 
 | Area | Status | Implemented boundary |
 | --- | --- | --- |
-| Real harness capture | Complete | Loopback-authenticated Claude Code, Codex, and Hermes lifecycle/tool ingestion with a durable spool and diagnostics |
+| Real harness capture | Complete | Loopback-authenticated Claude Code, Codex, and Hermes lifecycle/tool ingestion with a fast durable inbox, backend spool, bounded recovery, and diagnostics |
 | Capture integrity | Complete | Source normalization, orphan finalization, repository mutation tracking, verification invalidation, private incremental transcript deltas, and causal event/artifact/turn links |
 | Historical corpus | Complete | Streaming Claude/Codex import, stable project/run/segment identity, encrypted redacted vaults, and idempotent canonical metadata |
 | Fleet | Complete | Authenticated sensor events, replayed session state, freshness, and timeout-gated recovery planning; no simulated mutation route |
