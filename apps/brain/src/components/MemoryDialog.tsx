@@ -2,12 +2,14 @@ import { Save } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 
 import { memoryContent } from "../format";
+import { effectiveMemoryApplicability } from "../memory-applicability";
 import type { JsonValue, MemoryDraft, PersonalMemory } from "../types";
 import { Modal } from "./Modal";
 
 const EMPTY_DRAFT: MemoryDraft = {
   audience: "personal",
   projectIds: [],
+  applicability: "unresolved",
   source: "conversation",
   summary: "",
   content: "",
@@ -37,6 +39,7 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
           source: memory.source,
           audience: memory.audience,
           projectIds: memory.projectIds,
+          applicability: effectiveMemoryApplicability(memory),
           summary: memory.summary,
           content: memoryContent(memory),
           tags: memory.tags,
@@ -70,11 +73,12 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
       .split(",")
       .map((project) => project.trim())
       .filter(Boolean);
+    if (draft.applicability === "project" && parsedProjects.length === 0) return;
     void onSave({
       ...draft,
       content,
       tags: [...new Set(parsedTags)],
-      projectIds: [...new Set(parsedProjects)],
+      projectIds: draft.applicability === "project" ? [...new Set(parsedProjects)] : [],
     });
   };
 
@@ -115,11 +119,20 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
           </label>
         </div>
         <label className="field">
+          <span>Applicability</span>
+          <select value={draft.applicability} onChange={(event) => setDraft({ ...draft, applicability: event.target.value as MemoryDraft["applicability"] })}>
+            <option value="project">Project</option>
+            <option value="general">General</option>
+            <option value="unresolved">Unresolved</option>
+          </select>
+        </label>
+        <label className="field">
           <span>Projects</span>
           <input
             value={projects}
             onChange={(event) => setProjects(event.target.value)}
-            disabled={memory !== undefined}
+            disabled={draft.applicability !== "project"}
+            required={draft.applicability === "project"}
             placeholder="Project IDs, comma separated"
           />
         </label>
@@ -158,7 +171,7 @@ export function MemoryDialog({ memory, open, pending, onClose, onSave }: MemoryD
           <button className="button button--secondary" type="button" onClick={onClose} disabled={pending}>
             Cancel
           </button>
-          <button className="button button--primary" type="submit" disabled={pending || !draft.source.trim()}>
+          <button className="button button--primary" type="submit" disabled={pending || !draft.source.trim() || (draft.applicability === "project" && !projects.split(",").some((project) => project.trim()))}>
             <Save aria-hidden="true" />
             {pending ? "Saving" : "Save memory"}
           </button>

@@ -210,6 +210,64 @@ and total count. Memory reads accept
 `scope=all|workspace|space`, `spaceId`, repeated `tag` and `source`, `from`,
 `to`, and `limit`.
 
+New subscriptions use `event-stream?order=ingestion&afterSequence=<decimal>`
+(or `replay=all|tail`) with `{kind:"ingestion",sequence:"..."}` positions.
+The PostgreSQL stream uses bounded indexed pages, respects socket backpressure,
+and retains tenant, creator, space, kind, and canonical/draft visibility checks.
+Legacy `order=source` (the old route default) remains compatibility-only and cannot
+guarantee late-event delivery. Source-time cursors cannot resume ingestion streams.
+Stores without ingestion support return 501 rather than falling back silently.
+Ingestion SSE drains committed backlog in 100-row scans, yielding to the event loop
+between pages and waiting for socket backpressure before reading another page.
+It returns to the normal idle polling interval once a scan makes no progress.
+
+`GET consumers/:id?order=ingestion` reports `cursor`, retained `legacyCursor`,
+`migrationRequired`, and an authorized `headCursor`; repeated `kind` and `include`
+filters make the head match the subscription. A cursor at or beyond that head is
+caught up for that access/filter snapshot, not a permanent completion guarantee.
+Preview is read-only. Explicit `POST` with `{migration:"replay-all"}` initializes
+sequence 0 without deleting the legacy offset or rewinding existing ingestion progress.
+New cursor commits use `{cursor:{kind:"ingestion",sequence:"..."}}` on the same route.
+Stop the legacy consumer before migration; changing kinds/access may require a new
+consumer identity and replay to obtain previously filtered events.
+
+For an already-migrated consumer requiring a full replay, an administrator may
+explicitly POST `{reset:{expectedCursor:{kind:"ingestion",sequence:"..."},reason:"..."}}`.
+The reason must contain 10 to 2000 characters. The transaction compares the exact
+current cursor, appends an audit record to `fold_ingestion_cursor_resets`, and resets
+only that principal's consumer to 0; stale expectations return 409. Original offsets,
+events, and worker jobs remain intact. **Stop every instance of that consumer first.**
+The local worker CLI lock protects only its own host, not a remote worker or an
+already-running remote checkpoint; reset does not provide a cross-process generation fence.
+
+## Work Episodes
+
+`POST work-episodes/synthesize` authorizes at most 200 canonical source events,
+calls a configured structured model, and reauthenticates membership and source
+dependencies after inference. It requires `reasoning:read` and `events:read`, does
+not write, and never opens the private capture vault. Content-less sources produce
+explicit ungrouped coverage, not invented conversation summaries. Oversized model
+inputs return 413; the worker splits windows with `parentWindowId` lineage.
+
+`POST work-episodes/windows` requires `memories:write`, `events:read`, and space
+write permission when scoped. PostgreSQL checks exact window retries, episode
+revision CAS, canonical evidence hashes and publication scope under its tenant
+append lock. Generic event ingress cannot publish episode records.
+
+`GET work-episodes`, `work-episode-windows`, episode `/:id/history`, and both
+resources' `/:id/sources` use cursor pagination. Evidence pages default to and
+allow at most one complete source event; episode/window lists default to 100.
+Sources include authorized
+canonical events and current assembled memory snapshots, not truncated excerpts.
+Source assembly has an 8 MB safety bound; larger individual evidence is rejected
+explicitly rather than loading an unbounded window or truncating its content.
+Episode/window detail and historical dependencies are rechecked before returning
+prose. Changed/forgotten/inaccessible dependencies withhold records; list coverage
+is `authorized-current-only`. There is no stale-summary regeneration dashboard in
+this slice. Original event history remains append-only. Person ownership and
+raw-artifact enrichment are not inferred. Context is explicitly selected, not an
+exhaustive project search; revisions retain prior and continuation evidence.
+
 The State UI requests `projection` with `section=nodes|edges|values|redirects|diagnostics`,
 an optional whole-section `query`, and an opaque `pageCursor`. These responses
 include complete collection counts but only one page of state rows. The API
@@ -236,7 +294,9 @@ importer and is not served by this API.
 Project/run reads follow normal workspace authorization, while import requires
 an owner or admin role.
 
-Ranked recall defaults to the deterministic `local-bm25-v1` lexical provider.
+Ranked recall defaults to the deterministic `local-bm25-v2` lexical provider,
+which removes common English question words before matching. Its normalized
+scores express relative rank within one query, not a probability of correctness.
 `ApiDependencies.memoryRanker` is the host port for an embedding or vector
 provider. The SDK gives that provider the complete already-authorized,
 minimized corpus and reapplies current access to every returned candidate.
@@ -305,3 +365,41 @@ can be enabled with `FOLD_DATABASE_URL`, `FOLD_EMBEDDING_URL`,
 Missing document embeddings are requested from the sidecar in batches of 64.
 Vector queries remain restricted to the authorized Fold memory IDs supplied by
 recall and are partitioned by authenticated organization and workspace.
+
+## Retrospective trajectory verdicts
+
+`POST /v1/organizations/:organization/workspaces/:workspace/trajectory-outcomes`
+accepts `{ stamp, input: { taskId, trajectoryId, outcome, reason, previousEventId } }`.
+Outcomes are `success`, `failure`, or `unknown` (withdraw verification). The reason
+must contain 10 to 4,000 characters. `previousEventId` is null for the first review;
+later corrections reference the latest review event. Stale reviews return 409.
+The stamp must be later than the run and prior review.
+
+This route requires a human-author credential and `trajectories:review` capability
+(or an unrestricted operator credential), plus access to the target run. The
+server inherits the run's scope; callers cannot broaden it. Generic event append
+routes cannot write retrospective verdicts. Review events preserve the original
+run, every previous verdict, actor, reason, and timestamp. A human-author machine
+credential establishes authorized operator provenance, not physical human presence.
+
+`GET` on the same route takes `taskId`, `trajectoryId`, `limit` (default 100), and
+optional `pageCursor`, returning newest-first history with `nextCursor`.
+Reports expose the effective outcome, `recordedOutcome`, and latest `outcomeReview`;
+SQL summaries and quality counts use the same effective result. No memory is
+automatically accepted because its containing run receives a successful verdict.
+## Historical derivations
+
+Workspace-scoped `transcript-derivations` routes add evidence without rewriting
+imported transcripts. `GET /sources` pages authorized run/artifact pairs;
+`GET ?runId=...` pages manifest summaries; `GET /:derivationId?runId=...` pages
+derived records in source order. Lists default to 100 rows, accept `limit` up to
+1000, and return `nextCursor` for the next request's `pageCursor`.
+
+Owner/admin `POST` accepts either `{manifest}` or `{chunk}`. Source identity and
+the original retention policy must match an existing retained import. Manifests
+commit to chunk hashes; chunks must arrive in order with contiguous ordinals.
+Exact retries are no-ops. Generic event append cannot bypass these routes.
+Writes require `transcripts:write`, reads `transcripts:read`; derived events
+inherit the original run's visibility scope. Incomplete manifests are visible
+but must not be interpreted as completed extraction. For lossless encoded
+payloads, see the importer README.

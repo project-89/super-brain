@@ -61,35 +61,37 @@ function emptySnapshot(): BrainSnapshot {
 async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSnapshot> {
   const snapshot = emptySnapshot();
   if (page === "overview") {
-    const [memoryPage, candidatePage, taskPage, transcriptProjects, runPage, fleet, captureHealth] = await Promise.all([
-      client.recallMemoryPage({ scope: { kind: "all" }, limit: 4 }),
-      client.listMemoryCandidatePage({ status: "proposed", limit: 1 }),
-      client.listTrajectoryTaskPage({ limit: 1 }),
-      client.listTranscriptProjects(),
-      client.listTranscriptRunPage({ limit: 100 }),
+    const [fleet, captureHealth, dataQuality] = await Promise.all([
       client.fleet(),
       client.captureHealth().catch(() => undefined),
+      client.dataQuality().catch(() => undefined),
     ]);
     return {
       ...snapshot,
-      memories: memoryPage.items,
-      memoryTotal: memoryPage.total,
-      memoryCandidates: candidatePage.items,
-      memoryCandidateTotal: candidatePage.total,
-      trajectoryTasks: taskPage.items,
-      trajectoryTaskTotal: taskPage.total,
-      transcriptProjects,
-      transcriptRuns: runPage.items,
-      transcriptRunTotal: runPage.total,
+      memoryTotal: dataQuality?.memories.total ?? 0,
+      memoryCandidateTotal: dataQuality?.memories.proposed ?? 0,
+      trajectoryTaskTotal: dataQuality?.trajectories.tasks ?? 0,
+      transcriptRunTotal: dataQuality?.transcripts.runs ?? 0,
       fleet,
       ...(captureHealth === undefined ? {} : { captureHealth }),
+      ...(dataQuality === undefined ? {} : { dataQuality }),
     };
   }
   if (page === "memory") {
-    const [memoryPage, candidatePage, events] = await Promise.all([
+    const [memoryPage, candidatePage, events, transcriptProjects] = await Promise.all([
       client.recallMemoryPage({ scope: { kind: "all" }, limit: 100 }),
       client.listMemoryCandidatePage({ status: "proposed", limit: 100 }),
-      client.listEvents({ kinds: ["memory.feedback-recorded"] }),
+      (async () => {
+        const entries = [] as BrainSnapshot["events"][number][];
+        let cursor: string | undefined;
+        do {
+          const feedbackPage = await client.listEventsPage({ kinds: ["memory.feedback-recorded"], limit: 1_000, ...(cursor === undefined ? {} : { cursor }) });
+          entries.push(...feedbackPage.items);
+          cursor = feedbackPage.nextCursor;
+        } while (cursor !== undefined);
+        return entries;
+      })(),
+      client.listTranscriptProjects(),
     ]);
     return {
       ...snapshot,
@@ -99,6 +101,7 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
       memoryCandidates: candidatePage.items,
       memoryCandidateTotal: candidatePage.total,
       ...(candidatePage.nextCursor === undefined ? {} : { memoryCandidateCursor: candidatePage.nextCursor }),
+      transcriptProjects,
       events,
     };
   }
@@ -116,12 +119,16 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
     };
   }
   if (page === "trajectories") {
-    const taskPage = await client.listTrajectoryTaskPage({ limit: 50 });
+    const [taskPage, transcriptProjects] = await Promise.all([
+      client.listTrajectoryTaskPage({ limit: 50 }),
+      client.listTranscriptProjects(),
+    ]);
     return {
       ...snapshot,
       trajectoryTasks: taskPage.items,
       trajectoryTaskTotal: taskPage.total,
       ...(taskPage.nextCursor === undefined ? {} : { trajectoryTaskCursor: taskPage.nextCursor }),
+      transcriptProjects,
     };
   }
   if (page === "fleet") {
@@ -140,8 +147,7 @@ async function loadPage(client: FoldApiClient, page: BrainPage): Promise<BrainSn
       ...(eventPage.nextCursor === undefined ? {} : { eventCursor: eventPage.nextCursor }),
     };
   }
-  const projection = await client.projection();
-  return { ...snapshot, projection };
+  return snapshot;
 }
 
 export function useSnapshot(connection: ConnectionSettings, page: BrainPage) {

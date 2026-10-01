@@ -39,6 +39,19 @@ export interface ReasoningProviderResult {
 export interface ReasoningProvider {
   readonly descriptor: ReasoningProviderDescriptor;
   answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult>;
+  structured?(request: StructuredReasoningRequest): Promise<unknown>;
+}
+
+export interface StructuredReasoningRequest {
+  readonly prompt: string;
+  readonly jsonSchema: Readonly<Record<string, unknown>>;
+  readonly schemaName: string;
+  readonly maxOutputTokens?: number;
+  readonly timeoutMs?: number;
+}
+
+export class ReasoningProviderError extends Error {
+  constructor(readonly reason: "http_error" | "incomplete" | "invalid_json", message: string, readonly httpStatus?: number) { super(message); }
 }
 
 function compactText(value: JsonValue): string {
@@ -70,6 +83,7 @@ export class LocalEvidenceReasoner implements ReasoningProvider {
       citations: evidence.map(({ memoryId }) => memoryId),
     };
   }
+
 }
 
 const resultSchema = z.object({ answer: z.string(), citations: z.array(z.string()) }).strict();
@@ -97,21 +111,22 @@ function modelPrompt(request: ReasoningProviderRequest): string {
   });
 }
 
-function parsedModelResult(text: string): ReasoningProviderResult {
+function parsedStructuredResult(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   try {
-    return resultSchema.parse(JSON.parse(trimmed));
+    return JSON.parse(trimmed);
   } catch {
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
-    if (start < 0 || end <= start) throw new TypeError("reasoning provider returned invalid structured output");
-    return resultSchema.parse(JSON.parse(trimmed.slice(start, end + 1)));
+    if (start < 0 || end <= start) throw new ReasoningProviderError("invalid_json", "Reasoning provider returned invalid structured output");
+    try { return JSON.parse(trimmed.slice(start, end + 1)); }
+    catch { throw new ReasoningProviderError("invalid_json", "Reasoning provider returned invalid structured output"); }
   }
 }
 
 async function providerFailure(response: Response, provider: string): Promise<never> {
-  const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 1_000);
-  throw new Error(`${provider} reasoning failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  await response.body?.cancel();
+  throw new ReasoningProviderError("http_error", `${provider} reasoning failed with HTTP ${response.status}`, response.status);
 }
 
 interface NativeReasonerOptions {
@@ -123,11 +138,17 @@ interface NativeReasonerOptions {
 
 abstract class NativeModelReasoner implements ReasoningProvider {
   abstract readonly descriptor: ReasoningProviderDescriptor;
-  abstract answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult>;
+  abstract structured(request: StructuredReasoningRequest): Promise<unknown>;
   protected readonly apiKey: string;
   protected readonly model: string;
   protected readonly timeoutMs: number;
   protected readonly fetchImpl: typeof fetch;
+
+  protected requestTimeout(request: StructuredReasoningRequest): number {
+    const timeout = request.timeoutMs ?? this.timeoutMs;
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 180_000) throw new TypeError("Structured provider timeout must be within 1..180000 ms");
+    return timeout;
+  }
 
   constructor(options: NativeReasonerOptions) {
     this.apiKey = options.apiKey.trim();
@@ -135,6 +156,10 @@ abstract class NativeModelReasoner implements ReasoningProvider {
     if (!this.apiKey || !this.model) throw new TypeError("reasoning provider API key and model are required");
     this.timeoutMs = options.timeoutMs ?? 60_000;
     this.fetchImpl = options.fetch ?? fetch;
+  }
+
+  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+    return resultSchema.parse(await this.structured({ prompt: modelPrompt(request), jsonSchema: resultJsonSchema, schemaName: "memory_answer" }));
   }
 }
 
@@ -145,23 +170,24 @@ export class GeminiReasoner extends NativeModelReasoner {
     this.descriptor = { id: `gemini:${this.model}`, kind: "model", provider: "gemini", model: this.model };
   }
 
-  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+  async structured(request: StructuredReasoningRequest): Promise<unknown> {
     const response = await this.fetchImpl(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent`,
       {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(this.requestTimeout(request)),
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: modelPrompt(request) }] }],
-          generationConfig: { responseMimeType: "application/json", responseJsonSchema: resultJsonSchema },
+          contents: [{ role: "user", parts: [{ text: request.prompt }] }],
+          generationConfig: { responseMimeType: "application/json", responseJsonSchema: request.jsonSchema, ...(request.maxOutputTokens === undefined ? {} : { maxOutputTokens: request.maxOutputTokens }) },
         }),
       },
     );
     if (!response.ok) return providerFailure(response, "Gemini");
-    const body = await response.json() as { candidates?: readonly { content?: { parts?: readonly { text?: string }[] } }[] };
+    const body = await response.json() as { candidates?: readonly { finishReason?: string; content?: { parts?: readonly { text?: string }[] } }[] };
+    if (body.candidates?.some(candidate => candidate.finishReason !== undefined && candidate.finishReason !== "STOP")) throw new ReasoningProviderError("incomplete", "Gemini reasoning output is incomplete or blocked");
     const text = body.candidates?.flatMap(({ content }) => content?.parts ?? []).map((part) => part.text ?? "").join("") ?? "";
-    return parsedModelResult(text);
+    return parsedStructuredResult(text);
   }
 }
 
@@ -172,24 +198,26 @@ export class CodexReasoner extends NativeModelReasoner {
     this.descriptor = { id: `codex:${this.model}`, kind: "model", provider: "codex", model: this.model };
   }
 
-  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+  async structured(request: StructuredReasoningRequest): Promise<unknown> {
     const response = await this.fetchImpl("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { "authorization": `Bearer ${this.apiKey}`, "content-type": "application/json" },
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(this.requestTimeout(request)),
       body: JSON.stringify({
         model: this.model,
-        input: modelPrompt(request),
-        text: { format: { type: "json_schema", name: "memory_answer", strict: true, schema: resultJsonSchema } },
+        ...(request.maxOutputTokens === undefined ? {} : { max_output_tokens: request.maxOutputTokens }),
+        input: request.prompt,
+        text: { format: { type: "json_schema", name: request.schemaName, strict: true, schema: request.jsonSchema } },
       }),
     });
     if (!response.ok) return providerFailure(response, "Codex");
     const body = await response.json() as {
-      output_text?: string;
+      output_text?: string; status?: string;
       output?: readonly { content?: readonly { type?: string; text?: string }[] }[];
     };
+    if ((body.status !== undefined && body.status !== "completed") || body.output?.some(item => item.content?.some(content => content.type === "refusal"))) throw new ReasoningProviderError("incomplete", "Codex reasoning output is incomplete or refused");
     const text = body.output_text ?? body.output?.flatMap(({ content }) => content ?? []).map((item) => item.text ?? "").join("") ?? "";
-    return parsedModelResult(text);
+    return parsedStructuredResult(text);
   }
 }
 
@@ -200,21 +228,22 @@ export class ClaudeReasoner extends NativeModelReasoner {
     this.descriptor = { id: `claude:${this.model}`, kind: "model", provider: "claude", model: this.model };
   }
 
-  async answer(request: ReasoningProviderRequest): Promise<ReasoningProviderResult> {
+  async structured(request: StructuredReasoningRequest): Promise<unknown> {
     const response = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "anthropic-version": "2023-06-01", "content-type": "application/json", "x-api-key": this.apiKey },
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(this.requestTimeout(request)),
       body: JSON.stringify({
         model: this.model,
-        max_tokens: 4_096,
+        max_tokens: request.maxOutputTokens ?? 4_096,
         system: "Return only a JSON object matching the requested output contract.",
-        messages: [{ role: "user", content: modelPrompt(request) }],
+        messages: [{ role: "user", content: `${request.prompt}\nOutput JSON schema: ${JSON.stringify(request.jsonSchema)}` }],
       }),
     });
     if (!response.ok) return providerFailure(response, "Claude");
-    const body = await response.json() as { content?: readonly { type?: string; text?: string }[] };
-    return parsedModelResult(body.content?.map((item) => item.text ?? "").join("") ?? "");
+    const body = await response.json() as { stop_reason?: string; content?: readonly { type?: string; text?: string }[] };
+    if (body.stop_reason !== undefined && body.stop_reason !== "end_turn" && body.stop_reason !== "stop_sequence") throw new ReasoningProviderError("incomplete", "Claude reasoning output is incomplete or refused");
+    return parsedStructuredResult(body.content?.map((item) => item.text ?? "").join("") ?? "");
   }
 }
 

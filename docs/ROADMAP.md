@@ -48,6 +48,13 @@ features:
 
 ## Active Execution
 
+The next product milestone is tracked in
+[`LEARNING_AND_AWARENESS_PLAN.md`](./LEARNING_AND_AWARENESS_PLAN.md): explicit
+knowledge applicability and identity, durable work episodes, reusable procedures,
+organizational awareness, additional connectors, and measured agent benefit.
+Its phased checklist is the current development sequence. The deployment and
+evaluation gates below remain required, not superseded as completed.
+
 The remaining execution order is:
 
 1. run a controlled same-task comparison across two materially different

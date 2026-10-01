@@ -78,6 +78,14 @@ function input(
 }
 
 describe("Fold trajectory lifecycle", () => {
+  it("round-trips task-verdict evidence without changing legacy inputs", () => {
+    const evidence = { kind: "operator-verdict" as const, eventId: "decision-event", artifactId: "decision-artifact" };
+    const event = makeTrajectoryRecordedEvent(context, { id: "with-evidence", t: 2, worldDate: "2026-08-19" }, tree, {
+      ...input("run-a", "model-a", "success", ["observe-401", "token-expiry", "patch-refresh", "pass"], "VERDICT: approve"),
+      outcomeEvidence: evidence,
+    });
+    expect(trajectoryLogRecordsFromEvent(event)[0]).toMatchObject({ trajectory: { outcomeEvidence: evidence } });
+  });
   it("records server-scoped trees and runs as canonical Fold records", () => {
     const treeEvent = makeTrajectoryTreeRecordedEvent(
       context,

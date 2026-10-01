@@ -14,6 +14,13 @@ function request(fetcher: typeof fetch) {
 }
 
 describe("capture hook relay", () => {
+  it("sends operator decisions with the separate operator credential", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 202 }));
+    await postCaptureRelay({ ...request(fetcher), authority: "operator", token: "operator-token" });
+    const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("x-super-brain-operator-token")).toBe("operator-token");
+    expect(headers.has("x-super-brain-hook-token")).toBe(false);
+  });
   it("retries one transient transport failure", async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockRejectedValueOnce(new TypeError("fetch failed"))

@@ -1,8 +1,13 @@
 import { nextEventStamp, uuidV7 } from "./ids";
+import type { Episode, EpisodePage, EpisodeSourceRecord, EpisodeWindow, EpisodeWindowSummary } from "./episode-types";
+import type { IdentityAttribution, IdentityAttributionInput, IdentityEntity, IdentityEntityInput, IdentityHistory, IdentityKind, IdentityPage, IdentityProject, ProjectAlias, ProjectAliasInput, ProjectAliasPreview } from "./identity-types";
 import type {
   ConnectionSettings,
   CaptureHealth,
   CursorPage,
+  DerivedTranscriptRecord,
+  TranscriptDerivation,
+  DataQualityReport,
   FoldLogEntry,
   FleetResponse,
   HookArtifact,
@@ -23,6 +28,7 @@ import type {
   SteeringResponse,
   TrajectoryImportBundle,
   TrajectoryInput,
+  TrajectoryOutcomeRecord,
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
   TranscriptProjectSummary,
@@ -69,6 +75,22 @@ export class FoldApiClient {
     return `/v1/organizations/${encodeURIComponent(this.settings.organizationId)}/workspaces/${encodeURIComponent(this.settings.workspaceId)}/${resource}`;
   }
 
+  episodePage<T>(resource: "work-episodes" | "work-episode-windows", options: { cursor?: string; projectId?: string; id?: string; section?: "sources" | "history"; eventId?: string; revision?: string } = {}): Promise<EpisodePage<T>> {
+    const params = new URLSearchParams({ limit: options.section === "sources" ? "1" : "100" });
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    if (options.projectId !== undefined) params.set("projectId", options.projectId);
+    if (options.eventId !== undefined) params.set("eventId", options.eventId);
+    if (options.revision !== undefined) params.set("revision", options.revision);
+    const path = `${resource}${options.id === undefined ? "" : `/${encodeURIComponent(options.id)}`}${options.section === undefined ? "" : `/${options.section}`}`;
+    return this.request(this.workspacePath(`${path}?${params}`));
+  }
+  workEpisodes(options: { cursor?: string; projectId?: string } = {}) { return this.episodePage<Episode>("work-episodes", options); }
+  episodeWindows(options: { cursor?: string; projectId?: string } = {}) { return this.episodePage<EpisodeWindowSummary>("work-episode-windows", options); }
+  workEpisode(id: string): Promise<Episode> { return this.request(this.workspacePath(`work-episodes/${encodeURIComponent(id)}`)); }
+  episodeWindow(id: string): Promise<EpisodeWindow> { return this.request(this.workspacePath(`work-episode-windows/${encodeURIComponent(id)}`)); }
+  episodeSources(id: string, window = false, cursor?: string, eventId?: string, revision?: string) { return this.episodePage<EpisodeSourceRecord>(window ? "work-episode-windows" : "work-episodes", { id, section: "sources", ...(cursor === undefined ? {} : { cursor }), ...(eventId === undefined ? {} : { eventId }), ...(revision === undefined ? {} : { revision }) }); }
+  episodeHistory(id: string, cursor?: string) { return this.episodePage<Episode>("work-episodes", { id, section: "history", ...(cursor === undefined ? {} : { cursor }) }); }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${this.settings.token}`);
@@ -95,6 +117,52 @@ export class FoldApiClient {
     return body as T;
   }
 
+  private identityPage<T>(resource: "entities" | "attributions" | "aliases" | "history" | "projects", options: {
+    readonly cursor?: string; readonly kind?: IdentityKind; readonly active?: boolean;
+  } = {}): Promise<IdentityPage<T>> {
+    const params = new URLSearchParams({ limit: "100" });
+    if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
+    if (options.kind !== undefined) params.set("kind", options.kind);
+    if (options.active !== undefined) params.set("active", String(options.active));
+    return this.request(this.workspacePath(`identities/${resource}?${params}`));
+  }
+
+  identityEntities(options: { readonly cursor?: string; readonly kind?: IdentityKind; readonly active?: boolean } = {}) {
+    return this.identityPage<IdentityEntity>("entities", options);
+  }
+
+  identityAttributions(options: { readonly cursor?: string; readonly active?: boolean } = {}) {
+    return this.identityPage<IdentityAttribution>("attributions", options);
+  }
+
+  projectAliases(options: { readonly cursor?: string; readonly active?: boolean } = {}) {
+    return this.identityPage<ProjectAlias>("aliases", options);
+  }
+
+  identityHistory(cursor?: string) {
+    return this.identityPage<IdentityHistory>("history", { cursor });
+  }
+
+  identityProjects(cursor?: string) {
+    return this.identityPage<IdentityProject>("projects", { cursor });
+  }
+
+  saveIdentityEntity(input: IdentityEntityInput, expectedRevision: string | null): Promise<unknown> {
+    return this.request(this.workspacePath("identities/entities"), { method: "POST", body: JSON.stringify({ expectedRevision, input }) });
+  }
+
+  saveIdentityAttribution(input: IdentityAttributionInput, expectedRevision: string | null): Promise<unknown> {
+    return this.request(this.workspacePath("identities/attributions"), { method: "POST", body: JSON.stringify({ expectedRevision, input }) });
+  }
+
+  previewProjectAlias(input: ProjectAliasInput): Promise<ProjectAliasPreview> {
+    return this.request(this.workspacePath("identities/alias-preview"), { method: "POST", body: JSON.stringify({ input }) });
+  }
+
+  saveProjectAlias(input: ProjectAliasInput, preview: ProjectAliasPreview): Promise<unknown> {
+    return this.request(this.workspacePath("identities/aliases"), { method: "POST", body: JSON.stringify({ expectedRevision: preview.revision, previewToken: preview.previewToken, input }) });
+  }
+
   async captureHealth(): Promise<CaptureHealth> {
     let response: Response;
     try {
@@ -107,6 +175,11 @@ export class FoldApiClient {
       throw new FoldApiError(response.status, body.error?.code ?? "capture_unavailable", body.error?.message ?? "Capture daemon unavailable");
     }
     return body;
+  }
+
+  async dataQuality(): Promise<DataQualityReport> {
+    const response = await this.request<{ readonly report: DataQualityReport }>(this.workspacePath("data-quality"));
+    return response.report;
   }
 
   async transcriptArtifactPage(options: {
@@ -137,6 +210,7 @@ export class FoldApiClient {
       readonly error?: string;
     };
     if (!response.ok || body.records === undefined || body.total === undefined) {
+      if (response.status === 401 || response.status === 403) throw new FoldApiError(response.status, "capture_access_denied", "Local archive access denied: capture operator credential is missing or invalid.");
       throw new FoldApiError(response.status, "artifact_unavailable", body.error ?? "Transcript artifact unavailable");
     }
     return { items: body.records, total: body.total, ...(body.nextCursor === undefined ? {} : { nextCursor: body.nextCursor }) };
@@ -218,7 +292,7 @@ export class FoldApiClient {
   }
 
   async listTrajectoryTaskPage(options: { readonly limit?: number; readonly cursor?: string } = {}): Promise<CursorPage<TrajectoryTaskSummary>> {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ compact: "true" });
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     if (options.cursor !== undefined) params.set("pageCursor", options.cursor);
     const response = await this.request<{ readonly tasks: readonly TrajectoryTaskSummary[]; readonly total: number; readonly nextCursor?: string }>(
@@ -277,6 +351,27 @@ export class FoldApiClient {
     return this.request<TranscriptRunDetail>(
       `${this.workspacePath("transcript-runs")}/${encodeURIComponent(runId)}`,
     );
+  }
+
+  async transcriptDerivations(runId: string, cursor?: string): Promise<CursorPage<TranscriptDerivation>> {
+    const params = new URLSearchParams({ runId, limit: "100" });
+    if (cursor !== undefined) params.set("pageCursor", cursor);
+    const response = await this.request<{ derivations: TranscriptDerivation[]; total: number; nextCursor?: string }>(`${this.workspacePath("transcript-derivations")}?${params}`);
+    return { items: response.derivations, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
+  }
+
+  async transcriptDerivedRecords(runId: string, derivationId: string, cursor?: string): Promise<CursorPage<DerivedTranscriptRecord>> {
+    const params = new URLSearchParams({ runId, limit: "100" });
+    if (cursor !== undefined) params.set("pageCursor", cursor);
+    const response = await this.request<{ records: DerivedTranscriptRecord[]; total: number; nextCursor?: string }>(`${this.workspacePath("transcript-derivations")}/${encodeURIComponent(derivationId)}?${params}`);
+    const items = response.records.map((record) => {
+      if (record.dataEncoding !== "base64-json-utf8") return record;
+      if (typeof record.data.base64 !== "string") throw new Error("Encoded evidence payload is invalid");
+      const data: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(record.data.base64), (character) => character.charCodeAt(0))));
+      if (data === null || typeof data !== "object" || Array.isArray(data)) throw new Error("Decoded evidence payload is invalid");
+      return { ...record, data: data as Readonly<Record<string, unknown>> };
+    });
+    return { items, total: response.total, ...(response.nextCursor === undefined ? {} : { nextCursor: response.nextCursor }) };
   }
 
   async steering(): Promise<SteeringResponse> {
@@ -356,6 +451,20 @@ export class FoldApiClient {
         tree,
       }),
     });
+  }
+
+  async recordTrajectoryOutcome(input: Pick<TrajectoryOutcomeRecord, "taskId" | "trajectoryId" | "outcome" | "reason" | "previousEventId">): Promise<TrajectoryOutcomeRecord> {
+    const result = await this.request<{ readonly record: TrajectoryOutcomeRecord }>(this.workspacePath("trajectory-outcomes"), {
+      method: "POST", body: JSON.stringify({ stamp: nextEventStamp(), input }),
+    });
+    return result.record;
+  }
+
+  async trajectoryOutcomes(taskId: string, trajectoryId: string, cursor?: string): Promise<CursorPage<TrajectoryOutcomeRecord>> {
+    const query = new URLSearchParams({ taskId, trajectoryId, limit: "100" });
+    if (cursor !== undefined) query.set("pageCursor", cursor);
+    const result = await this.request<{ readonly records: readonly TrajectoryOutcomeRecord[]; readonly total: number; readonly nextCursor?: string }>(`${this.workspacePath("trajectory-outcomes")}?${query}`);
+    return { items: result.records, total: result.total, ...(result.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }) };
   }
 
   async recordTrajectory(input: TrajectoryInput, spaceId?: string): Promise<void> {
@@ -452,6 +561,7 @@ export class FoldApiClient {
             id: uuidV7(stamp.t),
             audience: draft.audience,
             projectIds: draft.projectIds,
+            ...(draft.applicability === undefined ? {} : { applicability: draft.applicability }),
             source: draft.source,
             summary: draft.summary,
             content: draft.content,
@@ -502,6 +612,32 @@ export class FoldApiClient {
     return response.memory;
   }
 
+  async acceptMemoryCandidates(
+    candidateIds: readonly string[],
+    options: { readonly audience: "personal" | "workspace"; readonly spaceId?: string },
+  ): Promise<readonly PersonalMemory[]> {
+    if (candidateIds.length < 1 || candidateIds.length > 100) {
+      throw new TypeError("candidateIds must contain 1 to 100 IDs");
+    }
+    const acceptances = candidateIds.map((candidateId) => {
+      const stamp = nextEventStamp();
+      const memoryStamp = nextEventStamp(stamp.t + 1);
+      return { candidateId, stamp, memoryStamp, memoryId: uuidV7(memoryStamp.t) };
+    });
+    const response = await this.request<{ readonly accepted: readonly { readonly memory: PersonalMemory }[] }>(
+      this.workspacePath("memory-candidate-promotions"),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          audience: options.audience,
+          ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }),
+          acceptances,
+        }),
+      },
+    );
+    return response.accepted.map(({ memory }) => memory);
+  }
+
   async rejectMemoryCandidate(candidateId: string, reason: string): Promise<void> {
     await this.request(
       `${this.workspacePath("memory-candidates")}/${encodeURIComponent(candidateId)}/reject`,
@@ -516,7 +652,11 @@ export class FoldApiClient {
         method: "PATCH",
         body: JSON.stringify({
           stamp: nextEventStamp(),
-          patch: { summary: draft.summary, content: draft.content, tags: draft.tags },
+          patch: {
+            summary: draft.summary, content: draft.content, tags: draft.tags,
+            projectIds: draft.projectIds,
+            ...(draft.applicability === undefined ? {} : { applicability: draft.applicability }),
+          },
         }),
       },
     );
@@ -533,12 +673,12 @@ export class FoldApiClient {
     );
   }
 
-  async recordMemoryFeedback(memoryId: string, signal: "helpful" | "unhelpful"): Promise<void> {
+  async recordMemoryFeedback(memoryId: string, signal: "helpful" | "unhelpful" | "superseded", context: { readonly query?: string; readonly detail?: string } = {}): Promise<void> {
     await this.request(
       `${this.workspacePath("memories")}/${encodeURIComponent(memoryId)}/feedback`,
       {
         method: "POST",
-        body: JSON.stringify({ stamp: nextEventStamp(), input: { signal } }),
+        body: JSON.stringify({ stamp: nextEventStamp(), input: { signal, ...context } }),
       },
     );
   }

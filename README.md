@@ -146,6 +146,8 @@ operations are documented in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 The implementation ledger and remaining deployment choices are in
 [`docs/ROADMAP.md`](./docs/ROADMAP.md), with acceptance evidence tracked in
 [`docs/EXECUTION_BACKLOG.md`](./docs/EXECUTION_BACKLOG.md).
+The typed decision model research and proposed Fold pilot are in
+[`docs/TYPED_DECISION_MODELS.md`](./docs/TYPED_DECISION_MODELS.md).
 
 The repository is public at
 [`project-89/super-brain`](https://github.com/project-89/super-brain). New Fold

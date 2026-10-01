@@ -89,13 +89,17 @@ export function StatePage({ canonical, api }: {
   readonly canonical: ProjectionResponse;
   readonly api: FoldApiClient;
 }) {
+  const initiallyLoaded = canonical.projected !== undefined || canonical.counts !== undefined;
   const [section, setSection] = useState<ProjectionSection>("nodes");
   const [mode, setMode] = useState<ProjectionMode>("canonical");
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query.trim());
   const [selectedId, setSelectedId] = useState<string>();
   const initialKey = cacheKey("canonical", "nodes", "");
-  const [pages, setPages] = useState<Readonly<Record<string, ProjectionResponse>>>({ [initialKey]: canonical });
+  const [projectionEnabled, setProjectionEnabled] = useState(initiallyLoaded);
+  const [pages, setPages] = useState<Readonly<Record<string, ProjectionResponse>>>(
+    initiallyLoaded ? { [initialKey]: canonical } : {},
+  );
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string>();
   const key = cacheKey(mode, section, deferredQuery);
@@ -104,11 +108,14 @@ export function StatePage({ canonical, api }: {
   const selected = rows.find((row) => row.id === selectedId) ?? rows[0];
 
   useEffect(() => {
+    if (!initiallyLoaded) return;
+    setProjectionEnabled(true);
     setPages({ [initialKey]: canonical });
-  }, [canonical, initialKey]);
+  }, [canonical, initialKey, initiallyLoaded]);
 
   useEffect(() => {
     setSelectedId(undefined);
+    if (!projectionEnabled) return;
     if (pages[key] !== undefined) return;
     let active = true;
     setLoading(true);
@@ -126,7 +133,7 @@ export function StatePage({ canonical, api }: {
       },
     );
     return () => { active = false; };
-  }, [api, deferredQuery, key, mode, pages, section]);
+  }, [api, deferredQuery, key, mode, pages, projectionEnabled, section]);
 
   const loadMore = async () => {
     if (response?.nextCursor === undefined || loading) return;
@@ -163,9 +170,22 @@ export function StatePage({ canonical, api }: {
   const workingApplied = mode === "working" ? response?.state.appliedEventCount : undefined;
   const sectionTotal = response?.sectionTotal ?? 0;
 
+  if (!projectionEnabled) {
+    return (
+      <div className="page page--state">
+        <PageHeader eyebrow="Diagnostic projection" title="System state" />
+        <section className="state-on-demand">
+          <Braces aria-hidden="true" />
+          <div><span className="eyebrow">Not loaded</span><strong>Full Fold projection</strong></div>
+          <button className="button button--primary" type="button" onClick={() => setProjectionEnabled(true)}>Load state</button>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="page page--state">
-      <PageHeader eyebrow="Materialized projection" title="Fold state" />
+      <PageHeader eyebrow="Materialized projection" title="System state" />
       <div className="state-toolbar">
         <div className="state-toolbar__controls">
           <div className="segmented-control segmented-control--mode" role="group" aria-label="Projection mode">

@@ -160,12 +160,12 @@ describe("capture daemon", () => {
     const trajectory = jobs.find(({ job }) => job.kind === "trajectory")?.job;
     expect(trajectory).toMatchObject({
       kind: "trajectory",
-      input: { outcome: "success", model: { id: "codex" } },
+      input: { outcome: "unknown", model: { id: "codex" } },
       captureIdentity: { agent: "codex", session, project: "super-brain" },
     });
     if (trajectory?.kind !== "trajectory") throw new Error("missing trajectory job");
     expect(trajectory.input.steps.map((step) => step.role)).toContain("model_thought");
-    expect(trajectory.tree.nodes.at(-1)).toMatchObject({ kind: "outcome", label: "Outcome success" });
+    expect(trajectory.tree.nodes.at(-1)).toMatchObject({ kind: "outcome", label: "Outcome not verified" });
 
     const artifactPath = join(
       current.vaultRoot,
@@ -181,6 +181,63 @@ describe("capture daemon", () => {
 
     const restored = await state.load();
     expect(Object.values(restored.sessions)[0]).toMatchObject({ active: false, finalized: true });
+  });
+
+  it("keeps agent verdict claims separate from operator-authorized decisions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "capture-verdict-authority-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const vault = new HookVault(current.vaultRoot);
+    const state = new StateStore(current.stateRoot);
+    const engine = new CaptureEngine(current, state, vault, spool);
+    await engine.initialize();
+    const common = { session_id: "agent-claim", cwd: process.cwd() };
+    const decision = { ...common, hook_event_name: "HumanDecision", summary: "I think this works", verdict: "success", authority: "operator" };
+    const agentArtifact = await engine.ingest("codex", decision);
+    await engine.ingest("codex", { ...common, hook_event_name: "Stop" });
+    let jobs = (await spool.list()).map(({ job }) => job);
+    expect(jobs.find((job) => job.kind === "trajectory")).toMatchObject({ input: { outcome: "unknown" } });
+    expect(JSON.stringify(jobs)).toContain("agent-reported-decision");
+    expect(JSON.stringify(jobs)).not.toContain('"kind":"human_decision"');
+
+    const trusted = { ...decision, session_id: "operator-claim" };
+    await engine.ingest("codex", trusted, "operator");
+    const restarted = new CaptureEngine(current, state, vault, spool);
+    await restarted.initialize();
+    await restarted.ingest("codex", { ...common, session_id: "operator-claim", hook_event_name: "Stop" });
+    jobs = (await spool.list()).map(({ job }) => job);
+    const approved = jobs.find((job) => job.kind === "trajectory" && job.input.outcome === "success");
+    expect(approved).toMatchObject({ input: { outcomeEvidence: { kind: "operator-verdict", eventId: expect.any(String), artifactId: expect.any(String) } } });
+    expect((await vault.sessionArtifacts("codex", "operator-claim")).some(({ authority }) => authority === "operator")).toBe(true);
+    expect((await vault.store("codex", decision, Date.now(), "operator")).id).not.toBe(agentArtifact.artifactId);
+  });
+
+  it("retains explicit harness errors with evidence and does not invent verification success", async () => {
+    const root = await mkdtemp(join(tmpdir(), "capture-verdict-errors-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "error-session", cwd: process.cwd() };
+    await engine.ingest("codex", { ...common, hook_event_name: "PostToolUse", tool_name: "exec_command", tool_input: { cmd: "pnpm test" }, tool_response: { output: "still running" } });
+    await engine.ingest("codex", { ...common, hook_event_name: "StopFailure", error_type: "provider_error" });
+    const jobs = (await spool.list()).map(({ job }) => job);
+    expect(jobs.find((job) => job.kind === "trajectory")).toMatchObject({ input: { outcome: "failure", outcomeEvidence: { kind: "harness-error", eventId: expect.any(String) } } });
+    expect(JSON.stringify(jobs)).toContain("test verification unknown");
+    expect(JSON.stringify(jobs)).not.toContain("verification passed");
+  });
+
+  it.each(["PreToolUse", "PostToolUseFailure"])("invalidates an operator verdict after a mutating tool: %s", async (hook) => {
+    const root = await mkdtemp(join(tmpdir(), "capture-verdict-stale-"));
+    const current = config(root);
+    const spool = new DurableSpool(current.stateRoot);
+    const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
+    await engine.initialize();
+    const common = { session_id: "stale-verdict", cwd: process.cwd() };
+    await engine.ingest("codex", { ...common, hook_event_name: "HumanDecision", summary: "Checks out", verdict: "success" }, "operator");
+    await engine.ingest("codex", { ...common, hook_event_name: hook, tool_name: "apply_patch" });
+    await engine.ingest("codex", { ...common, hook_event_name: "Stop" });
+    expect((await spool.list()).find(({ job }) => job.kind === "trajectory")?.job).toMatchObject({ input: { outcome: "unknown" } });
   });
 
   it("invalidates stale verification after a later mutation and links tool evidence", async () => {
@@ -264,18 +321,18 @@ describe("capture daemon", () => {
     const spool = new DurableSpool(current.stateRoot);
     const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
     await engine.initialize();
-    const common = { session_id: "path-pages", cwd: process.cwd() };
+    const common = { session_id: "path-pages", cwd: root };
     await engine.ingest("claude-code", { ...common, hook_event_name: "SessionStart" });
     await engine.ingest("claude-code", {
       ...common,
       hook_event_name: "PostToolUse",
       tool_name: "Edit",
-      tool_input: { file_path: Array.from({ length: 205 }, (_, index) => join(process.cwd(), `file-${index}.ts`)) },
+      tool_input: { file_path: Array.from({ length: 205 }, (_, index) => join(root, `file-${index}.ts`)) },
     });
     await engine.ingest("claude-code", {
       ...common,
       hook_event_name: "FileChanged",
-      file_path: join(process.cwd(), "package.json"),
+      file_path: join(root, "package.json"),
       event: "change",
     });
 
@@ -298,7 +355,7 @@ describe("capture daemon", () => {
     const engine = new CaptureEngine(current, new StateStore(current.stateRoot), new HookVault(current.vaultRoot), spool);
     await engine.initialize();
     for (const [sessionId, tool] of [["comparison-a", "Read"], ["comparison-b", "Search"]] as const) {
-      const common = { session_id: sessionId, cwd: process.cwd() };
+      const common = { session_id: sessionId, cwd: root };
       await engine.ingest("codex", { ...common, hook_event_name: "SessionStart" });
       await engine.ingest("codex", { ...common, hook_event_name: "UserPromptSubmit", prompt: "Fix the same issue" });
       await engine.ingest("codex", { ...common, hook_event_name: "PreToolUse", tool_name: tool, tool_use_id: `${sessionId}-tool` });
@@ -480,7 +537,7 @@ describe("capture daemon", () => {
     expect(jobs).toHaveLength(jobsBeforeRetry.length);
     const trajectories = jobs.filter((job) => job.kind === "trajectory");
     expect(trajectories).toHaveLength(2);
-    expect(trajectories.map(({ input }) => input.outcome)).toEqual(["success", "unknown"]);
+    expect(trajectories.map(({ input }) => input.outcome)).toEqual(["unknown", "unknown"]);
     expect(trajectories.map(({ input }) => input.id)).toEqual([
       expect.stringMatching(/:unit-1$/),
       expect.stringMatching(/:unit-2$/),

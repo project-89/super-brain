@@ -16,6 +16,7 @@ import {
   authorizeEventAccess,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type FoldIngestionCursor,
   type FoldSdkStore,
 } from "@_89/fold-sdk";
 import {
@@ -256,6 +257,11 @@ export class JournalSdkRegistry implements FoldSdkRegistry {
 
 export class PostgresSdkRegistry implements FoldSdkRegistry {
   private readonly database: PostgresFoldDatabase;
+  async eventById(tenant: TenantKey, access: FoldSdkAccessContext, eventId: string): Promise<FoldLogEntry | undefined> {
+    if (access.workspaceId !== tenant.workspaceId || (access.organizationId ?? DEFAULT_ORGANIZATION_ID) !== tenant.organizationId) return undefined;
+    const entry = await this.database.eventById(tenant, eventId);
+    return entry !== undefined && authorizeEventAccess(entry.event, access).allowed ? entry : undefined;
+  }
   private readonly sdks = new Map<string, FoldSdk>();
 
   constructor(options: PostgresFoldDatabaseOptions) {
@@ -266,16 +272,78 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
     return this.database.open();
   }
 
-  async sdkFor(tenant: TenantKey): Promise<FoldSdk> {
+  async sdkFor(
+    tenant: TenantKey,
+    selection?: {
+      readonly kinds?: readonly string[];
+      readonly kindPrefixes?: readonly string[];
+      readonly latestBySession?: boolean;
+      readonly trajectoryTaskId?: string;
+      readonly transcriptRunId?: string;
+      readonly transcriptChunkRunIds?: readonly string[];
+    },
+  ): Promise<FoldSdk> {
     await this.open();
-    const key = tenantStorageKey(tenant);
+    const key = `${tenantStorageKey(tenant)}:${JSON.stringify(selection ?? {})}`;
     let sdk = this.sdks.get(key);
     if (sdk === undefined) {
-      sdk = new FoldSdk(this.database.store(tenant));
-      this.sdks.set(key, sdk);
+      sdk = new FoldSdk(this.database.store(tenant, selection));
     }
+    this.sdks.delete(key);
+    this.sdks.set(key, sdk);
+    while (this.sdks.size > 16) this.sdks.delete(this.sdks.keys().next().value!);
     return sdk;
   }
+
+  dataQuality(tenant: TenantKey, access: FoldSdkAccessContext) {
+    return this.database.workspaceDataQuality(tenant, access);
+  }
+
+  memories(tenant: TenantKey, access: FoldSdkAccessContext) {
+    return this.database.workspaceMemories(tenant, access);
+  }
+
+  memoryCandidates(tenant: TenantKey, access: FoldSdkAccessContext) {
+    return this.database.workspaceMemoryCandidates(tenant, access);
+  }
+
+  trajectoryTasks(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+    options: Parameters<PostgresFoldDatabase["workspaceTrajectoryTasks"]>[2],
+  ) {
+    return this.database.workspaceTrajectoryTasks(tenant, access, options);
+  }
+
+  eventPage(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+    options: Parameters<PostgresFoldDatabase["readVisibleEventPage"]>[2],
+  ) {
+    return this.database.readVisibleEventPage(tenant, access, options);
+  }
+
+  async ingestionEntries(tenant: TenantKey, access: FoldSdkAccessContext, options: {
+    readonly after?: FoldIngestionCursor; readonly includeDrafts?: boolean; readonly kinds?: readonly string[]; readonly limit: number;
+  }) {
+    if (access.organizationId !== tenant.organizationId || access.workspaceId !== tenant.workspaceId) throw new TypeError("ingestion access tenant mismatch");
+    const page = await this.database.readIngestionPage(tenant, options);
+    return { ...page, items: page.items.filter(({ entry }) => authorizeEventAccess(entry.event, access).allowed) };
+  }
+
+  latestIngestionCursor(tenant: TenantKey, access: FoldSdkAccessContext, options: { readonly kinds?: readonly string[]; readonly includeDrafts?: boolean }) {
+    return this.database.latestIngestionCursor(tenant, { ...options, access });
+  }
+
+  ingestionConsumerStatus(tenant: TenantKey, access: FoldSdkAccessContext, consumerId: string, options: { readonly kinds?: readonly string[]; readonly includeDrafts?: boolean }) {
+    return this.database.ingestionConsumerStatus(tenant, consumerId, { ...options, access });
+  }
+
+  migrateConsumerCursor(tenant: TenantKey, consumerId: string) { return this.database.migrateConsumerCursor(tenant, consumerId); }
+
+  resetConsumerCursor(tenant: TenantKey, consumerId: string, actorId: string, expectedCursor: FoldIngestionCursor, reason: string) { return this.database.resetConsumerCursor(tenant, consumerId, actorId, expectedCursor, reason); }
+
+  commitIngestionCursor(tenant: TenantKey, consumerId: string, cursor: FoldIngestionCursor) { return this.database.commitIngestionCursor(tenant, consumerId, cursor); }
 
   async streamEntries(
     tenant: TenantKey,
@@ -299,12 +367,10 @@ export class PostgresSdkRegistry implements FoldSdkRegistry {
     access: FoldSdkAccessContext,
     options: { readonly includeDrafts?: boolean; readonly kinds?: readonly string[] },
   ) {
-    const entries = await (await this.sdkFor(tenant)).listEntries(access, {
-      ...(options.includeDrafts ? { include: "canon+draft" as const } : {}),
-      ...(options.kinds === undefined ? {} : { kinds: options.kinds }),
+    return this.database.latestEventCursor(tenant, {
+      ...options,
+      access,
     });
-    const last = entries.at(-1);
-    return last === undefined ? undefined : { t: last.event.at.t, eventId: last.event.id };
   }
 
   close(): Promise<void> {

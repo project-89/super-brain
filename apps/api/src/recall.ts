@@ -7,6 +7,14 @@ import type { SemanticMemoryCandidate } from "@_89/fold-epistemic";
 
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
+const QUERY_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "been", "by", "can", "could",
+  "did", "do", "does", "for", "from", "had", "has", "have", "how", "i", "in",
+  "is", "it", "its", "know", "me", "of", "on", "or", "our", "please", "s",
+  "should", "tell", "that", "the", "their", "them", "there", "these", "they",
+  "this", "to", "us", "was", "we", "were", "what", "when", "where", "which",
+  "who", "why", "will", "with", "would", "you", "your", "about",
+]);
 
 function tokens(value: string): string[] {
   return value
@@ -34,10 +42,10 @@ interface ScoredDocument {
 }
 
 export class LocalLexicalMemoryRanker implements MemoryRanker {
-  readonly descriptor = { id: "local-bm25-v1", kind: "lexical" } as const;
+  readonly descriptor = { id: "local-bm25-v2", kind: "lexical" } as const;
 
   async rank(request: MemoryRankingRequest): Promise<readonly SemanticMemoryCandidate[]> {
-    const queryTokens = [...new Set(tokens(request.query))];
+    const queryTokens = [...new Set(tokens(request.query).filter((token) => !QUERY_STOP_WORDS.has(token)))];
     if (queryTokens.length === 0 || request.documents.length === 0) return [];
 
     const documentTokens = request.documents.map((document) => tokens(documentText(document)));

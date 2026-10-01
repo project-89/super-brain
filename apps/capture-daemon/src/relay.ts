@@ -11,6 +11,7 @@ export interface CaptureRelayRequest {
   readonly url: string;
   readonly source: HookSource;
   readonly token: string;
+  readonly authority?: "agent" | "operator";
   readonly body: string;
   readonly fetcher?: typeof fetch;
   readonly attempts?: number;
@@ -42,7 +43,7 @@ export async function postCaptureRelay(request: CaptureRelayRequest): Promise<vo
         headers: {
           "content-type": "application/json",
           "x-agent-source": request.source,
-          "x-super-brain-hook-token": request.token,
+          [request.authority === "operator" ? "x-super-brain-operator-token" : "x-super-brain-hook-token"]: request.token,
         },
         body: request.body,
         signal: AbortSignal.timeout(timeoutMs),

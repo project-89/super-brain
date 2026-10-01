@@ -38,3 +38,13 @@ Command strings are executed by a shell when `nodeCommandRunner` is used. Hosts
 must treat oracle configuration as trusted input or supply a restricted runner.
 
 See [`PROVENANCE.md`](./PROVENANCE.md) for pinned sources and extraction limits.
+# Project retrieval evaluation
+
+`fold-eval` also provides a read-only, project-scoped retrieval benchmark runner.
+Prepare private question/source drafts, capture hash-bound search results, and
+summarize explicitly supplied human judgments without promoting memories or
+writing canonical feedback. Run `pnpm --filter @_89/fold-eval build`, then
+`node packages/fold-eval/dist/retrieval-main.js --help` from the repository root.
+See [the workflow guide](../../docs/RETRIEVAL_EVALUATION.md) for authoring, run,
+review, denominators, and limitations. Draft ground truth and judgments are
+explicitly unreviewed until an operator reviews them.

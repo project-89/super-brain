@@ -5,6 +5,7 @@ import { SuperBrainClient } from "@_89/super-brain-client";
 import { z } from "zod";
 
 import { CaptureBridge, type CaptureCheckpoint } from "./capture.js";
+import { configuredProjectIds, projectScopeIdsSchema, resolveRetrievalScope } from "./project-scope.js";
 
 function required(value: string | undefined, label: string): string {
   if (value === undefined || value.trim().length === 0) throw new TypeError(`${label} is required`);
@@ -15,16 +16,24 @@ function jsonResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
+const workspaceId = required(process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE");
+const defaultProjectIds = configuredProjectIds(process.env.SUPER_BRAIN_PROJECT_IDS);
 const api = new SuperBrainClient({
   baseUrl: required(process.env.SUPER_BRAIN_URL ?? process.env.FOLD_API_URL, "SUPER_BRAIN_URL"),
   organizationId: process.env.SUPER_BRAIN_ORGANIZATION ?? process.env.FOLD_API_ORGANIZATION ?? "local",
-  workspaceId: required(process.env.SUPER_BRAIN_WORKSPACE ?? process.env.FOLD_API_WORKSPACE, "SUPER_BRAIN_WORKSPACE"),
+  workspaceId,
   token: required(process.env.SUPER_BRAIN_TOKEN ?? process.env.FOLD_API_TOKEN, "SUPER_BRAIN_TOKEN"),
   recallTelemetry: {
     ...(process.env.SUPER_BRAIN_SESSION_ID === undefined ? {} : { sessionId: process.env.SUPER_BRAIN_SESSION_ID }),
     ...(process.env.SUPER_BRAIN_TASK_ID === undefined ? {} : { taskId: process.env.SUPER_BRAIN_TASK_ID }),
     detail: "super-brain-mcp",
   },
+});
+
+const retrievalScope = (input: { readonly projectIds?: readonly string[]; readonly broaderDiscovery?: boolean }) => resolveRetrievalScope(input, {
+  workspaceId,
+  ...(defaultProjectIds === undefined ? {} : { defaultProjectIds }),
+  loadProjectPage: (cursor) => api.identityPage<{ readonly id: string }>("projects", { limit: 100, ...(cursor === undefined ? {} : { cursor }) }),
 });
 
 const captureUrl = process.env.SUPER_BRAIN_CAPTURE_URL;
@@ -45,46 +54,63 @@ const capture = captureUrl === undefined || captureToken === undefined
 
 const server = new McpServer({ name: "super-brain", version: "0.1.0" });
 
+server.registerTool("super_brain_projects", {
+  title: "List Authorized Projects",
+  description: "Discover authorized project names, original IDs, and current canonical IDs before selecting task context. Returns one cursor page; follow nextCursor for more. Names and paths do not automatically select or verify a task identity.",
+  inputSchema: {
+    cursor: z.string().trim().min(1).max(2000).optional(),
+    limit: z.number().int().min(1).max(100).default(50),
+  },
+}, async ({ cursor, limit }) => {
+  const page = await api.identityPage<{ readonly id: string; readonly name: string; readonly canonicalProjectId: string }>("projects", { limit, ...(cursor === undefined ? {} : { cursor }) });
+  if (page.scope.workspaceId !== workspaceId || !Array.isArray(page.items)) throw new TypeError("Project catalog returned an invalid workspace scope");
+  return jsonResult(page);
+});
+
 server.registerTool("super_brain_search", {
   title: "Search Super Brain Memory",
-  description: "Search authorized durable memory before planning or making a project decision.",
+  description: "Search authorized durable memory before planning or making a project decision. Requires accessible projectIds or configured project context; broaderDiscovery:true explicitly opts into authorized cross-project discovery. Project-filtered recall includes matching projects and explicitly general memories, excluding unresolved applicability. General never expands workspace or organization access.",
   inputSchema: {
     query: z.string().trim().min(1).max(500),
-    projectIds: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
+    projectIds: projectScopeIdsSchema.optional(),
+    broaderDiscovery: z.boolean().optional(),
     tags: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
     sources: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
     limit: z.number().int().min(1).max(20).default(8),
   },
-}, async ({ query, projectIds, tags, sources, limit }) => {
+}, async ({ query, projectIds, broaderDiscovery, tags, sources, limit }) => {
+  const scope = await retrievalScope({ ...(projectIds === undefined ? {} : { projectIds }), ...(broaderDiscovery === undefined ? {} : { broaderDiscovery }) });
   const result = await api.rankMemories({
     query,
     limit,
-    ...(projectIds === undefined ? {} : { projectIds }),
+    ...(scope.kind === "project" ? { projectIds: scope.projectIds } : {}),
     ...(tags === undefined ? {} : { tags }),
     ...(sources === undefined ? {} : { sources }),
   });
-  return jsonResult(result);
+  return jsonResult({ ...result, retrievalScope: scope });
 });
 
 server.registerTool("super_brain_context", {
   title: "Ask Super Brain",
-  description: "Answer a question from authorized memory and return exact memory citations and ranking provenance.",
+  description: "Answer a question from authorized memory and return exact memory citations and ranking provenance. Requires accessible projectIds or configured project context; broaderDiscovery:true explicitly opts into authorized cross-project discovery. Project-filtered recall excludes unresolved applicability and includes explicitly general memories only within existing authorization.",
   inputSchema: {
     question: z.string().trim().min(1).max(2_000),
-    projectIds: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
+    projectIds: projectScopeIdsSchema.optional(),
+    broaderDiscovery: z.boolean().optional(),
     actorId: z.string().trim().min(1).max(300).optional(),
     limit: z.number().int().min(1).max(10).default(5),
   },
-}, async ({ question, projectIds, actorId, limit }) => {
+}, async ({ question, projectIds, broaderDiscovery, actorId, limit }) => {
+  const scope = await retrievalScope({ ...(projectIds === undefined ? {} : { projectIds }), ...(broaderDiscovery === undefined ? {} : { broaderDiscovery }) });
   const result = await api.askReasoning({
     question,
     limit,
-    ...(projectIds === undefined ? {} : { projectIds }),
+    ...(scope.kind === "project" ? { projectIds: scope.projectIds } : {}),
     ...(actorId === undefined ? {} : { actorId }),
   });
   const intentionIds = result.steering?.intentions.map(({ id }) => id) ?? [];
   if (capture !== undefined && intentionIds.length > 0) await capture.steering(intentionIds);
-  return jsonResult(result);
+  return jsonResult({ ...result, retrievalScope: scope });
 });
 
 server.registerTool("super_brain_checkpoint", {
@@ -118,22 +144,24 @@ server.registerTool("super_brain_checkpoint", {
 
 server.registerTool("super_brain_propose_memory", {
   title: "Propose Super Brain Memory",
-  description: "Propose a durable project memory backed by existing canonical event IDs; proposal remains reviewable.",
+  description: "Propose a durable memory backed by canonical event IDs; proposal remains reviewable. Project applicability requires project IDs. General means explicitly reusable within the authorized workspace, never cross-organization access. Omitted applicability with no project IDs is unresolved, not general.",
   inputSchema: {
     summary: z.string().trim().min(1).max(500),
     content: z.string().trim().min(1).max(10_000),
     evidenceEventIds: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
     projectIds: z.array(z.string().trim().min(1).max(300)).max(20).default([]),
+    applicability: z.enum(["project", "general", "unresolved"]).optional(),
     tags: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
     confidence: z.number().finite().min(0).max(1).default(0.8),
     salience: z.number().finite().min(0).max(1).default(0.7),
   },
-}, async ({ summary, content, evidenceEventIds, projectIds, tags, confidence, salience }) => jsonResult(
+}, async ({ summary, content, evidenceEventIds, projectIds, applicability, tags, confidence, salience }) => jsonResult(
   await api.proposeMemoryCandidate({
     source: "harness-proposal",
     summary,
     content: { statement: content },
     projectIds,
+    ...(applicability === undefined ? {} : { applicability }),
     tags,
     evidence: evidenceEventIds.map((eventId) => ({ eventId })),
     confidence,

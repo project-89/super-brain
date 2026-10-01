@@ -11,6 +11,7 @@ import {
   HookInbox,
   HookVault,
   StateStore,
+  SpoolProcessor,
   parseCaptureConfig,
 } from "../src/index.js";
 
@@ -40,10 +41,15 @@ describe("capture operator settings", () => {
     await engine.initialize();
     const artifact = await vault.store("codex", { session_id: "session-a", hook_event_name: "PostToolUse", output: "complete" }, 1);
     const update = vi.fn(async (patch) => ({ ...config, ...patch }));
-    const server = new CaptureHttpServer(config, engine, spool, update);
+    const delivery = new SpoolProcessor(config, spool);
+    const server = new CaptureHttpServer(config, engine, spool, update, undefined, undefined, () => delivery.snapshot());
     const address = await server.start();
     const url = `http://${address.host}:${address.port}/settings`;
     try {
+      const health = await fetch(`http://${address.host}:${address.port}/health`);
+      await expect(health.json()).resolves.toMatchObject({
+        status: "ok", delivery: { status: "idle", countersSinceStart: { attempted: 0, delivered: 0, failures: 0 } },
+      });
       expect((await fetch(url)).status).toBe(401);
       const headers = { "x-super-brain-operator-token": "operator-token" };
       const initial = await fetch(url, { headers });
@@ -68,6 +74,18 @@ describe("capture operator settings", () => {
         restartRequired: true,
       });
       expect(update).toHaveBeenCalledOnce();
+
+      const decisionUrl = `http://${address.host}:${address.port}/decision`;
+      const decision = { session_id: "decision-session", summary: "Checked the outcome", verdict: "success" };
+      expect((await fetch(decisionUrl, { method: "POST", headers: { "x-super-brain-hook-token": "hook-token" }, body: JSON.stringify(decision) })).status).toBe(401);
+      const ingest = vi.spyOn(engine, "ingest");
+      expect((await fetch(decisionUrl, { method: "POST", headers, body: JSON.stringify(decision) })).status).toBe(202);
+      expect(ingest).toHaveBeenLastCalledWith("unknown", expect.objectContaining({ hook_event_name: "HumanDecision" }), "operator");
+      expect((await fetch(`http://${address.host}:${address.port}/hook`, {
+        method: "POST", headers: { "x-super-brain-hook-token": "hook-token" },
+        body: JSON.stringify({ ...decision, hook_event_name: "HumanDecision", authority: "operator" }),
+      })).status).toBe(202);
+      expect(ingest).toHaveBeenLastCalledWith("unknown", expect.objectContaining({ authority: "operator" }), "agent");
 
       const artifactUrl = `http://${address.host}:${address.port}/hook-artifacts/codex/${artifact.id}`;
       expect((await fetch(artifactUrl)).status).toBe(401);

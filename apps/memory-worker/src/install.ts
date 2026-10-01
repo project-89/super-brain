@@ -13,6 +13,7 @@ const WORKER_ENVIRONMENT_KEYS = [
   "SUPER_BRAIN_TOKEN",
   "FOLD_TRANSCRIPT_VAULT",
   "FOLD_TRANSCRIPT_VAULT_KEY_FILE",
+  "FOLD_MEMORY_PROCESSING_ROOT",
 ] as const;
 
 function xml(value: string): string {

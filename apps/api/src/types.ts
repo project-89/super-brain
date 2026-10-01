@@ -1,12 +1,15 @@
 import type { Author } from "@_89/fold";
+import type { MemoryCandidateView, PersonalMemory } from "@_89/fold-epistemic";
 import type {
   FoldSdk,
   FoldSdkAccessContext,
   FoldSdkCursor,
+  FoldIngestionCursor,
   MemoryRanker,
 } from "@_89/fold-sdk";
 import type { FoldLogEntry } from "@_89/fold";
 import type { ReasoningProvider, ReasoningProviderCatalog } from "./reasoning.js";
+import type { DataQualityReport } from "./data-quality.js";
 import type { RequestRateLimiter } from "./rate-limit.js";
 import type {
   ExternalIdentityProvisioningEvent,
@@ -32,6 +35,7 @@ export const API_CAPABILITIES = [
   "memories:write",
   "trajectories:read",
   "trajectories:write",
+  "trajectories:review",
   "transcripts:read",
   "transcripts:write",
   "fleet:read",
@@ -77,7 +81,60 @@ export interface MembershipResolver {
 }
 
 export interface FoldSdkRegistry {
-  sdkFor(tenant: TenantKey): Promise<FoldSdk>;
+  eventById?(tenant: TenantKey, access: FoldSdkAccessContext, eventId: string): Promise<FoldLogEntry | undefined>;
+  sdkFor(
+    tenant: TenantKey,
+    selection?: {
+      readonly kinds?: readonly string[];
+      readonly kindPrefixes?: readonly string[];
+      readonly latestBySession?: boolean;
+      readonly trajectoryTaskId?: string;
+      readonly transcriptRunId?: string;
+      readonly transcriptChunkRunIds?: readonly string[];
+    },
+  ): Promise<FoldSdk>;
+  dataQuality?(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+  ): Promise<DataQualityReport | undefined>;
+  memories?(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+  ): Promise<readonly PersonalMemory[]>;
+  memoryCandidates?(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+  ): Promise<readonly MemoryCandidateView[]>;
+  trajectoryTasks?(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+    options: {
+      readonly limit: number;
+      readonly before?: { readonly lastRecordedAt: number; readonly taskId: string };
+    },
+  ): Promise<{
+    readonly tasks: readonly {
+      readonly taskId: string;
+      readonly trajectoryCount: number;
+      readonly successCount: number;
+      readonly failureCount: number;
+      readonly unknownCount: number;
+      readonly lastRecordedAt: number;
+    }[];
+    readonly total: number;
+    readonly nextCursor?: { readonly lastRecordedAt: number; readonly taskId: string };
+  }>;
+  eventPage?(
+    tenant: TenantKey,
+    access: FoldSdkAccessContext,
+    options: {
+      readonly includeDrafts?: boolean;
+      readonly kinds?: readonly string[];
+      readonly limit: number;
+      readonly before?: FoldSdkCursor;
+      readonly identity?: Readonly<Partial<Record<"session" | "run" | "project" | "agent", string>>>;
+    },
+  ): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly total: number; readonly nextCursor?: FoldSdkCursor }>;
   streamEntries?(
     tenant: TenantKey,
     access: FoldSdkAccessContext,
@@ -100,6 +157,16 @@ export interface FoldSdkRegistry {
     },
   ): Promise<FoldSdkCursor | undefined>;
   consumerCursor?(tenant: TenantKey, consumerId: string): Promise<FoldSdkCursor | undefined>;
+  ingestionEntries?(tenant: TenantKey, access: FoldSdkAccessContext, options: {
+    readonly after?: FoldIngestionCursor; readonly includeDrafts?: boolean; readonly kinds?: readonly string[]; readonly limit: number;
+  }): Promise<{ readonly items: readonly { readonly entry: FoldLogEntry; readonly cursor: FoldIngestionCursor }[]; readonly scannedThrough?: FoldIngestionCursor }>;
+  latestIngestionCursor?(tenant: TenantKey, access: FoldSdkAccessContext, options: { readonly kinds?: readonly string[]; readonly includeDrafts?: boolean }): Promise<FoldIngestionCursor>;
+  ingestionConsumerStatus?(tenant: TenantKey, access: FoldSdkAccessContext, consumerId: string, options: { readonly kinds?: readonly string[]; readonly includeDrafts?: boolean }): Promise<{
+    readonly cursor: FoldIngestionCursor | null; readonly legacyCursor: FoldSdkCursor | null; readonly migrationRequired: boolean; readonly headCursor: FoldIngestionCursor;
+  }>;
+  migrateConsumerCursor?(tenant: TenantKey, consumerId: string): Promise<void>;
+  resetConsumerCursor?(tenant: TenantKey, consumerId: string, actorId: string, expectedCursor: FoldIngestionCursor, reason: string): Promise<void>;
+  commitIngestionCursor?(tenant: TenantKey, consumerId: string, cursor: FoldIngestionCursor): Promise<void>;
   commitConsumerCursor?(
     tenant: TenantKey,
     consumerId: string,

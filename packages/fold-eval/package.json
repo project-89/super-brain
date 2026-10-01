@@ -17,7 +17,8 @@
   },
   "files": ["dist", "README.md", "PROVENANCE.md"],
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean && tsup src/retrieval-main.ts --format esm",
+    "retrieval": "node dist/retrieval-main.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

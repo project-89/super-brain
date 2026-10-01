@@ -9,7 +9,7 @@ import {
 } from "@_89/fold-activity";
 import type { JsonValue } from "@_89/fold";
 import type { TrajectoryInput, TrajectoryTreeRecord } from "@_89/fold-trajectory";
-import { RecordAnonymizer } from "@_89/super-brain-importer";
+import { RecordAnonymizer, toolResultFailed } from "@_89/super-brain-importer";
 
 import { refreshProject, resolveProject } from "./project.js";
 import { readExposedReasoningDelta } from "./reasoning.js";
@@ -23,6 +23,7 @@ import {
 } from "./storage.js";
 import type {
   CaptureConfig,
+  CaptureAuthority,
   CapturedStep,
   CaptureSession,
   CaptureState,
@@ -126,13 +127,10 @@ function verificationKind(payload: Record<string, unknown>): "test" | "build" | 
   return undefined;
 }
 
-function toolSucceeded(name: string, payload: Record<string, unknown>): boolean {
+function toolSucceeded(name: string, payload: Record<string, unknown>): boolean | null {
   if (name === "PostToolUseFailure") return false;
-  if (payload.is_error === true || payload.success === false) return false;
-  const response = object(payload.tool_response) ?? object(payload.toolResponse) ?? object(payload.result);
-  if (response?.is_error === true || response?.success === false) return false;
-  const exitCode = response?.exit_code ?? response?.exitCode;
-  return typeof exitCode === "number" ? exitCode === 0 : true;
+  const failed = toolResultFailed({ ...payload, output: payload.tool_response ?? payload.toolResponse ?? payload.result ?? payload.output });
+  return failed === null ? null : !failed;
 }
 
 function stamp(artifact: VaultArtifact, index: number, label: string) {
@@ -176,6 +174,7 @@ function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
   const {
     lastVerification: _lastVerification,
     explicitOutcome: _explicitOutcome,
+    outcomeEvidence: _outcomeEvidence,
     reviewText: _reviewText,
     ...remaining
   } = session;
@@ -183,7 +182,7 @@ function withoutVerifiedOutcome(session: CaptureSession): CaptureSession {
 }
 
 function completedResponse(step: CapturedStep): boolean {
-  return step.role === "model_output" && step.content === "Agent completed a response";
+  return step.role === "model_output" && (step.content === "Agent completed a response" || step.content.startsWith("Agent response failed"));
 }
 
 function promptStart(step: CapturedStep): boolean {
@@ -427,8 +426,8 @@ export class CaptureEngine {
     };
   }
 
-  ingest(source: HookSource, payloadInput: unknown): Promise<{ readonly artifactId: string }> {
-    const operation = this.chain.then(() => this.ingestInternal(source, payloadInput));
+  ingest(source: HookSource, payloadInput: unknown, authority: CaptureAuthority = "agent"): Promise<{ readonly artifactId: string }> {
+    const operation = this.chain.then(() => this.ingestInternal(source, payloadInput, authority));
     this.chain = operation.catch(() => undefined);
     return operation;
   }
@@ -439,11 +438,11 @@ export class CaptureEngine {
     return operation;
   }
 
-  private async nextArtifact(source: HookSource, payload: unknown): Promise<VaultArtifact> {
+  private async nextArtifact(source: HookSource, payload: unknown, authority: CaptureAuthority = "agent"): Promise<VaultArtifact> {
     const eventTime = Math.max(Date.now(), this.state.lastEventTime + 1);
     this.state = { ...this.state, lastEventTime: eventTime };
     await this.stateStore.save(this.state);
-    return this.vault.store(source, payload, eventTime);
+    return this.vault.store(source, payload, eventTime, authority);
   }
 
   private context(session: CaptureSession): TerminalSensorContext {
@@ -590,10 +589,10 @@ export class CaptureEngine {
     return { key, session, resumed: false, created: true };
   }
 
-  private async ingestInternal(source: HookSource, payloadInput: unknown): Promise<{ readonly artifactId: string }> {
+  private async ingestInternal(source: HookSource, payloadInput: unknown, authority: CaptureAuthority): Promise<{ readonly artifactId: string }> {
     const payload = object(payloadInput);
     if (payload === undefined) throw new TypeError("hook payload must be a JSON object");
-    const artifact = await this.nextArtifact(source, payload);
+    const artifact = await this.nextArtifact(source, payload, authority);
     const previousArtifactTime = this.state.seenArtifactTimes?.[artifact.id];
     if (
       previousArtifactTime !== undefined &&
@@ -677,6 +676,7 @@ export class CaptureEngine {
       });
     } else if (name === "PreToolUse") {
       const tool = toolName(payload);
+      if (/edit|write|patch|notebook/i.test(tool)) session = withoutVerifiedOutcome(session);
       const verification = verificationKind(payload);
       session = await this.observe(session, artifact, index++, {
         kind: "tool_running",
@@ -750,7 +750,7 @@ export class CaptureEngine {
         kind: "tool_result",
         data: {
           toolName: tool,
-          status: success ? "completed" : "failed",
+          status: success === null ? "unknown" : success ? "completed" : "failed",
           artifactId: artifact.id,
           ...(durationMs === undefined ? {} : { durationMs }),
           ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
@@ -764,7 +764,7 @@ export class CaptureEngine {
       session = stepFor(session, {
         nodeKind: "observation",
         role: "tool_call_response",
-        content: `${tool} ${success ? "completed" : "failed"}`,
+        content: `${tool} ${success === null ? "returned without a verified result" : success ? "completed" : "failed"}`,
         toolName: tool,
         artifactId: artifact.id,
         eventId: session.lastEventId!,
@@ -782,8 +782,8 @@ export class CaptureEngine {
         ...(repositoryChanged ? refreshedProject.changedPaths ?? [] : []),
       ])];
       const mutatingTool = /edit|write|patch|notebook/i.test(tool) || repositoryChanged;
-      if (success && mutatingTool) session = withoutVerifiedOutcome(session);
-      if (success && mutatingTool) {
+      if (mutatingTool) session = withoutVerifiedOutcome(session);
+      if (repositoryChanged || (mutatingTool && (success === true || paths.length > 0))) {
         const pathPages = pagesOf(paths, 200);
         for (const [pathPage, pagePaths] of pathPages.entries()) {
           session = await this.observe(session, artifact, index++, {
@@ -795,6 +795,7 @@ export class CaptureEngine {
               pathPageCount: pathPages.length,
               pathCount: paths.length,
               artifactId: artifact.id,
+              toolResult: success === null ? "unknown" : success ? "success" : "failure",
               ...(beforeProject.head === undefined ? {} : { headBefore: beforeProject.head }),
               ...(refreshedProject.head === undefined ? {} : { headAfter: refreshedProject.head }),
               ...(beforeProject.worktreeDigest === undefined ? {} : { worktreeBefore: beforeProject.worktreeDigest }),
@@ -806,11 +807,13 @@ export class CaptureEngine {
         }
       }
       if (verification !== undefined) {
+        const { lastVerification: _previousVerification, ...withoutLastVerification } = session;
+        session = withoutLastVerification;
         session = await this.observe(session, artifact, index++, {
           kind: "verification_result",
           data: {
             category: verification,
-            status: success ? "success" : "failure",
+            status: success === null ? "unknown" : success ? "success" : "failure",
             toolName: tool,
             artifactId: artifact.id,
             ...(durationMs === undefined ? {} : { durationMs }),
@@ -821,7 +824,7 @@ export class CaptureEngine {
           ...stepFor(session, {
             nodeKind: "observation",
             role: "tool_call_response",
-            content: `${verification} verification ${success ? "passed" : "failed"}`,
+            content: `${verification} verification ${success === null ? "unknown" : success ? "passed" : "failed"}`,
             toolName: tool,
             artifactId: artifact.id,
             eventId: session.lastEventId!,
@@ -829,7 +832,7 @@ export class CaptureEngine {
             ...(durationMs === undefined ? {} : { durationMs }),
             ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
           }),
-          lastVerification: success ? "success" : "failure",
+          ...(success === null ? {} : { lastVerification: success ? "success" : "failure" }),
         };
       }
     } else if (name === "FileChanged") {
@@ -877,7 +880,7 @@ export class CaptureEngine {
       }
       session = await this.observe(session, artifact, index++, { kind: "reasoning_checkpoint", data });
       session = stepFor(session, {
-        nodeKind: "decision",
+        nodeKind: text(payload.decision) === undefined ? "observation" : "decision",
         role: "model_thought",
         content: bounded(summary, 2_000),
         artifactId: artifact.id,
@@ -889,10 +892,12 @@ export class CaptureEngine {
       const verdict = payload.verdict === "success" || payload.verdict === "failure" ? payload.verdict : undefined;
       if (summary === undefined) throw new TypeError("human decision requires summary");
       session = await this.observe(session, artifact, index++, {
-        kind: "human_decision",
+        kind: authority === "operator" ? "human_decision" : "harness_event",
         data: {
           summary: bounded(summary, 2_000),
           artifactId: artifact.id,
+          authority,
+          ...(authority === "operator" ? {} : { hookEvent: "HumanDecision", classification: "agent-reported-decision" }),
           ...(verdict === undefined ? {} : { verdict }),
           ...(typeof payload.confidence === "number" && Number.isFinite(payload.confidence)
             ? { confidence: Math.max(0, Math.min(1, payload.confidence)) }
@@ -911,8 +916,9 @@ export class CaptureEngine {
           eventId: session.lastEventId!,
           ...(session.currentTurnId === undefined ? {} : { turnId: session.currentTurnId }),
         }),
-        ...(verdict === undefined ? {} : {
+        ...(verdict === undefined || authority !== "operator" ? {} : {
           explicitOutcome: verdict,
+          outcomeEvidence: { kind: "operator-verdict", eventId: session.lastEventId!, artifactId: artifact.id },
           reviewText: `VERDICT: ${verdict === "success" ? "approve" : "reject"}${confidence === undefined ? "" : `\nCONFIDENCE: ${confidence}`}`,
         }),
       };
@@ -973,6 +979,7 @@ export class CaptureEngine {
         session = {
           ...session,
           explicitOutcome: "failure",
+          outcomeEvidence: { kind: "harness-error", eventId: session.lastEventId!, artifactId: artifact.id },
           reviewText: `VERDICT: reject\nDETAIL: ${text(payload.error_type) ?? "agent response failed"}`,
         };
       }
@@ -1112,7 +1119,7 @@ export class CaptureEngine {
             },
           });
           next = stepFor(next, {
-            nodeKind: "decision",
+            nodeKind: "observation",
             role: "model_thought",
             content: summary.text,
             artifactId: reasoningArtifact.id,
@@ -1151,10 +1158,27 @@ export class CaptureEngine {
           ? undefined
           : `prompt-${privateDigest(this.privacy, "prompt", normalizedPrompt).slice(0, 24)}`;
       const steps = session.steps.slice(unit.startStepNumber - 1, unit.endStepNumber);
-      const humanDecision = [...steps].reverse()
-        .map((step) => step.artifactId === undefined ? undefined : artifactsById.get(step.artifactId)?.payload)
-        .find((payload) => payload !== undefined && hookName(payload) === "HumanDecision");
-      const explicitOutcome = humanDecision?.verdict === "success" || humanDecision?.verdict === "failure"
+      let decisionStep: CapturedStep | undefined;
+      for (const step of [...steps].reverse()) {
+        const stored = step.artifactId === undefined ? undefined : artifactsById.get(step.artifactId);
+        const name = stored === undefined ? undefined : hookName(stored.payload);
+        if (name === "FileChanged" || /edit|write|patch|notebook/i.test(step.toolName ?? "")) break;
+        if (stored?.authority === "operator" && name === "HumanDecision" && step.eventId !== undefined) {
+          decisionStep = step;
+          break;
+        }
+      }
+      const decisionArtifact = decisionStep?.artifactId === undefined ? undefined : artifactsById.get(decisionStep.artifactId);
+      const boundaryTime = unit.boundaryStep.artifactId === undefined ? undefined : artifactsById.get(unit.boundaryStep.artifactId)?.eventTime;
+      if (decisionArtifact !== undefined && boundaryTime !== undefined && artifacts.some((item) =>
+        item.eventTime > decisionArtifact.eventTime && item.eventTime <= boundaryTime &&
+        (hookName(item.payload) === "FileChanged" || /edit|write|patch|notebook/i.test(toolName(item.payload)))
+      )) decisionStep = undefined;
+      const humanDecision = decisionStep === undefined ? undefined : decisionArtifact?.payload;
+      const failedBoundary = unit.boundaryStep.artifactId === undefined
+        ? undefined : artifactsById.get(unit.boundaryStep.artifactId);
+      const harnessFailure = failedBoundary !== undefined && hookName(failedBoundary.payload) === "StopFailure" && unit.boundaryStep.eventId !== undefined;
+      const explicitOutcome = harnessFailure ? "failure" : humanDecision?.verdict === "success" || humanDecision?.verdict === "failure"
         ? humanDecision.verdict
         : undefined;
       const inferredOutcome = unitOutcome(steps);
@@ -1175,6 +1199,9 @@ export class CaptureEngine {
         ...(inferredOutcome === undefined ? {} : { lastVerification: inferredOutcome }),
         ...(explicitOutcome === undefined ? {} : {
           explicitOutcome,
+          outcomeEvidence: harnessFailure
+            ? { kind: "harness-error", eventId: unit.boundaryStep.eventId!, artifactId: failedBoundary!.id }
+            : { kind: "operator-verdict", eventId: decisionStep!.eventId!, artifactId: decisionStep!.artifactId! },
           reviewText: `VERDICT: ${explicitOutcome === "success" ? "approve" : "reject"}`,
         }),
       };
@@ -1317,7 +1344,7 @@ export class CaptureEngine {
     let path = session.transcriptPath;
     let ownedSnapshot = false;
     try {
-      path = await this.transcriptSnapshots.store(session.source, session.transcriptPath);
+      path = await this.transcriptSnapshots.store(session.source, session.transcriptPath, session.sessionId);
       ownedSnapshot = true;
     } catch (error) {
       const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -1333,6 +1360,8 @@ export class CaptureEngine {
       deadlineAt: new Date(artifact.eventTime + (ownedSnapshot ? 7 * 24 * 60 * 60_000 : 30 * 60_000)).toISOString(),
       source: session.source,
       path,
+      nativeSessionId: session.sessionId,
+      originalPath: session.transcriptPath,
       ...(ownedSnapshot ? { ownedSnapshot: true as const } : {}),
     });
   }
@@ -1345,7 +1374,9 @@ export class CaptureEngine {
   ): Promise<boolean> {
     const steps = currentUnitSteps(session);
     if (steps.length === 0) return false;
-    const outcome = session.explicitOutcome ?? session.lastVerification ?? "unknown";
+    const hasPendingTools = Object.keys(session.pendingTools ?? {}).length > 0;
+    const outcome = session.outcomeEvidence === undefined || (session.explicitOutcome === "success" && hasPendingTools)
+      ? "unknown" : session.explicitOutcome ?? "unknown";
     const tree = this.treeFor(session, outcome);
     const taskId = tree.taskId;
     const finalStepId = `step-${steps.length + 1}`;
@@ -1376,6 +1407,7 @@ export class CaptureEngine {
         id: session.model ?? session.agent,
       },
       outcome,
+      ...(outcome === "unknown" || session.outcomeEvidence === undefined ? {} : { outcomeEvidence: session.outcomeEvidence }),
       steps: allSteps,
       assignments,
       ...(session.reviewText === undefined ? {} : { reviewText: session.reviewText }),

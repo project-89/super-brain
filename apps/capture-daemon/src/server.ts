@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { CaptureEngine } from "./capture.js";
+import type { DeliverySnapshot } from "./delivery.js";
 import { HookInbox } from "./inbox.js";
 import { DurableSpool, readHookVaultArtifact, readRelayFailureSummary } from "./storage.js";
 import { readTranscriptArtifactPage, type TranscriptVaultSource } from "./transcript-vault.js";
@@ -92,6 +93,7 @@ export class CaptureHttpServer {
     private readonly updatePolicy?: (patch: CapturePolicyPatch) => Promise<CaptureConfig>,
     private readonly vaultEncryptionKey?: Uint8Array,
     private readonly inbox?: HookInbox,
+    private readonly deliverySnapshot?: () => DeliverySnapshot,
   ) {}
 
   async start(): Promise<{ readonly host: string; readonly port: number }> {
@@ -132,6 +134,7 @@ export class CaptureHttpServer {
           ...this.engine.snapshot(),
           ...spool,
           relayFailures,
+          ...(this.deliverySnapshot === undefined ? {} : { delivery: this.deliverySnapshot() }),
           ...(inbox === undefined ? {} : { inbox }),
           policy: {
             reasoning: this.config.reasoningPolicy,
@@ -160,7 +163,7 @@ export class CaptureHttpServer {
         send(response, 405, { error: "method_not_allowed" });
         return;
       }
-      const artifactMatch = /^\/artifacts\/(claude-code|codex)\/([a-f0-9]{64})$/i.exec(url.pathname);
+      const artifactMatch = /^\/artifacts\/(claude-code|codex|gemini|hermes)\/([a-f0-9]{64})$/i.exec(url.pathname);
       if (artifactMatch !== null) {
         if (!authorized(request, this.config.operatorToken, "x-super-brain-operator-token")) {
           send(response, 401, { error: "unauthorized" });
@@ -210,7 +213,11 @@ export class CaptureHttpServer {
         send(response, 404, { error: "not_found" });
         return;
       }
-      if (!authorized(request, this.config.hookToken, "x-super-brain-hook-token")) {
+      const authority = url.pathname === "/decision" ? "operator" : "agent";
+      if (!authorized(request,
+        authority === "operator" ? this.config.operatorToken : this.config.hookToken,
+        authority === "operator" ? "x-super-brain-operator-token" : "x-super-brain-hook-token",
+      )) {
         send(response, 401, { error: "unauthorized" });
         return;
       }
@@ -227,7 +234,7 @@ export class CaptureHttpServer {
         send(response, 202, { accepted: true, inboxId: result.id });
         return;
       }
-      const result = await this.engine.ingest(source, payload);
+      const result = await this.engine.ingest(source, payload, authority);
       send(response, 202, { accepted: true, artifactId: result.artifactId });
     } catch (error) {
       send(response, 400, { error: error instanceof Error ? error.message : "invalid_request" });

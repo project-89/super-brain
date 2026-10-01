@@ -8,6 +8,7 @@ It owns organization-scoped durable tables for:
 
 - append-only workspace events;
 - resumable consumer offsets;
+- ingestion-sequence subscription offsets, separately versioned from source-time cursors;
 - rebuildable projection checkpoints;
 - semantic memory embeddings;
 - organizations, workspaces, memberships, repository enrollments, and
@@ -47,3 +48,30 @@ External identity bindings are control-plane lookup tables because they must be
 resolved before a tenant is known. They contain mappings only, never Fold
 content, and are replaced per provider alongside provider-owned memberships so
 removed identities fail closed.
+
+## Ingestion Subscriptions
+
+Subscriptions use the existing immutable `fold_events.sequence` as a decimal-string
+BIGINT cursor (`{kind:"ingestion",sequence:"123"}`). This is arrival order, not
+source time; chronological lists, event payloads, and projection cursors are unchanged.
+Both append and import acquire the workspace transaction advisory lock **before**
+sequence allocation and retain it through commit. This serializes commits within
+each workspace, preventing a reader from skipping a lower uncommitted sequence.
+Sequence gaps from other tenants or rolled-back transactions are valid and are not
+record counts. Direct SQL ingestion that bypasses this locking protocol is unsupported.
+
+`fold_ingestion_consumer_offsets` retains new principal-scoped positions independently
+of legacy source-time offsets. Migration explicitly initializes replay at sequence 0,
+retains the old row, and cannot rewind an already-migrated consumer. Never translate
+the old timestamp watermark to one sequence: that would omit late historical events.
+Replay is at-least-once; consumers must deduplicate deterministic event/job identities.
+Cursor commits reject backward positions and positions beyond the committed log.
+
+Ingestion pagination orders by the qualified numeric `e.sequence`, never the text
+projection used to transport a BIGINT. Regression tests enumerate more than 1200
+rows through both database pages and real SSE across decimal digit boundaries.
+An explicit administrative cursor reset compares the current sequence under the
+tenant transaction lock, writes an append-only audit row, then resets it to 0 in
+the same transaction. It retains legacy offsets and event/job data. All consumer
+instances must be stopped: the reset is not a generation fence against a stale
+remote process committing an old checkpoint afterward.

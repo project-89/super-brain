@@ -14,12 +14,15 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { FoldApiClient } from "../api";
 import { EmptyState, PageHeader, SearchField } from "../components/Common";
 import { LoadMore } from "../components/LoadMore";
-import { formatRelative } from "../format";
+import { TrajectoryOutcomeReview } from "../components/TrajectoryOutcomeReview";
+import { formatRelative, shortIdentifier } from "../format";
 import type {
   ProjectedTrajectory,
   SharedTrajectoryNode,
   TrajectoryTaskReport,
   TrajectoryTaskSummary,
+  TrajectoryOutcome,
+  TranscriptProjectSummary,
 } from "../types";
 import { useCursorList } from "../use-cursor-list";
 
@@ -42,16 +45,29 @@ function projectionLabel(step: ProjectedTrajectory["steps"][number]): string {
   return step.projection.reason;
 }
 
+function taskProjectId(taskId: string): string | undefined {
+  return taskId.split(":").find((part) => part.startsWith("project-"));
+}
+
+function taskLabel(task: TrajectoryTaskSummary, projectNames: ReadonlyMap<string, string>): string {
+  const decision = task.label ?? task.tree?.nodes.find(({ kind, label }) => kind === "decision" && label.trim().length > 0)?.label;
+  if (decision !== undefined) return decision.replaceAll("**", "");
+  const projectId = taskProjectId(task.taskId);
+  return `${projectId === undefined ? "Project" : projectNames.get(projectId) ?? "Project"} agent run`;
+}
+
 export function TrajectoriesPage({
   tasks: initialTasks,
   total,
   cursor,
+  projects,
   api,
   onImport,
 }: {
   readonly tasks: readonly TrajectoryTaskSummary[];
   readonly total: number;
   readonly cursor?: string;
+  readonly projects: readonly TranscriptProjectSummary[];
   readonly api: FoldApiClient;
   readonly onImport: () => void;
 }) {
@@ -62,7 +78,13 @@ export function TrajectoriesPage({
     keyOf: (task) => task.taskId,
     loadPage: (nextCursor) => api.listTrajectoryTaskPage({ limit: 50, cursor: nextCursor }),
   });
-  const tasks = taskPage.items;
+  const [reviewedCounts, setReviewedCounts] = useState<ReadonlyMap<string, Readonly<Record<TrajectoryOutcome, number>>>>(new Map());
+  const tasks = useMemo(() => taskPage.items.map((task) => {
+    const counts = reviewedCounts.get(task.taskId);
+    return counts === undefined ? task : { ...task, successCount: counts.success, failureCount: counts.failure, unknownCount: counts.unknown };
+  }), [taskPage.items, reviewedCounts]);
+  useEffect(() => { setReviewedCounts(new Map()); }, [initialTasks]);
+  const projectNames = useMemo(() => new Map(projects.map(({ project }) => [project.id, project.name])), [projects]);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedRunId, setSelectedRunId] = useState<string>();
   const [report, setReport] = useState<TrajectoryTaskReport>();
@@ -73,7 +95,7 @@ export function TrajectoriesPage({
   const [query, setQuery] = useState("");
   const filteredTasks = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return needle.length === 0 ? tasks : tasks.filter((task) => `${task.taskId}\n${task.tree.nodes.map(({ label }) => label).join("\n")}`.toLowerCase().includes(needle));
+    return needle.length === 0 ? tasks : tasks.filter((task) => `${task.taskId}\n${task.label ?? ""}\n${task.tree?.nodes.map(({ label }) => label).join("\n") ?? ""}`.toLowerCase().includes(needle));
   }, [query, tasks]);
 
   useEffect(() => {
@@ -121,8 +143,8 @@ export function TrajectoriesPage({
   const divergence = report?.divergences.find(({ trajectoryId }) => trajectoryId === selectedRunId)?.divergence;
   const evaluation = report?.evaluations.find(({ trajectoryId }) => trajectoryId === selectedRunId);
   const selectedTask = tasks.find(({ taskId }) => taskId === selectedTaskId);
-  const classifiedRuns = (selectedTask?.successCount ?? 0) + (selectedTask?.failureCount ?? 0);
-  const unknownRuns = selectedTask?.unknownCount ?? 0;
+  const classifiedRuns = (report?.outcomeCounts?.success ?? selectedTask?.successCount ?? 0) + (report?.outcomeCounts?.failure ?? selectedTask?.failureCount ?? 0);
+  const unknownRuns = report?.outcomeCounts?.unknown ?? selectedTask?.unknownCount ?? 0;
   const nodes = useMemo(() => report === undefined ? new Map() : nodeIndex(report), [report]);
 
   const loadMoreRuns = async () => {
@@ -145,11 +167,26 @@ export function TrajectoriesPage({
     }
   };
 
+  const refreshReviewedRun = async () => {
+    if (selectedTaskId === undefined || report === undefined) return;
+    let next = await api.trajectoryReport(selectedTaskId, { limit: 100 });
+    while (next.runCursor !== undefined && next.records.length < report.records.length) {
+      const page = await api.trajectoryReport(selectedTaskId, { limit: 100, cursor: next.runCursor });
+      next = { ...page, records: [...next.records, ...page.records], projected: [...next.projected, ...page.projected],
+        divergences: [...next.divergences, ...page.divergences], evaluations: [...next.evaluations, ...page.evaluations] };
+    }
+    setReport((current) => current?.taskId === next.taskId ? next : current);
+    if (next.outcomeCounts !== undefined) {
+      const counts = next.outcomeCounts;
+      setReviewedCounts((current) => new Map(current).set(next.taskId, counts));
+    }
+  };
+
   return (
     <div className="page page--trajectories">
       <PageHeader
-        eyebrow="Decision evidence"
-        title="Trajectories"
+        eyebrow="Observed reasoning and outcomes"
+        title="Decision paths"
         actions={<button className="button button--primary" type="button" onClick={onImport}><Import aria-hidden="true" />Import</button>}
       />
 
@@ -170,7 +207,7 @@ export function TrajectoriesPage({
                 className={task.taskId === selectedTaskId ? "is-selected" : undefined}
                 onClick={() => setSelectedTaskId(task.taskId)}
               >
-                <span><strong>{task.taskId}</strong><small>{task.tree.nodes.length} nodes · {task.tree.edges.length} edges</small></span>
+                <span><strong>{taskLabel(task, projectNames)}</strong><small>{taskProjectId(task.taskId) === undefined ? "Unknown project" : projectNames.get(taskProjectId(task.taskId)!) ?? "Unknown project"}{task.nodeCount ?? task.tree?.nodes.length ? ` · ${task.nodeCount ?? task.tree!.nodes.length} steps` : " · Decision path"}</small><code title={task.taskId}>{shortIdentifier(task.taskId, 24, 12)}</code></span>
                 <span className="trajectory-task-list__counts"><b>{task.successCount}</b><i>{task.failureCount}</i>{task.unknownCount > 0 && <small>{task.unknownCount}</small>}</span>
                 <time>{formatRelative(task.lastRecordedAt)}</time>
               </button>
@@ -195,21 +232,21 @@ export function TrajectoriesPage({
             ) : (
               <>
                 <header className="trajectory-report__header">
-                  <div><span className="eyebrow">Task</span><h2>{report.taskId}</h2></div>
+                  <div><span className="eyebrow">{taskProjectId(report.taskId) === undefined ? "Decision task" : projectNames.get(taskProjectId(report.taskId)!) ?? "Decision task"}</span><h2>{selectedTask === undefined ? report.taskId : taskLabel(selectedTask, projectNames)}</h2><code title={report.taskId}>{shortIdentifier(report.taskId, 30, 14)}</code></div>
                   <span>{report.tree.nodes.length} nodes · {report.tree.edges.length} edges</span>
                 </header>
 
                 <div className="trajectory-metrics" aria-label="Trajectory analysis">
                   <div><CircleDot aria-hidden="true" /><span><strong>{report.analysis.traceCount}</strong><small>Runs</small></span></div>
                   <div><Check aria-hidden="true" /><span><strong>{percent(report.analysis.coverage.mappedRatio)}</strong><small>Mapped</small></span></div>
-                  <div><Route aria-hidden="true" /><span><strong>{classifiedRuns}</strong><small>Verified / {unknownRuns} unknown</small></span></div>
+                  <div><Route aria-hidden="true" /><span><strong>{classifiedRuns}</strong><small>Classified / {unknownRuns} unknown</small></span></div>
                   <div><GitBranch aria-hidden="true" /><span><strong>{report.analysis.routes.length}</strong><small>Observed routes</small></span></div>
                 </div>
 
                 <section className="trajectory-consensus">
                   <header><span><span className="eyebrow">Observed evidence</span><h3>Highest-success path</h3></span><small>{report.analysis.incompleteTraceCount} incomplete</small></header>
                   {report.analysis.mostSuccessfulPath.length === 0 ? (
-                    <EmptyState title={classifiedRuns === 0 ? "No verified outcome route" : "No complete route"} />
+                    <EmptyState title={classifiedRuns === 0 ? "No classified outcome route" : "No complete route"} />
                   ) : (
                     <div className="trajectory-path">
                       {report.analysis.mostSuccessfulPath.map((nodeId, index) => {
@@ -253,13 +290,14 @@ export function TrajectoriesPage({
                     ) : (
                       <>
                         <header>
-                          <div><span className="eyebrow">{selectedRun.outcome}</span><h3>{selectedRun.model.id}</h3><code>{selectedRun.id}</code></div>
+                          <div><span className="eyebrow">{selectedRun.outcome}</span><h3>{selectedRun.model.id}</h3><code>{selectedRun.id}</code><p>{selectedRecord.trajectory.outcomeEvidence?.kind === "operator-verdict" ? "Operator verdict" : selectedRecord.trajectory.outcomeEvidence?.kind === "harness-error" ? "Harness reported an error" : selectedRun.outcome === "unknown" ? "Task result not verified" : "Legacy result: verdict source unavailable"}</p>{selectedRecord.trajectory.outcomeEvidence !== undefined && <details><summary>Verdict evidence</summary><code>{selectedRecord.trajectory.outcomeEvidence.eventId}</code>{selectedRecord.trajectory.outcomeEvidence.artifactId !== undefined && <code>{selectedRecord.trajectory.outcomeEvidence.artifactId}</code>}</details>}</div>
                           <dl>
                             <div><dt>Projection</dt><dd>{divergence?.kind ?? "indeterminate"}</dd></div>
                             <div><dt>Review</dt><dd>{evaluation?.review.verdict ?? "unmarked"}</dd></div>
                             <div><dt>Confidence</dt><dd>{evaluation === undefined ? "-" : percent(evaluation.oracle.confidence)}</dd></div>
                           </dl>
                         </header>
+                        <TrajectoryOutcomeReview key={selectedRun.id} record={selectedRecord} api={api} onSaved={refreshReviewedRun} />
                         <ol className="trajectory-steps">
                           {selectedRun.steps.map((step) => (
                             <li key={step.raw.id}>

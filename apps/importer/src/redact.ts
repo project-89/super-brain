@@ -5,11 +5,12 @@ import { createInterface } from "node:readline";
 
 import { transcriptImportBundleSchema } from "@_89/fold-transcript";
 
-import { fileMetadata, sha256File } from "./files.js";
+import { fileMetadata, sha256File, sha256Text } from "./files.js";
 import { isRecord } from "./json.js";
 import { RecordAnonymizer } from "./privacy.js";
 import type { ParsedTranscript } from "./types.js";
 import { decryptedVaultSha256, encryptVaultLine } from "./encryption.js";
+import { archiveRecords, readArchiveDocument } from "./native-archives.js";
 
 const SECRET_PATTERNS: readonly { readonly pattern: RegExp; readonly preservePrefix?: boolean }[] = [
   { pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/g },
@@ -64,31 +65,47 @@ export function redactJsonValue(
   return { value, count: 0 };
 }
 
-function withoutPrivateReasoning(record: Record<string, unknown>): Record<string, unknown> {
-  if (record.type === "assistant") {
-    const message = isRecord(record.message) ? record.message : undefined;
-    if (message !== undefined && Array.isArray(message.content)) {
-      return {
-        ...record,
-        message: {
-          ...message,
-          content: message.content.filter((block) => !isRecord(block) || block.type !== "thinking"),
-        },
-      };
-    }
-  }
+function filterProviderReasoning(record: Record<string, unknown>, include: boolean, retainOpaque: boolean): Record<string, unknown> {
+  // Only inspect provider envelopes, never recurse into user text, tool arguments or results.
+  const without = (value: Record<string, unknown>, keys: readonly string[]) => Object.fromEntries(
+    Object.entries(value).filter(([key]) => !keys.includes(key)),
+  );
+  const opaqueKeys = ["encrypted_content", "thoughtSignature", "thought_signature", "signature"];
+  const opaque = (value: Record<string, unknown>) => retainOpaque ? value : without(value, opaqueKeys);
+  const parts = (value: unknown): unknown => !Array.isArray(value) ? value : value.flatMap((part) => {
+    if (!isRecord(part)) return [part];
+    const reasoning = part.thought === true || ["thinking", "redacted_thinking", "reasoning"].includes(String(part.type));
+    if (reasoning && !include) return [];
+    if (part.type === "redacted_thinking" && !retainOpaque) return [];
+    return [opaque(part)];
+  });
   if (record.type === "response_item" && isRecord(record.payload) && record.payload.type === "reasoning") {
-    return { ...record, payload: { type: "reasoning", excluded: true } };
+    return { ...record, payload: include ? opaque(record.payload) : { type: "reasoning", excluded: true } };
   }
-  if (
-    record.type === "event_msg" &&
-    isRecord(record.payload) &&
-    typeof record.payload.type === "string" &&
-    record.payload.type.includes("reasoning")
-  ) {
+  if (!include && record.type === "event_msg" && isRecord(record.payload)
+    && typeof record.payload.type === "string" && record.payload.type.includes("reasoning")) {
     return { ...record, payload: { type: record.payload.type, excluded: true } };
   }
-  return record;
+  if (record.type === "assistant" && isRecord(record.message)) {
+    return { ...record, message: { ...record.message, content: parts(record.message.content) } };
+  }
+  if (record.type !== "gemini" && record.role !== "assistant") return record;
+  let result = include ? { ...record } : without(record, ["reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "thoughts"]);
+  result = opaque(result);
+  if (typeof result.content === "string" && record.role === "assistant" && !include) {
+    result.content = result.content.replace(/<(?:think|REASONING_SCRATCHPAD)>[\s\S]*?(?:<\/(?:think|REASONING_SCRATCHPAD)>|$)/gi, "");
+  } else if (Array.isArray(result.content)) result.content = parts(result.content);
+  if (Array.isArray(result.api_content)) result.api_content = parts(result.api_content);
+  for (const key of ["codex_reasoning_items", "reasoning_details"]) {
+    if (Array.isArray(result[key])) result[key] = result[key].flatMap((item) =>
+      isRecord(item) && item.type === "reasoning.encrypted" && !retainOpaque ? [] : [isRecord(item) ? opaque(item) : item]);
+  }
+  if (record.type === "gemini" && Array.isArray(result.toolCalls)) {
+    result.toolCalls = result.toolCalls.map((call) => !isRecord(call) ? call : {
+      ...opaque(call), ...(Array.isArray(call.result) ? { result: parts(call.result) } : {}),
+    });
+  }
+  return result;
 }
 
 export function redactTranscriptRecord(
@@ -99,12 +116,12 @@ export function redactTranscriptRecord(
     readonly anonymizer?: RecordAnonymizer;
   } = {},
 ): { readonly value: unknown; readonly count: number } {
-  const safe = isRecord(record) && options.reasoningPolicy !== "include"
-    ? withoutPrivateReasoning(record)
+  const safe = isRecord(record)
+    ? filterProviderReasoning(record, options.reasoningPolicy === "include", options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true)
     : record;
   const anonymized = options.anonymizer?.value(safe) ?? safe;
   return redactJsonValue(anonymized, {
-    retainEncryptedContent: options.reasoningPolicy === "include" && options.retainEncryptedReasoning === true,
+    retainEncryptedContent: true,
   });
 }
 
@@ -119,15 +136,17 @@ export async function storeRedactedArtifact(
   } = {},
 ): Promise<ParsedTranscript> {
   const { artifact } = transcript.bundle;
+  const nativeDocument = transcript.archiveInput === undefined ? undefined : await readArchiveDocument(transcript);
+  const sqliteSnapshot = transcript.archiveInput?.kind === "hermes-sqlite";
   const beforeHash = await fileMetadata(transcript.sourcePath);
-  const sourceSha256 = await sha256File(transcript.sourcePath);
+  const sourceSha256 = sqliteSnapshot ? sha256Text(JSON.stringify(nativeDocument)) : await sha256File(transcript.sourcePath);
   const afterHash = await fileMetadata(transcript.sourcePath);
   if (
     sourceSha256 !== artifact.sha256 ||
-    beforeHash.byteLength !== artifact.byteLength ||
+    (!sqliteSnapshot && (beforeHash.byteLength !== artifact.byteLength ||
     beforeHash.modifiedAt !== artifact.modifiedAt ||
     afterHash.byteLength !== artifact.byteLength ||
-    afterHash.modifiedAt !== artifact.modifiedAt
+    afterHash.modifiedAt !== artifact.modifiedAt))
   ) {
     throw new Error("Transcript source changed after it was scanned; retry the import");
   }
@@ -145,7 +164,9 @@ export async function storeRedactedArtifact(
   const output = await open(temporary, "wx", 0o600);
   let redactionCount = 0;
   try {
-    const lines = createInterface({ input: createReadStream(transcript.sourcePath), crlfDelay: Infinity });
+    const lines = nativeDocument === undefined
+      ? createInterface({ input: createReadStream(transcript.sourcePath), crlfDelay: Infinity })
+      : archiveRecords(nativeDocument).map((record) => JSON.stringify(record));
     for await (const line of lines) {
       if (line.trim().length === 0) continue;
       let parsed: unknown;
@@ -160,7 +181,7 @@ export async function storeRedactedArtifact(
       await output.writeFile(`${options.encryptionKey === undefined ? serialized : encryptVaultLine(serialized, options.encryptionKey)}\n`, "utf8");
     }
     const storedMetadata = await fileMetadata(transcript.sourcePath);
-    if (storedMetadata.byteLength !== artifact.byteLength || storedMetadata.modifiedAt !== artifact.modifiedAt) {
+    if (!sqliteSnapshot && (storedMetadata.byteLength !== artifact.byteLength || storedMetadata.modifiedAt !== artifact.modifiedAt)) {
       throw new Error("Transcript source changed while it was being stored; retry the import");
     }
     await output.sync();

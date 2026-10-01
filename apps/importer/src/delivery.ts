@@ -1,7 +1,9 @@
 import {
   transcriptImportBundleSchema,
   transcriptRunSchema,
+  transcriptProjectSchema,
   type TranscriptImportBundle,
+  type TranscriptProject,
   type TranscriptRun,
 } from "@_89/fold-transcript";
 
@@ -11,6 +13,7 @@ export interface TranscriptDeliveryOptions {
   readonly workspaceId: string;
   readonly bearerToken: string;
   readonly maxAttempts?: number;
+  readonly requestTimeoutMs?: number;
   readonly fetcher?: typeof fetch;
 }
 
@@ -141,13 +144,62 @@ export async function deliverTranscriptBundle(
 export async function listDeliveredTranscriptRunIds(
   options: TranscriptDeliveryOptions,
 ): Promise<ReadonlySet<string>> {
-  const response = await (options.fetcher ?? fetch)(endpoint(options, "transcript-runs"), {
+  return new Set((await listDeliveredTranscriptRuns(options)).map((run) => run.id));
+}
+
+export async function listDeliveredTranscriptProjects(
+  options: TranscriptDeliveryOptions,
+): Promise<readonly TranscriptProject[]> {
+  const timeoutMs = options.requestTimeoutMs ?? 30_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("requestTimeoutMs must be a positive integer");
+  const response = await (options.fetcher ?? fetch)(endpoint(options, "transcript-projects"), {
     headers: { authorization: `Bearer ${options.bearerToken}` },
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await response.json().catch(() => undefined) as unknown;
   if (!response.ok) throw responseError(response.status, body);
-  if (typeof body !== "object" || body === null || !("runs" in body) || !Array.isArray(body.runs)) {
-    throw new TranscriptDeliveryError("Transcript run catalog returned an invalid response");
+  if (typeof body !== "object" || body === null || !("projects" in body) || !Array.isArray(body.projects)) {
+    throw new TranscriptDeliveryError("Transcript project catalog returned an invalid response");
   }
-  return new Set(body.runs.map((run) => transcriptRunSchema.parse(run).id));
+  return body.projects.map((entry: unknown) => {
+    if (typeof entry !== "object" || entry === null || !("project" in entry)) {
+      throw new TranscriptDeliveryError("Transcript project catalog returned an invalid response");
+    }
+    return transcriptProjectSchema.parse(entry.project);
+  });
+}
+
+export async function listDeliveredTranscriptRuns(
+  options: TranscriptDeliveryOptions,
+): Promise<readonly TranscriptRun[]> {
+  const timeoutMs = options.requestTimeoutMs ?? 30_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new TypeError("requestTimeoutMs must be a positive integer");
+  const runs = new Map<string, TranscriptRun>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const url = new URL(endpoint(options, "transcript-runs"));
+    url.searchParams.set("limit", "100");
+    if (cursor !== undefined) url.searchParams.set("pageCursor", cursor);
+    const response = await (options.fetcher ?? fetch)(url.toString(), {
+      headers: { authorization: `Bearer ${options.bearerToken}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = await response.json().catch(() => undefined) as unknown;
+    if (!response.ok) throw responseError(response.status, body);
+    if (typeof body !== "object" || body === null || !("runs" in body) || !Array.isArray(body.runs)) {
+      throw new TranscriptDeliveryError("Transcript run catalog returned an invalid response");
+    }
+    for (const entry of body.runs) {
+      const run = transcriptRunSchema.parse(entry);
+      runs.set(run.id, run);
+    }
+    const next = "nextCursor" in body ? body.nextCursor : undefined;
+    if (next !== undefined && (typeof next !== "string" || next.length === 0 || cursors.has(next))) {
+      throw new TranscriptDeliveryError("Transcript run catalog returned an invalid cursor");
+    }
+    cursor = next;
+    if (cursor !== undefined) cursors.add(cursor);
+  } while (cursor !== undefined);
+  return [...runs.values()];
 }

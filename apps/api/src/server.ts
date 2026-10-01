@@ -5,11 +5,13 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
+import { handleEpisodeRecords, EpisodeHttpError } from "./episodes.js";
+import { handleEpisodeSynthesis, EpisodeSynthesisError } from "./episode-synthesis.js";
+import { EpisodeConflictError, EpisodeSourceBudgetError } from "@_89/fold-sdk";
 
 import {
   EventOrderError,
   FoldValidationError,
-  continueFold,
   eventSchema,
   fold,
   jsonValueSchema,
@@ -30,6 +32,8 @@ import type {
 import {
   MEMORY_CANDIDATE_DECISION_NODE_KIND,
   MEMORY_CANDIDATE_NODE_KIND,
+  matchesMemoryProjects,
+  recallMemoryCorpus,
 } from "@_89/fold-epistemic";
 import {
   FoldSdkAccessError,
@@ -39,6 +43,7 @@ import {
   TrajectoryTaskUnavailableError,
   type FoldSdkAccessContext,
   type FoldSdkCursor,
+  type FoldIngestionCursor,
   type MemoryPageCursor,
   type RankedMemoryRecallRequest,
   type TrajectoryTaskReport,
@@ -49,6 +54,8 @@ import { JournalError } from "@_89/fold-storage";
 import {
   sharedDecisionTreeSchema,
   trajectoryInputSchema,
+  trajectoryOutcomeInputSchema,
+  TRAJECTORY_OUTCOME_NODE_KIND,
   type TrajectoryEventContext,
   type TrajectoryInput,
 } from "@_89/fold-trajectory";
@@ -64,7 +71,15 @@ import {
   TRANSCRIPT_PROJECT_NODE_KIND,
   TRANSCRIPT_RUN_NODE_KIND,
   transcriptImportBundleSchema,
+  transcriptDerivationManifestSchema,
+  transcriptDerivationChunkSchema,
+  DERIVATION_NODE_KIND,
+  DERIVATION_CHUNK_NODE_KIND,
   transcriptSourceSchema,
+  IDENTITY_NODE_KIND,
+  identityEntityInputSchema,
+  identityAttributionInputSchema,
+  projectAliasInputSchema,
 } from "@_89/fold-transcript";
 
 import type {
@@ -78,6 +93,7 @@ import {
   LocalEvidenceReasoner,
   validateReasoningResult,
 } from "./reasoning.js";
+import { buildDataQualityReport } from "./data-quality.js";
 
 const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
@@ -102,6 +118,17 @@ const consumerCursorSchema = z
     }).strict(),
   })
   .strict();
+
+const ingestionCursorSchema = z.object({
+  kind: z.literal("ingestion"),
+  sequence: z.string().regex(/^(?:0|[1-9][0-9]{0,18})$/).refine(value => BigInt(value) <= 9223372036854775807n),
+}).strict();
+
+const ingestionConsumerBodySchema = z.union([
+  z.object({ cursor: ingestionCursorSchema }).strict(),
+  z.object({ migration: z.literal("replay-all") }).strict(),
+  z.object({ reset: z.object({ expectedCursor: ingestionCursorSchema, reason: z.string().trim().min(10).max(2000) }).strict() }).strict(),
+]);
 
 const repositoryEnrollmentSchema = z.object({
   remote: z.string().trim().min(1).max(2_000),
@@ -134,6 +161,7 @@ const memoryInputSchema = z
     id: z.string().min(1),
     spaceId: z.string().min(1).optional(),
     audience: z.enum(["personal", "workspace"]).optional(),
+    applicability: z.enum(["project", "general", "unresolved"]).optional(),
     projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
     source: z.string().min(1).max(200),
     summary: z.string().max(500).optional(),
@@ -146,6 +174,8 @@ const memoryInputSchema = z
 
 const memoryPatchSchema = z
   .object({
+    applicability: z.enum(["project", "general", "unresolved"]).optional(),
+    projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
     summary: z.string().max(500).optional(),
     content: jsonValueSchema.optional(),
     tags: z.array(z.string().min(1)).optional(),
@@ -157,6 +187,7 @@ const memoryCandidateInputSchema = z.object({
   id: z.string().min(1),
   spaceId: z.string().trim().min(1).max(300).optional(),
   audience: z.enum(["personal", "workspace"]).optional(),
+  applicability: z.enum(["project", "general", "unresolved"]).optional(),
   projectIds: z.array(z.string().trim().min(1).max(300)).max(100).optional(),
   source: z.string().trim().min(1).max(200),
   summary: z.string().trim().min(1).max(500),
@@ -266,6 +297,11 @@ const memoryCandidateImportSchema = z.object({
   proposals: z.array(memoryCandidateProposalSchema).min(1).max(100),
 }).strict();
 
+const memoryCandidateSupportSchema = z.object({
+  stamp: stampSchema,
+  input: memoryCandidateInputSchema.extend({ evidence: z.array(memoryCandidateEvidenceSchema).min(1).max(1_000) }),
+}).strict();
+
 const memoryCandidateAcceptSchema = z.object({
   stamp: stampSchema,
   memoryStamp: stampSchema,
@@ -318,6 +354,11 @@ const trajectoryRecordSchema = z
     input: trajectoryInputSchema,
   })
   .strict();
+
+const trajectoryOutcomeBodySchema = z.object({
+  stamp: stampSchema,
+  input: trajectoryOutcomeInputSchema,
+}).strict();
 
 const satisfierSchema = z
   .object({
@@ -424,42 +465,9 @@ function compactFoldState(state: FoldState): unknown {
 type ProjectionSection = "nodes" | "edges" | "values" | "redirects" | "diagnostics";
 
 interface CachedProjection {
-  readonly entryKeys: readonly string[];
+  readonly appliedEventCount: number;
   readonly state: FoldState;
   readonly appliedChangeCount: number;
-}
-
-const projectionCaches = new WeakMap<object, Map<string, CachedProjection>>();
-
-function projectionAccessKey(access: FoldSdkAccessContext, include: "canon" | "canon+draft"): string {
-  return JSON.stringify([
-    include,
-    access.principalId,
-    access.organizationId ?? "",
-    access.workspaceId,
-    access.platformDataAccess === true,
-    Object.entries(access.spaceRoles).sort(([left], [right]) => left.localeCompare(right)),
-  ]);
-}
-
-function projectionEntryKey(entry: FoldLogEntry): string {
-  return `${entry.status}\0${entry.event.at.t}\0${entry.event.id}`;
-}
-
-function cloneProjectionState(state: FoldState): FoldState {
-  return {
-    values: new Map(state.values),
-    nodes: new Map(state.nodes),
-    edges: new Map(state.edges),
-    redirects: new Map(state.redirects),
-    diagnostics: [...state.diagnostics],
-    appliedEvents: [],
-    appliedChanges: [],
-  };
-}
-
-function isEntryPrefix(prefix: readonly string[], entries: readonly string[]): boolean {
-  return prefix.length <= entries.length && prefix.every((entry, index) => entry === entries[index]);
 }
 
 async function cachedProjection(
@@ -467,70 +475,18 @@ async function cachedProjection(
   access: FoldSdkAccessContext,
   include: "canon" | "canon+draft",
 ): Promise<CachedProjection> {
-  const entries = await sdk.listEntries(access, { include });
-  const entryKeys = entries.map(projectionEntryKey);
-  let cache = projectionCaches.get(sdk);
-  if (cache === undefined) {
-    cache = new Map();
-    projectionCaches.set(sdk, cache);
-  }
-  const key = projectionAccessKey(access, include);
-  const current = cache.get(key);
-  if (current !== undefined && isEntryPrefix(current.entryKeys, entryKeys)) {
-    if (current.entryKeys.length === entryKeys.length) return current;
-    const suffix = entries.slice(current.entryKeys.length);
-    continueFold(current.state, suffix, {
-      include: "canon+draft",
-      existingCreate: "replace",
-      retainApplied: false,
-      validatedInput: true,
-      orderedInput: true,
-    });
-    const updated = {
-      entryKeys,
-      state: current.state,
-      appliedChangeCount: current.appliedChangeCount + suffix.reduce((total, entry) => total + entry.event.changes.length, 0),
-    };
-    cache.set(key, updated);
-    return updated;
-  }
-
-  const alternateInclude = include === "canon" ? "canon+draft" : "canon";
-  const alternate = cache.get(projectionAccessKey(access, alternateInclude));
-  if (
-    alternate !== undefined &&
-    alternate.entryKeys.length === entryKeys.length &&
-    alternate.entryKeys.every((entry, index) => entry === entryKeys[index])
-  ) {
-    const copied = { ...alternate, entryKeys, state: cloneProjectionState(alternate.state) };
-    cache.set(key, copied);
-    return copied;
-  }
-
-  const state = fold(entries, {
-    include: "canon+draft",
-    existingCreate: "replace",
-    retainApplied: false,
-    validatedInput: true,
-    orderedInput: true,
-  });
-  const rebuilt = {
-    entryKeys,
-    state,
-    appliedChangeCount: entries.reduce((total, entry) => total + entry.event.changes.length, 0),
-  };
-  cache.set(key, rebuilt);
-  return rebuilt;
+  return sdk.systemProjection(access, include);
 }
 
 function projectionSectionRows(state: FoldState, section: ProjectionSection): readonly (readonly [string, unknown])[] {
-  if (section === "nodes") return [...state.nodes.entries()].sort(([left], [right]) => left.localeCompare(right));
-  if (section === "edges") return [...state.edges.entries()].sort(([left], [right]) => left.localeCompare(right));
-  if (section === "values") return [...state.values.entries()].sort(([left], [right]) => left.localeCompare(right));
-  if (section === "redirects") return [...state.redirects.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const byId = ([left]: readonly [string, unknown], [right]: readonly [string, unknown]) => left < right ? -1 : left > right ? 1 : 0;
+  if (section === "nodes") return [...state.nodes.entries()].sort(byId);
+  if (section === "edges") return [...state.edges.entries()].sort(byId);
+  if (section === "values") return [...state.values.entries()].sort(byId);
+  if (section === "redirects") return [...state.redirects.entries()].sort(byId);
   return state.diagnostics
     .map((diagnostic, index) => [`${diagnostic.eventId}\0${diagnostic.changeIndex}\0${index}`, diagnostic] as const)
-    .sort(([left], [right]) => left.localeCompare(right));
+    .sort(byId);
 }
 
 function projectionSectionPage(
@@ -649,6 +605,10 @@ function sendError(response: ServerResponse, error: ApiHttpError): void {
 
 function asHttpError(error: unknown): ApiHttpError {
   if (error instanceof ApiHttpError) return error;
+  if (error instanceof EpisodeSynthesisError) return new ApiHttpError(error.status, error.code, error.message, error.details);
+  if (error instanceof EpisodeHttpError) return new ApiHttpError(error.status, error.code, error.message);
+  if (error instanceof EpisodeConflictError) return new ApiHttpError(409, "episode_conflict", error.message);
+  if (error instanceof EpisodeSourceBudgetError) return new ApiHttpError(413, "episode_input_too_large", error.message);
   if (error instanceof Error && error.name === "ClerkWebhookVerificationError") {
     return new ApiHttpError(401, "webhook_verification_failed", "Webhook signature verification failed");
   }
@@ -771,16 +731,22 @@ function assertGenericAppendRoute(event: FoldEvent): void {
     TRANSCRIPT_ARTIFACT_NODE_KIND,
     TRANSCRIPT_RUN_NODE_KIND,
     TRANSCRIPT_CHUNK_NODE_KIND,
+    DERIVATION_NODE_KIND,
+    DERIVATION_CHUNK_NODE_KIND,
   ]);
   if (
     event.kind.startsWith("intention.") ||
+    event.kind.startsWith("identity.") ||
     event.kind.startsWith("transcript.") ||
     event.kind.startsWith("memory.candidate-") ||
+    event.kind === "trajectory.outcome-recorded" ||
     event.changes.some(
       (change) => "nodeKind" in change &&
         (change.nodeKind === INTENTION_EVENT_NODE_KIND ||
+          change.nodeKind === IDENTITY_NODE_KIND ||
           change.nodeKind === MEMORY_CANDIDATE_NODE_KIND ||
           change.nodeKind === MEMORY_CANDIDATE_DECISION_NODE_KIND ||
+          change.nodeKind === TRAJECTORY_OUTCOME_NODE_KIND ||
           transcriptNodeKinds.has(change.nodeKind)),
     )
   ) {
@@ -823,7 +789,7 @@ function cursorFromUrl(url: URL): FoldSdkCursor | undefined {
   return { t, eventId };
 }
 
-type PageCursorKind = "memory" | "candidate" | "run" | "trajectory" | "trajectory-run" | "event" | "state";
+type PageCursorKind = "memory" | "candidate" | "run" | "trajectory" | "trajectory-run" | "trajectory-outcome" | "event" | "state" | "derivation" | "derived-record" | "derivation-source" | "identity";
 
 interface PageCursor {
   readonly kind: PageCursorKind;
@@ -832,7 +798,7 @@ interface PageCursor {
 }
 
 const pageCursorSchema = z.object({
-  kind: z.enum(["memory", "candidate", "run", "trajectory", "trajectory-run", "event", "state"]),
+  kind: z.enum(["memory", "candidate", "run", "trajectory", "trajectory-run", "trajectory-outcome", "event", "state", "derivation", "derived-record", "derivation-source", "identity"]),
   key: z.union([z.string(), z.number().finite()]),
   id: z.string().trim().min(1).max(10_000),
 }).strict();
@@ -975,9 +941,10 @@ function startEventStream(
   sdk: Awaited<ReturnType<ApiDependencies["sdks"]["sdkFor"]>>,
   tenant: TenantKey,
   access: FoldSdkAccessContext,
-  initialCursor: FoldSdkCursor | undefined,
+  initialCursor: FoldSdkCursor | FoldIngestionCursor | undefined,
   includeDrafts: boolean,
   kinds: readonly string[] | undefined,
+  ingestion = false,
 ): void {
   response.writeHead(200, {
     "cache-control": "no-store, no-transform",
@@ -991,10 +958,14 @@ function startEventStream(
   let cursor = initialCursor;
   let closed = false;
   let polling = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let backlogTimer: ReturnType<typeof setImmediate> | undefined;
   const close = () => {
     if (closed) return;
     closed = true;
     clearInterval(pollTimer);
+    clearTimeout(idleTimer);
+    clearImmediate(backlogTimer);
     clearInterval(heartbeatTimer);
   };
   const fail = (error: unknown) => {
@@ -1008,29 +979,50 @@ function startEventStream(
   const poll = async () => {
     if (closed || polling) return;
     polling = true;
+    let progressed = false;
     try {
-      const batch = await streamBatch(dependencies, sdk, tenant, access, {
-        ...(cursor === undefined ? {} : { after: cursor }),
-        ...(includeDrafts ? { includeDrafts: true } : {}),
-        ...(kinds === undefined ? {} : { kinds }),
-        limit: 500,
-      });
-      for (const entry of batch.entries) {
-        const next = { t: entry.event.at.t, eventId: entry.event.id };
-        response.write(`event: fold-event\ndata: ${JSON.stringify({ entry, cursor: next })}\n\n`);
+      const options = { ...(includeDrafts ? { includeDrafts: true } : {}), ...(kinds === undefined ? {} : { kinds }), limit: 100 };
+      const batch = ingestion
+        ? await dependencies.sdks.ingestionEntries!(tenant, access, { ...options, ...(cursor === undefined ? {} : { after: cursor as FoldIngestionCursor }) })
+        : await streamBatch(dependencies, sdk, tenant, access, { ...options, ...(cursor === undefined ? {} : { after: cursor as FoldSdkCursor }) });
+      const items = "items" in batch ? batch.items : batch.entries.map(entry => ({ entry, cursor: { t: entry.event.at.t, eventId: entry.event.id } }));
+      for (const item of items) {
+        if (closed) return;
+        if (!response.write(`event: fold-event\ndata: ${JSON.stringify(item)}\n\n`)) {
+          await new Promise<void>(resolve => {
+            const done = () => { response.off("drain", done); response.off("close", done); response.off("error", done); resolve(); };
+            response.once("drain", done); response.once("close", done); response.once("error", done);
+            if (response.destroyed) done();
+          });
+        }
       }
-      if (batch.scannedThrough !== undefined) cursor = batch.scannedThrough;
+      if (batch.scannedThrough !== undefined) {
+        progressed = ingestion && "sequence" in batch.scannedThrough &&
+          (cursor === undefined || ("sequence" in cursor && BigInt(batch.scannedThrough.sequence) > BigInt(cursor.sequence)));
+        cursor = batch.scannedThrough;
+      }
     } catch (error) {
       fail(error);
     } finally {
       polling = false;
+      if (ingestion && !closed) {
+        // A scanned page may contain only denied rows. Continue on scan progress,
+        // yielding between bounded pages, until the committed backlog is empty.
+        if (progressed) {
+          backlogTimer = setImmediate(() => { backlogTimer = undefined; void poll(); });
+          backlogTimer.unref();
+        } else {
+          idleTimer = setTimeout(() => { idleTimer = undefined; void poll(); }, dependencies.eventStreamPollMs ?? DEFAULT_EVENT_STREAM_POLL_MS);
+          idleTimer.unref();
+        }
+      }
     }
   };
-  const pollTimer = setInterval(() => void poll(), dependencies.eventStreamPollMs ?? DEFAULT_EVENT_STREAM_POLL_MS);
+  const pollTimer = ingestion ? undefined : setInterval(() => void poll(), dependencies.eventStreamPollMs ?? DEFAULT_EVENT_STREAM_POLL_MS);
   const heartbeatTimer = setInterval(() => {
-    if (!closed) response.write(`: heartbeat ${Date.now()}\n\n`);
+    if (!closed && !response.writableNeedDrain) response.write(`: heartbeat ${Date.now()}\n\n`);
   }, EVENT_STREAM_HEARTBEAT_MS);
-  pollTimer.unref();
+  pollTimer?.unref();
   heartbeatTimer.unref();
   request.once("close", close);
   response.once("close", close);
@@ -1070,6 +1062,7 @@ function parsedMemoryInput(input: z.infer<typeof memoryInputSchema>): MemoryInpu
     source: input.source,
     ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
     ...(input.audience === undefined ? {} : { audience: input.audience }),
+    ...(input.applicability === undefined ? {} : { applicability: input.applicability }),
     ...(input.projectIds === undefined ? {} : { projectIds: input.projectIds }),
     ...(input.summary === undefined ? {} : { summary: input.summary }),
     ...(input.content === undefined ? {} : { content: input.content }),
@@ -1085,6 +1078,8 @@ function parsedMemoryCandidateInput(input: z.infer<typeof memoryCandidateInputSc
 
 function parsedMemoryPatch(input: z.infer<typeof memoryPatchSchema>): MemoryRevisionPatch {
   return {
+    ...(input.applicability === undefined ? {} : { applicability: input.applicability }),
+    ...(input.projectIds === undefined ? {} : { projectIds: input.projectIds }),
     ...(input.summary === undefined ? {} : { summary: input.summary }),
     ...(input.content === undefined ? {} : { content: input.content }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
@@ -1225,20 +1220,69 @@ async function authenticate(
 }
 
 function routeCapability(resource: string | undefined, resourceId: string | undefined, method: string): ApiCapability | undefined {
+  if (resource === "identities") return method === "GET" ? (resourceId === "projects" ? "transcripts:read" : "events:read") : "organization:admin";
   if (resource === "repository-enrollments" || resource === "audit-log" || resource === "identity-bindings" || resource === "identity-audit-log") return "organization:admin";
-  if (resource === "event-stream" || resource === "projection") return "events:read";
+  if (resource === "event-stream" || resource === "projection" || resource === "data-quality") return "events:read";
   if (resource === "events") return method === "GET" ? "events:read" : "events:write";
+  if (resource === "work-episodes" && resourceId === "synthesize") return "reasoning:read";
+  if (resource === "work-episodes" || resource === "work-episode-windows") return method === "GET" ? "memories:read" : "memories:write";
   if (resource === "consumers") return method === "GET" ? "consumers:read" : "consumers:write";
   if (resource === "trajectory-tasks") return method === "GET" ? "trajectories:read" : "trajectories:write";
   if (resource === "trajectories") return "trajectories:write";
+  if (resource === "trajectory-outcomes") return method === "GET" ? "trajectories:read" : "trajectories:review";
   if (resource === "fleet") return "fleet:read";
   if (resource === "transcript-projects" || resource === "transcript-runs") return "transcripts:read";
   if (resource === "transcript-imports") return "transcripts:write";
+  if (resource === "transcript-derivations") return method === "GET" ? "transcripts:read" : "transcripts:write";
   if (resource === "steering") return method === "GET" ? "steering:read" : "steering:write";
   if (resource === "reasoning") return "reasoning:read";
   if (resource === "memories" && (resourceId === "recall" || resourceId === "search")) return "memories:read";
   if (resource === "memories" || resource?.startsWith("memory-candidate") === true) {
     return method === "GET" ? "memories:read" : "memories:write";
+  }
+  return undefined;
+}
+
+function sdkSelectionForResource(resource: string | undefined, resourceId: string | undefined, method: string) {
+  if (resource === "work-episodes" || resource === "work-episode-windows") return { kinds: ["work.episode-window-recorded", "memory.recorded", "memory.revised", "memory.forgotten", "transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported"] } as const;
+  if (resource === "identities") {
+    if (method === "GET" || !["alias-preview", "aliases"].includes(resourceId ?? "")) return { kinds: ["identity.revised", "transcript.project-recorded"] } as const;
+    return { kindPrefixes: ["identity.", "memory."], kinds: ["transcript.project-recorded", "transcript.run-imported", "transcript.artifact-imported"] } as const;
+  }
+  if (resource === "memories" || resource?.startsWith("memory-") === true || resource === "reasoning") {
+    return { kindPrefixes: ["memory.", "identity."], ...(resource?.startsWith("memory-candidate") === true ? { kinds: ["transcript.project-recorded"] } : {}) } as const;
+  }
+  if (resource === "transcript-projects" || (resource === "transcript-runs" && resourceId === undefined)) {
+    return {
+      kinds: ["identity.revised", "transcript.project-recorded", "transcript.run-imported", "transcript.artifact-imported"],
+    } as const;
+  }
+  if (resource === "transcript-runs" && resourceId !== undefined) {
+    return { kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported", "transcript.chunk-imported"], transcriptRunId: resourceId } as const;
+  }
+  if (resource === "transcript-derivations") {
+    return { kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported"] } as const;
+  }
+  if (resource === "transcript-imports") {
+    return { kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported", "transcript.chunk-imported"] } as const;
+  }
+  if (resource?.startsWith("transcript-") === true) {
+    return { kindPrefixes: ["transcript."] } as const;
+  }
+  if (resource === "trajectory-tasks" || resource === "trajectories" || resource === "trajectory-outcomes") {
+    return {
+      kindPrefixes: ["trajectory."],
+      ...(resourceId === undefined ? {} : { trajectoryTaskId: resourceId }),
+    } as const;
+  }
+  if (resource === "fleet") {
+    return {
+      kinds: ["lifecycle", "terminal.observation", "terminal.classification"],
+      latestBySession: true,
+    } as const;
+  }
+  if (resource === "steering") {
+    return { kindPrefixes: ["drive.", "intention."] } as const;
   }
   return undefined;
 }
@@ -1286,12 +1330,14 @@ function platformAccessGrant(request: IncomingMessage): { readonly reason: strin
 
 const PLATFORM_READABLE_RESOURCES = new Set([
   "events",
+  "data-quality",
   "projection",
   "memories",
   "trajectory-tasks",
   "fleet",
   "transcript-projects",
   "transcript-runs",
+  "transcript-derivations",
   "steering",
 ]);
 
@@ -1410,9 +1456,27 @@ async function handleRequest(
     throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
   }
   const tenant = { organizationId: access.organizationId, workspaceId };
-  const sdk = await dependencies.sdks.sdkFor(tenant);
+  const sdk = await dependencies.sdks.sdkFor(tenant, sdkSelectionForResource(resource, resourceId, method));
   if (access.platformDataAccess !== true) {
     assertCredentialCapability(subject, routeCapability(resource, resourceId, method));
+  }
+  if (resource === "work-episodes" || resource === "work-episode-windows") {
+    assertCredentialCapability(subject, "events:read");
+    if (resourceId === "synthesize" && resource === "work-episodes" && method === "POST" && resourceSegments.length === 2) {
+      const result = await handleEpisodeSynthesis({ sdk, access, input: await readJsonBody(request, maxBodyBytes), reasoners: dependencies.reasoners, reasoner: dependencies.reasoner,
+        refreshAccess: async () => {
+          const refreshed = await authenticate(request, dependencies);
+          if (refreshed.principalId !== subject.principalId) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+          assertCredentialCapability(refreshed, "events:read"); assertCredentialCapability(refreshed, "reasoning:read");
+          const current = await dependencies.memberships.resolveAccess(refreshed, tenant.organizationId, workspaceId);
+          if (current === undefined) throw new ApiHttpError(403, "workspace_access_denied", "Workspace access denied");
+          return current;
+        } });
+      sendJson(response, 200, result); return;
+    }
+    const result = await handleEpisodeRecords({ sdk, access, author: subject.author, method, segments: resourceSegments, url,
+      ...(method === "POST" ? { input: await readJsonBody(request, maxBodyBytes) } : {}) });
+    sendJson(response, result.status, result.body); return;
   }
   if (resource === "identity-bindings") {
     if (access.organizationRole !== "owner" && access.organizationRole !== "admin") {
@@ -1521,6 +1585,21 @@ async function handleRequest(
     const include = includeFromUrl(url);
     const includeDrafts = include === "canon+draft";
     const kinds = url.searchParams.has("kind") ? url.searchParams.getAll("kind") : undefined;
+    const order = url.searchParams.get("order") ?? "source";
+    if (order !== "source" && order !== "ingestion") throw new ApiHttpError(400, "invalid_query", "stream order must be source or ingestion");
+    if (order === "ingestion") {
+      if (url.searchParams.has("afterT") || url.searchParams.has("afterEventId")) throw new ApiHttpError(400, "invalid_cursor", "Source-time cursors cannot resume ingestion streams; explicitly replay all");
+      if (dependencies.sdks.ingestionEntries === undefined || dependencies.sdks.latestIngestionCursor === undefined) throw new ApiHttpError(501, "ingestion_stream_unavailable", "Ingestion-order streams require a supported durable store");
+      const rawSequence = url.searchParams.get("afterSequence");
+      let after = rawSequence === null ? undefined : ingestionCursorSchema.parse({ kind: "ingestion", sequence: rawSequence });
+      const head = await dependencies.sdks.latestIngestionCursor(tenant, access, { ...(includeDrafts ? { includeDrafts: true } : {}), ...(kinds === undefined ? {} : { kinds }) });
+      // A cursor may be beyond the visible head after access revocation. It must still be
+      // within the committed workspace log; durable commit validation enforces that bound.
+      if (after === undefined && replayFromUrl(url) === "tail") after = head;
+      startEventStream(request, response, dependencies, sdk, tenant, access, after, includeDrafts, kinds, true);
+      return;
+    }
+    if (url.searchParams.has("afterSequence")) throw new ApiHttpError(400, "invalid_cursor", "Ingestion cursor requires order=ingestion");
     let after = afterCursorFromUrl(url);
     if (after === undefined && replayFromUrl(url) === "tail") {
       if (dependencies.sdks.latestEventCursor !== undefined) {
@@ -1555,6 +1634,30 @@ async function handleRequest(
     if (resourceId.length > 200) {
       throw new ApiHttpError(400, "invalid_consumer", "consumerId must be at most 200 characters");
     }
+    const order = url.searchParams.get("order") ?? "source";
+    if (order !== "source" && order !== "ingestion") throw new ApiHttpError(400, "invalid_query", "consumer order must be source or ingestion");
+    if (order === "ingestion") {
+      if (dependencies.sdks.ingestionConsumerStatus === undefined || dependencies.sdks.commitIngestionCursor === undefined || dependencies.sdks.migrateConsumerCursor === undefined) throw new ApiHttpError(501, "ingestion_consumers_unavailable", "Ingestion consumers require a supported durable store");
+      const scopedConsumerId = JSON.stringify([subject.principalId, resourceId]);
+      const options = { ...(includeFromUrl(url) === "canon+draft" ? { includeDrafts: true } : {}), ...(url.searchParams.has("kind") ? { kinds: url.searchParams.getAll("kind") } : {}) };
+      if (method === "POST") {
+        const body = ingestionConsumerBodySchema.parse(await readJsonBody(request, maxBodyBytes));
+        if ("migration" in body) await dependencies.sdks.migrateConsumerCursor(tenant, scopedConsumerId);
+        else if ("reset" in body) {
+          if (!canSteer(access)) throw new ApiHttpError(403, "workspace_admin_required", "Cursor reset requires workspace administrator access");
+          if (dependencies.sdks.resetConsumerCursor === undefined) throw new ApiHttpError(501, "cursor_reset_unavailable", "This store does not support audited cursor resets");
+          await dependencies.sdks.resetConsumerCursor(tenant, scopedConsumerId, subject.principalId, body.reset.expectedCursor, body.reset.reason);
+        }
+        else {
+          await dependencies.sdks.commitIngestionCursor(tenant, scopedConsumerId, body.cursor);
+          sendJson(response, 200, { consumerId: resourceId, cursor: body.cursor });
+          return;
+        }
+      } else if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+      const status = await dependencies.sdks.ingestionConsumerStatus(tenant, access, scopedConsumerId, options);
+      sendJson(response, 200, { consumerId: resourceId, ...status });
+      return;
+    }
     if (
       dependencies.sdks.consumerCursor === undefined ||
       dependencies.sdks.commitConsumerCursor === undefined
@@ -1580,6 +1683,72 @@ async function handleRequest(
     throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
   }
 
+  if (resource === "identities") {
+    if (resourceSegments.length > 2) throw new ApiHttpError(404, "not_found", "Identity resource not found");
+    const canManage = access.platformDataAccess !== true && ["owner", "admin"].includes(access.workspaceRole) && subject.author.kind === "human" &&
+      (subject.capabilities === undefined || subject.capabilities.includes("organization:admin"));
+    if (method === "GET") {
+      const snapshot = await sdk.identities(access);
+      const meta = { revision: snapshot.revision, scope: snapshot.scope, canManage };
+      if (resourceId === undefined) {
+        sendJson(response, 200, { ...meta, counts: { entities: snapshot.entities.length, attributions: snapshot.attributions.length, aliases: snapshot.aliases.length, projects: snapshot.projects.length } });
+        return;
+      }
+      if (!["entities", "attributions", "aliases", "history", "projects"].includes(resourceId) || resourceSegments.length !== 2) throw new ApiHttpError(404, "not_found", "Identity resource not found");
+      const rawActive = url.searchParams.get("active");
+      const active = rawActive === null ? undefined : z.enum(["true", "false"]).parse(rawActive) === "true";
+      const rawKind = url.searchParams.get("kind");
+      const kind = rawKind === null ? undefined : z.enum(["person", "account", "agent", "machine"]).parse(rawKind);
+      let rows: readonly { readonly id: string; readonly at: number; readonly item: unknown }[];
+      if (resourceId === "entities") rows = snapshot.entities.filter((item) => (kind === undefined || item.kind === kind) && (active === undefined || item.active === active)).map((item) => ({ id: item.id, at: item.recordedAt, item }));
+      else if (resourceId === "attributions") rows = snapshot.attributions.filter((item) => active === undefined || item.active === active).map((item) => ({ id: item.entityId, at: item.recordedAt, item: { ...item, entityLabel: snapshot.entities.find(({ id }) => id === item.entityId)?.label, personLabel: snapshot.entities.find(({ id }) => id === item.personId)?.label } }));
+      else if (resourceId === "aliases") rows = snapshot.aliases.filter((item) => active === undefined || item.active === active).map((item) => ({ id: item.aliasProjectId, at: item.recordedAt, item: { ...item, aliasProjectName: snapshot.projects.find(({ id }) => id === item.aliasProjectId)?.name, canonicalProjectName: snapshot.projects.find(({ id }) => id === item.canonicalProjectId)?.name } }));
+      else if (resourceId === "projects") rows = snapshot.projects.map((item) => ({ id: item.id, at: 0, item }));
+      else rows = snapshot.history.map((item) => ({ id: item.eventId, at: item.recordedAt, item }));
+      const page = pagedNewestFirst([...rows].sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)), "identity", positiveIntegerQuery(url, "limit", 100) ?? 100, pageCursorFromUrl(url, "identity"), (row) => row.at, (row) => `${resourceId}:${row.id}`);
+      sendJson(response, 200, { ...meta, items: page.items.map(({ item }) => item), total: page.total, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) });
+      return;
+    }
+    if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    if (!canManage) throw new ApiHttpError(403, "identity_admin_required", "Identity changes require a workspace administrator");
+    const body = await readJsonBody(request, maxBodyBytes);
+    const expectedRevisionSchema = z.string().min(1).max(500).nullable();
+    if (resourceId === "alias-preview") {
+      const parsed = z.object({ input: projectAliasInputSchema }).strict().parse(body);
+      sendJson(response, 200, await sdk.previewProjectAlias(access, parsed.input));
+      return;
+    }
+    if (resourceId === "entities") {
+      const parsed = z.object({ expectedRevision: expectedRevisionSchema, input: identityEntityInputSchema }).strict().parse(body);
+      const result = await sdk.reviseIdentity({ access, author: subject.author }, parsed.expectedRevision, { kind: "entity", input: parsed.input });
+      sendJson(response, 201, { ...result, entity: { ...result.record.input, eventId: result.record.eventId, recordedAt: result.record.recordedAt, actorId: result.record.actorId } });
+      return;
+    }
+    if (resourceId === "attributions") {
+      const parsed = z.object({ expectedRevision: expectedRevisionSchema, input: identityAttributionInputSchema }).strict().parse(body);
+      const result = await sdk.reviseIdentity({ access, author: subject.author }, parsed.expectedRevision, { kind: "attribution", input: parsed.input });
+      sendJson(response, 201, { ...result, attribution: { ...result.record.input, eventId: result.record.eventId, recordedAt: result.record.recordedAt, actorId: result.record.actorId } });
+      return;
+    }
+    if (resourceId === "aliases") {
+      const parsed = z.object({ expectedRevision: expectedRevisionSchema, previewToken: z.string().regex(/^[a-f0-9]{64}$/), input: projectAliasInputSchema }).strict().parse(body);
+      const result = await sdk.reviseIdentity({ access, author: subject.author }, parsed.expectedRevision, { kind: "project-alias", input: parsed.input }, parsed.previewToken);
+      sendJson(response, 201, { ...result, alias: { ...result.record.input, eventId: result.record.eventId, recordedAt: result.record.recordedAt, actorId: result.record.actorId } });
+      return;
+    }
+    throw new ApiHttpError(404, "not_found", "Identity resource not found");
+  }
+
+  if (resource === "events" && resourceId !== undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const entry = dependencies.sdks.eventById === undefined
+      ? (await sdk.listEntries(access, { include: "canon" })).find(({ event }) => event.id === resourceId)
+      : await dependencies.sdks.eventById(tenant, access, resourceId);
+    if (entry === undefined || entry.status !== "canon") throw new ApiHttpError(404, "event_unavailable", "Event is unavailable");
+    sendJson(response, 200, { entry });
+    return;
+  }
+
   if (resource === "events" && resourceId === undefined) {
     if (method === "GET") {
       const include = includeFromUrl(url);
@@ -1592,6 +1761,40 @@ async function handleRequest(
       const pageCursor = pageCursorFromUrl(url, "event");
       if (pageCursor !== undefined && order !== "desc") {
         throw new ApiHttpError(400, "invalid_cursor", "Page cursor requires order=desc");
+      }
+      if (order === "desc" && limit !== undefined && dependencies.sdks.eventPage !== undefined) {
+        if (pageCursor !== undefined && typeof pageCursor.key !== "number") {
+          throw new ApiHttpError(400, "invalid_cursor", "Event page cursor is invalid");
+        }
+        const identity: Partial<Record<"session" | "run" | "project" | "agent", string>> = {};
+        const identityQueries = {
+          session: "sessionId",
+          run: "runId",
+          project: "projectId",
+          agent: "actorId",
+        } as const;
+        for (const [identityKey, queryKey] of Object.entries(identityQueries) as [keyof typeof identityQueries, string][]) {
+          const value = url.searchParams.get(queryKey);
+          if (value !== null) identity[identityKey] = value;
+        }
+        const before = pageCursor === undefined
+          ? undefined
+          : { t: pageCursor.key as number, eventId: pageCursor.id };
+        const page = await dependencies.sdks.eventPage(tenant, access, {
+          ...(include === "canon+draft" ? { includeDrafts: true } : {}),
+          ...(url.searchParams.has("kind") ? { kinds: url.searchParams.getAll("kind") } : {}),
+          limit,
+          ...(before === undefined ? {} : { before }),
+          ...(Object.keys(identity).length === 0 ? {} : { identity }),
+        });
+        sendJson(response, 200, {
+          entries: page.entries,
+          total: page.total,
+          ...(page.nextCursor === undefined ? {} : {
+            nextCursor: encodePageCursor({ kind: "event", key: page.nextCursor.t, id: page.nextCursor.eventId }),
+          }),
+        });
+        return;
       }
       let entries = await sdk.listEntries(access, {
         ...(include === undefined ? {} : { include }),
@@ -1644,6 +1847,20 @@ async function handleRequest(
     throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
   }
 
+  if (resource === "data-quality" && resourceId === undefined) {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const storedReport = await dependencies.sdks.dataQuality?.(tenant, access);
+    if (storedReport !== undefined) {
+      sendJson(response, 200, { report: storedReport });
+      return;
+    }
+    const entries = await sdk.listEntries(access, { include: "canon" });
+    sendJson(response, 200, {
+      report: buildDataQualityReport(entries.map(({ event }) => event)),
+    });
+    return;
+  }
+
   if (resource === "projection" && resourceId === undefined) {
     if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const include = includeFromUrl(url);
@@ -1669,13 +1886,13 @@ async function handleRequest(
       const emptyState = {
         values: [], nodes: [], edges: [], redirects: [], diagnostics: [],
         appliedEvents: [], appliedChanges: [],
-        appliedEventCount: cached.entryKeys.length,
+        appliedEventCount: cached.appliedEventCount,
         appliedChangeCount: cached.appliedChangeCount,
       };
       sendJson(response, 200, {
         entries: [],
-        total: cached.entryKeys.length,
-        projected: cached.entryKeys.length,
+        total: cached.appliedEventCount,
+        projected: cached.appliedEventCount,
         section,
         sectionTotal: page.total,
         counts: {
@@ -1728,13 +1945,49 @@ async function handleRequest(
 
   if (resource === "trajectory-tasks" && resourceId === undefined) {
     if (method === "GET") {
-      const tasks = await sdk.trajectoryTasks(access);
       const limit = positiveIntegerQuery(url, "limit", 1_000);
+      const cursor = pageCursorFromUrl(url, "trajectory");
+      const compact = url.searchParams.get("compact") === "true";
+      if (dependencies.sdks.trajectoryTasks !== undefined) {
+        if (cursor !== undefined && typeof cursor.key !== "number") {
+          throw new ApiHttpError(400, "invalid_cursor", "Trajectory cursor is invalid");
+        }
+        const page = await dependencies.sdks.trajectoryTasks(tenant, access, {
+          limit: limit ?? 1_000,
+          ...(cursor === undefined
+            ? {}
+            : { before: { lastRecordedAt: cursor.key as number, taskId: cursor.id } }),
+        });
+        const tasks = [];
+        if (!compact) {
+          // Page before replay: full-detail callers must not rebuild every tree.
+          for (const summary of page.tasks) {
+            const taskSdk = await dependencies.sdks.sdkFor(tenant, { kindPrefixes: ["trajectory."], trajectoryTaskId: summary.taskId });
+            const detail = (await taskSdk.trajectoryTasks(access)).find(({ taskId }) => taskId === summary.taskId);
+            if (detail !== undefined) tasks.push(detail);
+          }
+        }
+        sendJson(response, 200, {
+          tasks: compact ? page.tasks : tasks,
+          total: page.total,
+          ...(page.nextCursor === undefined
+            ? {}
+            : {
+                nextCursor: encodePageCursor({
+                  kind: "trajectory",
+                  key: page.nextCursor.lastRecordedAt,
+                  id: page.nextCursor.taskId,
+                }),
+              }),
+        });
+        return;
+      }
+      const tasks = await sdk.trajectoryTasks(access);
       const page = pagedNewestFirst(
         tasks,
         "trajectory",
         limit,
-        pageCursorFromUrl(url, "trajectory"),
+        cursor,
         (task) => task.lastRecordedAt,
         (task) => task.taskId,
       );
@@ -1747,7 +2000,11 @@ async function handleRequest(
     }
     if (method === "POST") {
       const body = trajectoryTreeRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
-      const result = await sdk.recordTrajectoryTree(
+      const taskSdk = await dependencies.sdks.sdkFor(tenant, {
+        kindPrefixes: ["trajectory."],
+        trajectoryTaskId: body.tree.taskId,
+      });
+      const result = await taskSdk.recordTrajectoryTree(
         trajectoryContext(subject, access, body.spaceId, body.captureIdentity),
         body.stamp,
         body.tree,
@@ -1823,13 +2080,57 @@ async function handleRequest(
     return;
   }
 
+  if (resource === "transcript-derivations") {
+    if (method === "GET" && resourceId === "sources") {
+      const sources = await sdk.transcriptReprocessingSources(access);
+      const page = pagedNewestFirst(sources.sort((a, b) => a.run.id < b.run.id ? -1 : a.run.id > b.run.id ? 1 : 0), "derivation-source", positiveIntegerQuery(url, "limit", 1_000) ?? 100, pageCursorFromUrl(url, "derivation-source"), () => 0, (item) => item.run.id);
+      sendJson(response, 200, { sources: page.items, total: page.total, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) });
+      return;
+    }
+    if (method === "POST" && resourceId === undefined) {
+      if (!canSteer(access)) throw new ApiHttpError(403, "transcript_import_access_denied", "Transcript import access denied");
+      const body = z.union([z.object({ manifest: transcriptDerivationManifestSchema }).strict(), z.object({ chunk: transcriptDerivationChunkSchema }).strict()]).parse(await readJsonBody(request, maxBodyBytes));
+      const runId = "manifest" in body ? body.manifest.runId : body.chunk.runId;
+      const runSdk = await dependencies.sdks.sdkFor(tenant, { kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported", "transcript.derivation-recorded", "transcript.derivation-chunk-recorded"], transcriptRunId: runId });
+      const result = await runSdk.recordTranscriptDerivation({ access, author: { kind: "ingest", id: `transcript-reprocessor:${subject.principalId}` }, capture: { scope: { workspace: access.workspaceId }, identity: { source: "archive-reprocessing" } } }, body);
+      sendJson(response, result.imported ? 201 : 200, result);
+      return;
+    }
+    if (method === "GET") {
+      const runId = url.searchParams.get("runId");
+      if (!runId) throw new ApiHttpError(400, "invalid_query", "runId is required");
+      const runSdk = await dependencies.sdks.sdkFor(tenant, { kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported", "transcript.derivation-recorded", "transcript.derivation-chunk-recorded"], transcriptRunId: runId });
+      const derivations = await runSdk.transcriptDerivations(access, runId);
+      const limit = positiveIntegerQuery(url, "limit", 1_000) ?? 100;
+      if (resourceId === undefined) {
+        const page = pagedNewestFirst(derivations.sort((a, b) => b.recordedAt - a.recordedAt || a.derivationId.localeCompare(b.derivationId)), "derivation", limit, pageCursorFromUrl(url, "derivation"), (item) => item.recordedAt, (item) => item.derivationId);
+        sendJson(response, 200, { derivations: page.items.map(({ chunks, ...item }) => ({ ...item, storedChunks: chunks.length })), total: page.total, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) });
+      } else {
+        const derivation = derivations.find((item) => item.derivationId === resourceId);
+        if (derivation === undefined) throw new ApiHttpError(404, "derivation_unavailable", "Transcript derivation is unavailable");
+        const records = derivation.chunks.flatMap((chunk) => chunk.records);
+        const page = pagedNewestFirst(records, "derived-record", limit, pageCursorFromUrl(url, "derived-record"), (item) => -item.ordinal, (item) => String(item.ordinal));
+        sendJson(response, 200, { records: page.items, total: page.total, complete: derivation.complete, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) });
+      }
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+
   if (resource === "transcript-imports" && resourceId === undefined) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     if (!canSteer(access)) {
       throw new ApiHttpError(403, "transcript_import_access_denied", "Transcript import access denied");
     }
     const bundle = transcriptImportBundleSchema.parse(await readJsonBody(request, maxBodyBytes));
-    const result = await sdk.importTranscript(
+    // Keep global identity/conflict metadata, but load action payloads only for the
+    // original run and the deterministic snapshot that this import could create.
+    const snapshotSuffix = `:snapshot:${bundle.artifact.sha256.slice(0, 16)}`;
+    const importSdk = await dependencies.sdks.sdkFor(tenant, {
+      kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported", "transcript.chunk-imported"],
+      transcriptChunkRunIds: [bundle.run.id, `${bundle.run.id.slice(0, 500 - snapshotSuffix.length)}${snapshotSuffix}`],
+    });
+    const result = await importSdk.importTranscript(
       transcriptContext(subject, access, bundle),
       bundle,
       { importId: `transcript-import:${randomUUID()}`, importedAt: Date.now() },
@@ -1892,6 +2193,7 @@ async function handleRequest(
   if (resource === "reasoning" && resourceId === "ask" && resourceSegments.length === 2) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const body = reasoningRequestSchema.parse(await readJsonBody(request, maxBodyBytes));
+    const reasoningProjectIds = body.projectIds === undefined ? undefined : await sdk.resolveProjectFilter(access, body.projectIds);
     const explicitMemoryIds = body.memoryIds === undefined ? undefined : [...new Set(body.memoryIds)];
     const ranked = explicitMemoryIds === undefined
       ? await sdk.rankMemories(access, {
@@ -1906,7 +2208,19 @@ async function handleRequest(
         }, dependencies.memoryRanker ?? new LocalLexicalMemoryRanker())
       : await (async () => {
           const memories = await Promise.all(explicitMemoryIds.map((memoryId) => sdk.memoryById(access, memoryId)));
-          if (memories.some((memory) => memory === undefined)) {
+          const eligible = recallMemoryCorpus({
+            memories: new Map(memories.flatMap((memory) => memory === undefined ? [] : [[memory.id, memory]])),
+            forgotten: new Map(),
+          }, access, {
+            ...(body.scope === undefined ? {} : { scope: body.scope }),
+            ...(body.tags === undefined ? {} : { tags: body.tags }),
+            ...(body.sources === undefined ? {} : { sources: body.sources }),
+            ...(reasoningProjectIds === undefined ? {} : { projectIds: reasoningProjectIds }),
+            ...(body.from === undefined ? {} : { from: body.from }),
+            ...(body.to === undefined ? {} : { to: body.to }),
+          });
+          const eligibleIds = new Set(eligible.map((memory) => memory.id));
+          if (explicitMemoryIds.some((memoryId) => !eligibleIds.has(memoryId))) {
             throw new ApiHttpError(404, "reasoning_memory_unavailable", "One or more reasoning memories are unavailable");
           }
           return {
@@ -1944,6 +2258,29 @@ async function handleRequest(
       }),
       evidence,
     );
+    const recalled = new Set(result.citations);
+    let recalledAt = Date.now();
+    for (const { memory } of ranked.memories) {
+      if (!recalled.has(memory.id)) continue;
+      try {
+        await sdk.recordMemoryFeedback(
+          memoryContext(subject, access, memory.spaceId, memory.audience),
+          {
+            id: `reasoning-recall:${randomUUID()}`,
+            t: recalledAt++,
+            worldDate: new Date(recalledAt - 1).toISOString().slice(0, 10),
+          },
+          memory.id,
+          {
+            signal: "recalled",
+            query: body.question,
+            detail: `Cited by ${reasoner.descriptor.id}`,
+          },
+        );
+      } catch (error) {
+        dependencies.reportError?.(error);
+      }
+    }
     sendJson(response, 200, {
       ...result,
       provider: reasoner.descriptor,
@@ -1965,6 +2302,14 @@ async function handleRequest(
     sendJson(response, 200, {
       providers: dependencies.reasoners?.statuses ?? [{ ...fallback.descriptor, configured: true, isDefault: true }],
     });
+    return;
+  }
+
+  if (resource === "trajectory-tasks" && resourceId !== undefined && resourceSegments.length === 3 && resourceSegments[2] === "tree") {
+    if (method !== "GET") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+    const record = await sdk.trajectoryTree(access, resourceId);
+    if (record === undefined) throw new TrajectoryTaskUnavailableError(resourceId);
+    sendJson(response, 200, { record });
     return;
   }
 
@@ -1998,13 +2343,42 @@ async function handleRequest(
     return;
   }
 
+  if (resource === "trajectory-outcomes" && resourceId === undefined) {
+    if (method === "POST") {
+      if (subject.author.kind !== "human") throw new ApiHttpError(403, "operator_required", "Outcome review requires an operator credential");
+      const body = trajectoryOutcomeBodySchema.parse(await readJsonBody(request, maxBodyBytes));
+      const taskSdk = await dependencies.sdks.sdkFor(tenant, { kindPrefixes: ["trajectory."], trajectoryTaskId: body.input.taskId });
+      const result = await taskSdk.recordTrajectoryOutcome(trajectoryContext(subject, access, undefined), body.stamp, body.input);
+      sendJson(response, 201, result);
+      return;
+    }
+    if (method === "GET") {
+      const taskId = url.searchParams.get("taskId");
+      const trajectoryId = url.searchParams.get("trajectoryId");
+      if (!taskId || !trajectoryId) throw new ApiHttpError(400, "invalid_query", "taskId and trajectoryId are required");
+      const taskSdk = await dependencies.sdks.sdkFor(tenant, { kindPrefixes: ["trajectory."], trajectoryTaskId: taskId });
+      const records = await taskSdk.trajectoryOutcomes(access, taskId, trajectoryId);
+      const page = pagedNewestFirst([...records].sort((a, b) => b.recordedAt - a.recordedAt || a.eventId.localeCompare(b.eventId)),
+        "trajectory-outcome", positiveIntegerQuery(url, "limit", 1_000) ?? 100,
+        pageCursorFromUrl(url, "trajectory-outcome"), (record) => record.recordedAt, (record) => record.eventId);
+      sendJson(response, 200, { records: page.items, total: page.total, ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) });
+      return;
+    }
+    throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
+  }
+
   if (resource === "trajectories" && resourceId === undefined) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const body = trajectoryRecordSchema.parse(await readJsonBody(request, maxBodyBytes));
-    const result = await sdk.recordTrajectory(
+    const input = parsedTrajectoryInput(body.input);
+    const taskSdk = await dependencies.sdks.sdkFor(tenant, {
+      kindPrefixes: ["trajectory."],
+      trajectoryTaskId: input.taskId,
+    });
+    const result = await taskSdk.recordTrajectory(
       trajectoryContext(subject, access, body.spaceId, body.captureIdentity),
       body.stamp,
-      parsedTrajectoryInput(body.input),
+      input,
     );
     sendJson(response, 201, result);
     return;
@@ -2021,10 +2395,16 @@ async function handleRequest(
       if (rawOffset !== undefined && (!Number.isInteger(rawOffset) || rawOffset < 0)) {
         throw new ApiHttpError(400, "invalid_query", "offset must be a non-negative integer");
       }
-      const candidates = await sdk.memoryCandidates(access, {
-        ...(status === undefined ? {} : { status }),
-        ...(url.searchParams.has("projectId") ? { projectIds: url.searchParams.getAll("projectId") } : {}),
-      });
+      const requestedProjects = new Set(await sdk.resolveProjectFilter(access, url.searchParams.getAll("projectId")));
+      const storedCandidates = await dependencies.sdks.memoryCandidates?.(tenant, access);
+      const candidates = storedCandidates === undefined
+        ? await sdk.memoryCandidates(access, {
+            ...(status === undefined ? {} : { status }),
+            ...(requestedProjects.size === 0 ? {} : { projectIds: [...requestedProjects] }),
+          })
+        : storedCandidates
+            .filter((view) => status === undefined || view.status === status)
+            .filter((view) => matchesMemoryProjects(view.candidate, [...requestedProjects]));
       if (rawOffset !== undefined) {
         sendJson(response, 200, {
           candidates: limit === undefined
@@ -2115,12 +2495,20 @@ async function handleRequest(
   if (resource === "memory-candidates" && resourceId !== undefined && resourceSegments.length === 3) {
     if (method !== "POST") throw new ApiHttpError(405, "method_not_allowed", "Method not allowed");
     const action = decodeSegment(resourceSegments[2]!, "candidate action");
-    if (action !== "accept" && action !== "reject") {
+    if (action !== "accept" && action !== "reject" && action !== "evidence") {
       throw new ApiHttpError(404, "not_found", "Route not found");
     }
     const view = (await sdk.memoryCandidates(access)).find(({ candidate }) => candidate.id === resourceId);
     if (view === undefined || view.status !== "proposed") {
       throw new ApiHttpError(404, "memory_candidate_unavailable", "Memory candidate is unavailable");
+    }
+    if (action === "evidence") {
+      const body = memoryCandidateSupportSchema.parse(await readJsonBody(request, maxBodyBytes));
+      sendJson(response, 200, await sdk.addMemoryCandidateEvidence(
+        memoryContext(subject, access, view.candidate.spaceId, view.candidate.audience),
+        body.stamp, resourceId, parsedMemoryCandidateInput(body.input),
+      ));
+      return;
     }
     if (view.candidate.audience === "workspace" && !canSteer(access)) {
       throw new ApiHttpError(
@@ -2172,12 +2560,31 @@ async function handleRequest(
         }
         memoryCursor = { createdAt: rawCursor.key, memoryId: rawCursor.id };
       }
-      const { limit, ...filters } = recall;
-      const page = await sdk.recallMemoryPage(access, {
-        ...filters,
-        ...(limit === undefined ? {} : { limit }),
-        ...(memoryCursor === undefined ? {} : { cursor: memoryCursor }),
-      });
+      const { limit, ...originalFilters } = recall;
+      const filters = { ...originalFilters, ...(originalFilters.projectIds === undefined ? {} : { projectIds: await sdk.resolveProjectFilter(access, originalFilters.projectIds) }) };
+      const storedMemories = await dependencies.sdks.memories?.(tenant, access);
+      const page = storedMemories === undefined
+        ? await sdk.recallMemoryPage(access, {
+            ...filters,
+            ...(limit === undefined ? {} : { limit }),
+            ...(memoryCursor === undefined ? {} : { cursor: memoryCursor }),
+          })
+        : (() => {
+            const corpus = recallMemoryCorpus({
+              memories: new Map(storedMemories.map((memory) => [memory.id, memory])),
+              forgotten: new Map(),
+            }, access, filters);
+            const remaining = memoryCursor === undefined
+              ? corpus
+              : corpus.filter((memory) => memory.createdAt < memoryCursor.createdAt || (memory.createdAt === memoryCursor.createdAt && memory.id > memoryCursor.memoryId));
+            const items = remaining.slice(0, limit ?? 100);
+            const last = items.at(-1);
+            return {
+              memories: items.map((memory) => ({ memory })),
+              total: corpus.length,
+              ...(last !== undefined && remaining.length > items.length ? { nextCursor: { createdAt: last.createdAt, memoryId: last.id } } : {}),
+            };
+          })();
       sendJson(response, 200, {
         memories: page.memories,
         total: page.total,

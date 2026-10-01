@@ -22,6 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@_89/fold": "workspace:*"
+    "@_89/fold": "workspace:*",
+    "zod": "^3.25.0"
   }
 }

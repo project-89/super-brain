@@ -83,6 +83,25 @@ export function messagesFromVaultRecords(
   for (const record of records) {
     const type = stringValue(record.type);
     const at = stringValue(record.timestamp);
+    if (source === "gemini" || source === "hermes") {
+      const role = source === "gemini" ? (type === "gemini" ? "assistant" : type) : stringValue(record.role);
+      const id = typeof record.id === "number" ? String(record.id) : stringValue(record.id);
+      if (type === "archive_metadata") {
+        observedProjectPath = stringValue(recordValue(record.metadata)?.cwd);
+        continue;
+      }
+      if (role === "user") startTurn(id);
+      if (["user", "assistant", "system", "tool"].includes(role ?? "") && currentTurn === undefined) startTurn();
+      if (role === "user" || role === "assistant") {
+        const text = source === "gemini" && Array.isArray(record.content)
+          ? record.content.flatMap((part) => {
+            const value = recordValue(part);
+            return value?.thought !== true && typeof value?.text === "string" ? [value.text] : [];
+          }).join("\n") : textContent(record.content);
+        add(role, text, id, at);
+      }
+      continue;
+    }
     if (source === "claude-code") {
       if (type === "user") {
         const message = recordValue(record.message);
@@ -94,9 +113,13 @@ export function messagesFromVaultRecords(
         if (record.isMeta !== true && !hasToolResult) {
           startTurn(stringValue(record.promptId) ?? stringValue(record.uuid));
           add("user", content, stringValue(record.uuid), at);
+        } else if (hasToolResult && currentTurn === undefined) {
+          startTurn();
         }
       } else if (type === "assistant") {
         const message = recordValue(record.message);
+        const blocks = Array.isArray(message?.content) ? message.content : [];
+        if (currentTurn === undefined && blocks.some((block) => recordValue(block)?.type !== "thinking")) startTurn();
         add("assistant", textContent(message?.content), stringValue(message?.id), at);
       }
       continue;
@@ -106,8 +129,12 @@ export function messagesFromVaultRecords(
     if (type === "turn_context") startTurn(stringValue(payload?.turn_id));
     else if (type === "event_msg" && payload?.type === "task_started") startTurn(stringValue(payload.turn_id));
     else if (type === "response_item" && payload?.type === "message") {
+      // Match importer turn allocation even when boilerplate or non-dialogue text is filtered out.
+      if (currentTurn === undefined) startTurn();
       const role = payload.role === "user" || payload.role === "assistant" ? payload.role : undefined;
       if (role !== undefined) add(role, textContent(payload.content), stringValue(payload.id), at);
+    } else if (type === "response_item" && ["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output", "web_search_call"].includes(String(payload?.type))) {
+      if (currentTurn === undefined) startTurn();
     }
   }
   return messages;
@@ -137,9 +164,10 @@ export async function readVaultMessages(
     const decrypted = decryptVaultLine(line, encryptionKey);
     try {
       const record = recordValue(JSON.parse(decrypted) as unknown);
-      if (record !== undefined) records.push(record);
+      if (record === undefined) throw new Error("Vault record is not an object");
+      records.push(record);
     } catch {
-      // Redacted vaults contain JSONL; malformed lines are ignored independently.
+      throw new Error("Transcript vault contains malformed JSON; extraction coverage is incomplete");
     }
   }
   return messagesFromVaultRecords(run.source, run.nativeId, records);

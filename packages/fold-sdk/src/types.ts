@@ -44,19 +44,31 @@ import type {
 export type FoldSdkAccessContext = EpistemicAccessContext;
 
 export interface FoldSdkStore {
+  eventById?(eventId: string): Promise<FoldLogEntry | undefined>;
+  systemProjection?(access: FoldSdkAccessContext, include: "canon" | "canon+draft"): Promise<FoldSdkSystemProjection>;
   readonly stableReads?: boolean;
+  /** Reused raw event object references never change content; enables envelope reuse. */
+  readonly immutableEventReferences?: boolean;
   read(options?: { readonly missing?: "error" | "empty" }): Promise<{
     readonly entries: readonly FoldLogEntry[];
     readonly revision?: string;
   }>;
   append(entry: FoldLogEntry): Promise<void>;
   appendMany?(entries: readonly FoldLogEntry[]): Promise<void>;
+  appendValidated?(entry: FoldLogEntry): Promise<"appended" | "unchanged">;
+  appendManyValidated?(entries: readonly FoldLogEntry[]): Promise<void>;
   revision?(): Promise<string>;
 }
 
 export interface FoldSdkCursor {
   readonly t: number;
   readonly eventId: string;
+}
+
+/** Transport position, distinct from a source-time replay/projection cursor. */
+export interface FoldIngestionCursor {
+  readonly kind: "ingestion";
+  readonly sequence: string;
 }
 
 export interface FoldSdkReadOptions {
@@ -75,6 +87,12 @@ export interface FoldSdkProjectOptions extends FoldSdkReadOptions {
 export interface FoldSdkProjection {
   readonly entries: readonly FoldLogEntry[];
   readonly state: FoldState;
+}
+
+export interface FoldSdkSystemProjection {
+  readonly state: FoldState;
+  readonly appliedEventCount: number;
+  readonly appliedChangeCount: number;
 }
 
 export type FoldEventAccessDenialReason =

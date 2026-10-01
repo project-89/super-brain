@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   listMemoryCandidateViews,
   makeMemoryCandidateAcceptedEvent,
+  makeMemoryCandidateEvidenceAddedEvent,
+  equivalentMemoryCandidateMeaning,
+  candidateSupportSourceMatches,
   makeMemoryCandidateProposedEvent,
   makeMemoryCandidateRejectedEvent,
   memoryCandidateLogRecordsFromEvent,
@@ -25,6 +28,48 @@ const candidateInput = {
 };
 
 describe("memory candidate evidence", () => {
+  it("preserves additive support during replay and requires review of the latest evidence", () => {
+    const ctx = context({ audience: "workspace" });
+    const proposed = makeMemoryCandidateProposedEvent(ctx, stamp("proposal", 100), candidateInput);
+    const before = rebuildMemoryCandidates([proposed]).candidates.get(MEMORY_A)!;
+    const support = makeMemoryCandidateEvidenceAddedEvent(ctx, stamp("support", 110), before,
+      [...before.evidence, { eventId: "later-source", turnId: "late-turn", projectId: "project-a" }]);
+    const after = rebuildMemoryCandidates([support, proposed]).candidates.get(MEMORY_A)!;
+    expect(after.evidence).toHaveLength(2);
+    expect(after.content).toEqual(before.content);
+    expect(after.supportEventIds).toEqual(["support"]);
+    const stale = makeMemoryCandidateAcceptedEvent(ctx, stamp("accept", 120), before, MEMORY_B);
+    expect(() => rebuildMemoryCandidates([proposed, support, stale])).toThrow(/scope does not match/);
+    const accepted = makeMemoryCandidateAcceptedEvent(ctx, stamp("accept", 120), after, MEMORY_B);
+    expect(listMemoryCandidateViews(rebuildMemoryCandidates([accepted, support, proposed]))[0]?.status).toBe("accepted");
+    const late = makeMemoryCandidateEvidenceAddedEvent(ctx, stamp("late", 130), after, [{ eventId: "new-source" }]);
+    expect(() => rebuildMemoryCandidates([proposed, support, accepted, late])).toThrow(/undecided/);
+  });
+
+  it("compares full meaning canonically without collapsing content or scope variants", () => {
+    expect(equivalentMemoryCandidateMeaning(candidateInput, { ...candidateInput, projectIds: ["project-a", "project-b"], tags: ["architecture", "decision"] })).toBe(true);
+    expect(equivalentMemoryCandidateMeaning(candidateInput, { ...candidateInput, content: { decision: "Use another database" } })).toBe(false);
+    expect(equivalentMemoryCandidateMeaning(candidateInput, { ...candidateInput, projectIds: ["project-c"] })).toBe(false);
+    expect(equivalentMemoryCandidateMeaning(candidateInput, { ...candidateInput, audience: "personal" })).toBe(false);
+  });
+
+  it("uses verified project IDs, accommodates aliases and multi-project runs, and ignores display names", () => {
+    const ctx = context({ audience: "workspace" });
+    const proposed = makeMemoryCandidateProposedEvent(ctx, stamp("proposal", 100), { ...candidateInput, projectIds: ["project-a"] });
+    const candidate = rebuildMemoryCandidates([proposed]).candidates.get(MEMORY_A)!;
+    const displayOnly = { ...proposed, capture: { ...proposed.capture, identity: { ...proposed.capture.identity, project: "Human project name" } } };
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source" }, displayOnly)).toBe(true);
+    const projectB = { ...displayOnly, capture: { ...displayOnly.capture, identity: { ...displayOnly.capture.identity, repo: "project-b" } } };
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source" }, projectB, candidate.projectIds, ["project-a", "project-b"])).toBe(false);
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source", projectId: "project-a" }, projectB, candidate.projectIds, ["project-a", "project-b"])).toBe(false);
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source" }, projectB, ["project-a", "project-b"], ["project-a", "project-b"])).toBe(true);
+    const unknownRepo = { ...displayOnly, capture: { ...displayOnly.capture, identity: { ...displayOnly.capture.identity, repo: "https://github.com/example/repository" } } };
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source" }, unknownRepo, candidate.projectIds, ["project-a", "project-b"])).toBe(true);
+    const mixed = { ...displayOnly, kind: "transcript.run-imported", changes: [{ ...proposed.changes[0]!, verb: "create" as const,
+      subject: "run", nodeKind: "fact", after: { run: { projectId: "project-b", segments: [{ projectId: "project-a" }] } } }] };
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source", projectId: "project-a" }, mixed)).toBe(true);
+    expect(candidateSupportSourceMatches(candidate, { eventId: "source", projectId: "project-c" }, mixed)).toBe(false);
+  });
   it("records normalized provenance and rebuilds an accepted decision", () => {
     const proposer = context({ principalId: "agent-a", audience: "workspace" });
     const proposed = makeMemoryCandidateProposedEvent(proposer, stamp("candidate-event", 100), candidateInput);

@@ -35,11 +35,15 @@ export function authorizeEventAccess(
 }
 
 export function assertCanAppendEvent(
-  event: Pick<FoldEvent, "capture">,
+  event: Pick<FoldEvent, "capture"> & Partial<Pick<FoldEvent, "kind" | "author">>,
   access: FoldSdkAccessContext,
 ): void {
   if (access.platformDataAccess === true) {
     throw new FoldSdkAccessError("event append denied: platform data access is read-only");
+  }
+  if (event.kind?.startsWith("identity.") &&
+    (!["owner", "admin"].includes(access.workspaceRole) || event.author?.kind !== "human" || event.author.id !== access.principalId)) {
+    throw new FoldSdkAccessError("identity append requires an authenticated workspace administrator");
   }
   const decision = authorizeEventAccess(event, access);
   if (!decision.allowed) {

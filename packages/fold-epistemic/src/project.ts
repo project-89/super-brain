@@ -1,6 +1,7 @@
 import { compareEventKeys, type FoldEvent } from "@_89/fold";
 
 import { forgottenMemoryFromRecord, memoryLogRecordsFromEvent } from "./events.js";
+import { validateMemoryApplicability } from "./applicability.js";
 import type { ForgottenMemory, MemoryProjection, PersonalMemory } from "./types.js";
 import { assertUuidV7 } from "./uuidv7.js";
 
@@ -45,6 +46,7 @@ export function rebuildMemories(events: readonly FoldEvent[]): MemoryProjection 
           throw new MemoryProjectionError(`${record.recordType} predates memory ${record.memoryId}`);
         }
         if (record.recordType === "revised") {
+          validateMemoryApplicability({ ...current, ...record.patch });
           memories.set(record.memoryId, {
             ...current,
             ...record.patch,

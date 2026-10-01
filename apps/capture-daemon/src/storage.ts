@@ -21,6 +21,7 @@ import type {
   StoredHookArtifact,
   VaultArtifact,
 } from "./types.js";
+import { codexSessionIdFromPath, locateTranscript } from "./transcript-path.js";
 
 const EMPTY_STATE: CaptureState = {
   version: 1,
@@ -338,7 +339,10 @@ export class TranscriptSnapshotStore {
     this.root = resolve(stateRoot, "transcript-snapshots");
   }
 
-  async store(source: HookSource, sourcePath: string): Promise<string> {
+  async store(source: HookSource, sourcePath: string, nativeSessionId?: string): Promise<string> {
+    const requestedPath = sourcePath;
+    const expectedId = nativeSessionId ?? codexSessionIdFromPath(sourcePath);
+    sourcePath = await locateTranscript(source, sourcePath, nativeSessionId);
     const before = await stat(sourcePath);
     if (!before.isFile()) throw new Error(`transcript source is not a regular file: ${sourcePath}`);
     const directory = join(this.root, safeSource(source));
@@ -348,6 +352,7 @@ export class TranscriptSnapshotStore {
     const digest = createHash("sha256");
     try {
       const lines = createInterface({ input: createReadStream(sourcePath), crlfDelay: Infinity });
+      let first = true;
       for await (const line of lines) {
         if (line.trim().length === 0) continue;
         let parsed: unknown;
@@ -356,13 +361,21 @@ export class TranscriptSnapshotStore {
         } catch {
           parsed = line;
         }
+        if (first && sourcePath !== requestedPath) {
+          const record = parsed as { type?: string; payload?: { id?: string } } | null;
+          if (record?.type !== "session_meta" || record.payload?.id !== expectedId) {
+            throw new Error("relocated transcript native session identity changed during snapshot");
+          }
+        }
+        first = false;
         const protectedRecord = redactTranscriptRecord(parsed, this.options);
         const serialized = `${JSON.stringify(protectedRecord.value)}\n`;
         digest.update(serialized);
         await output.writeFile(serialized, "utf8");
       }
+      if (first && sourcePath !== requestedPath) throw new Error("relocated transcript has no native session metadata");
       const after = await stat(sourcePath);
-      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ino !== after.ino || before.dev !== after.dev) {
         throw new Error("transcript source changed while its durable snapshot was being created");
       }
       await output.sync();
@@ -404,14 +417,15 @@ export class HookVault {
     } = {},
   ) {}
 
-  async store(source: HookSource, payload: unknown, eventTime: number): Promise<VaultArtifact> {
+  async store(source: HookSource, payload: unknown, eventTime: number, authority: "agent" | "operator" = "agent"): Promise<VaultArtifact> {
     const anonymized = this.options.anonymizer?.value(payload) ?? payload;
     const redacted = redactJsonValue(anonymized, {
       ...(this.options.retainEncryptedReasoning === undefined
         ? {}
         : { retainEncryptedContent: this.options.retainEncryptedReasoning }),
     }).value;
-    const canonical = JSON.stringify({ source, payload: redacted });
+    const provenance = authority === "operator" ? { authority } : {};
+    const canonical = JSON.stringify({ source, payload: redacted, ...provenance });
     const id = sha256(canonical);
     const directory = join(this.root, "hooks", safeSource(source), id.slice(0, 2));
     const path = join(directory, `${id}.json${this.encryptionKey === undefined ? "" : ".enc"}`);
@@ -422,7 +436,7 @@ export class HookVault {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const receivedAt = new Date(eventTime).toISOString();
-    const serialized = `${JSON.stringify({ version: 1, id, source, receivedAt, eventTime, payload: redacted })}\n`;
+    const serialized = `${JSON.stringify({ version: 1, id, source, receivedAt, eventTime, payload: redacted, ...provenance })}\n`;
     await atomicPrivateText(
       path,
       this.encryptionKey === undefined ? serialized : `${encryptVaultLine(serialized.trimEnd(), this.encryptionKey)}\n`,
@@ -475,6 +489,7 @@ export class HookVault {
           receivedAt: parsed.receivedAt,
           eventTime: parsed.eventTime,
           payload: record,
+          ...(parsed.authority === "operator" ? { authority: "operator" as const } : {}),
         });
       }
     }
@@ -565,6 +580,11 @@ export class DurableSpool {
     return unlink(path);
   }
 
+  async replacePending(path: string, job: SpoolJob): Promise<void> {
+    if (dirname(resolve(path)) !== resolve(this.pending)) throw new Error("job is outside the pending spool");
+    await atomicPrivateJson(path, job);
+  }
+
   async reject(path: string, reason: string): Promise<void> {
     const name = path.split("/").at(-1) ?? `${Date.now()}.json`;
     const target = join(this.failed, name);
@@ -647,6 +667,54 @@ export class DurableSpool {
       resolved += 1;
     }
     return { matched: selected.length, resolved };
+  }
+
+  async recoverFailedTranscripts(
+    snapshots: TranscriptSnapshotStore,
+    confirm = false,
+    options: { readonly jobId?: string } = {},
+  ): Promise<{ readonly matched: number; readonly recovered: number; readonly unavailable: number; readonly jobs: readonly { readonly id: string; readonly status: string; readonly reason?: string }[] }> {
+    await this.initialize();
+    const names = (await readdir(this.failed)).filter(name => name.endsWith(".json") && !name.endsWith(".error.json")).sort();
+    const results: { id: string; status: string; reason?: string }[] = [];
+    let recovered = 0;
+    let unavailable = 0;
+    for (const name of names) {
+      const source = join(this.failed, name);
+      const job = JSON.parse(await readFile(source, "utf8")) as SpoolJob;
+      if (job.kind !== "transcript" || (options.jobId !== undefined && options.jobId !== job.id)) continue;
+      try {
+        await locateTranscript(job.source, job.path, job.nativeSessionId);
+        if (!confirm) { results.push({ id: job.id, status: "recoverable" }); continue; }
+        const target = join(this.pending, name);
+        try {
+          await stat(target);
+          throw new Error("a pending job already has this identity");
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const snapshot = job.ownedSnapshot ? job.path : await snapshots.store(job.source, job.path, job.nativeSessionId);
+        const retry = {
+          ...job, path: snapshot, originalPath: job.originalPath ?? job.path, ownedSnapshot: true as const,
+          notBefore: new Date().toISOString(), deadlineAt: new Date(Date.now() + 7 * 24 * 60 * 60_000).toISOString(),
+        };
+        await atomicPrivateJson(join(this.resolved, `${name}.recovery.json`), {
+          recoveredAt: new Date().toISOString(), originalJob: job, retryJob: retry,
+          reason: "native transcript available; queued durable policy-filtered snapshot",
+        });
+        await atomicPrivateJson(target, retry);
+        await unlink(source);
+        await rename(`${source}.error.json`, join(this.resolved, `${name}.error.json`)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        recovered += 1;
+        results.push({ id: job.id, status: "requeued" });
+      } catch (error) {
+        unavailable += 1;
+        results.push({ id: job.id, status: "unavailable", reason: (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? "source absent from original location and identity-verified archive lookup; failed job retained"
+          : error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return { matched: results.length, recovered, unavailable, jobs: results };
   }
 
   async retryFailed(

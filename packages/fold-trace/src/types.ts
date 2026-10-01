@@ -1,6 +1,11 @@
 import type { CaptureEnvelope } from "@_89/fold";
 
 export type TraceOutcome = "success" | "failure" | "unknown";
+export interface OutcomeEvidence {
+  readonly kind: "operator-verdict" | "harness-error";
+  readonly eventId: string;
+  readonly artifactId?: string;
+}
 export type TraceStepRole =
   | "model_thought"
   | "tool_call"
@@ -44,6 +49,7 @@ export interface RawTrajectory {
     readonly version?: string;
   };
   readonly outcome: TraceOutcome;
+  readonly outcomeEvidence?: OutcomeEvidence;
   readonly capture: CaptureEnvelope;
   readonly steps: readonly TraceStep[];
 }
@@ -104,6 +110,7 @@ export interface ProjectedTrajectory {
   readonly taskId: string;
   readonly model: RawTrajectory["model"];
   readonly outcome: TraceOutcome;
+  readonly outcomeEvidence?: OutcomeEvidence;
   readonly capture: CaptureEnvelope;
   readonly steps: readonly ProjectedStep[];
 }

@@ -1,6 +1,7 @@
 import { parseEvent, type FoldEvent, type JsonValue, type Provenance } from "@_89/fold";
 
 import { assertCanWritePersonalMemory, validateAccessContext } from "./access.js";
+import { parseMemoryApplicability, validateMemoryApplicability } from "./applicability.js";
 import type {
   EpistemicEventContext,
   EpistemicEventStamp,
@@ -205,6 +206,7 @@ function memoryJson(memory: PersonalMemory): Record<string, JsonValue> {
     ...(memory.spaceId === undefined ? {} : { spaceId: memory.spaceId }),
     creatorId: memory.creatorId,
     audience: memory.audience,
+    ...(memory.applicability === undefined ? {} : { applicability: memory.applicability }),
     projectIds: [...memory.projectIds],
     source: memory.source,
     summary: memory.summary,
@@ -238,6 +240,8 @@ function validateEvidence(evidence: readonly MemoryCandidateEvidence[]): void {
 
 function patchJson(patch: MemoryRevisionPatch): Record<string, JsonValue> {
   return {
+    ...(patch.applicability === undefined ? {} : { applicability: patch.applicability }),
+    ...(patch.projectIds === undefined ? {} : { projectIds: [...patch.projectIds] }),
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: [...patch.tags] }),
@@ -276,6 +280,7 @@ export function makeMemoryRecordedEvent(
     ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
     creatorId: context.access.principalId,
     audience,
+    ...(input.applicability === undefined ? {} : { applicability: input.applicability }),
     projectIds: normalizeMemoryProjectIds(input.projectIds),
     source: input.source,
     summary: input.summary ?? summarizeMemoryContent(content),
@@ -287,6 +292,7 @@ export function makeMemoryRecordedEvent(
     updatedAt: stamp.t,
     revision: 0,
   };
+  validateMemoryApplicability(memory);
   return makeEvent(context, stamp, {
     kind: "memory.recorded",
     title: `${audience === "personal" ? "Personal" : "Workspace"} memory recorded from ${input.source}`,
@@ -318,7 +324,7 @@ export function makeMemoryRevisedEvent(
   if (stamp.t < memory.updatedAt) {
     throw new MemoryEventError("memory revision must not predate the current memory");
   }
-  const allowed = new Set(["summary", "content", "tags", "evidence"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "projectIds"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
@@ -327,6 +333,8 @@ export function makeMemoryRevisedEvent(
   }
   validateEvidence(patch.evidence ?? []);
   const normalizedPatch: MemoryRevisionPatch = {
+    ...(patch.applicability === undefined ? {} : { applicability: parseMemoryApplicability(patch.applicability) }),
+    ...(patch.projectIds === undefined ? {} : { projectIds: normalizeMemoryProjectIds(patch.projectIds) }),
     ...(patch.summary === undefined ? {} : { summary: patch.summary }),
     ...(patch.content === undefined ? {} : { content: patch.content }),
     ...(patch.tags === undefined ? {} : { tags: normalizeMemoryTags(patch.tags) }),
@@ -335,6 +343,7 @@ export function makeMemoryRevisedEvent(
   if (Object.keys(normalizedPatch).length === 0) {
     throw new MemoryEventError("memory revision patch must not be empty");
   }
+  validateMemoryApplicability({ ...memory, ...normalizedPatch });
   return makeEvent(context, stamp, {
     kind: "memory.revised",
     title: `${memory.audience === "personal" ? "Personal" : "Workspace"} memory ${memory.id} revised`,
@@ -509,15 +518,19 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
   const entities = parseEntities(memory.entities);
   const evidence = parseEvidence(memory.evidence);
   for (const entity of entities) validateEntity(entity);
+  const projectIds = normalizeMemoryProjectIds(
+    memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds"),
+  );
+  const applicability = memory.applicability === undefined ? undefined : parseMemoryApplicability(memory.applicability);
+  validateMemoryApplicability({ projectIds, ...(applicability === undefined ? {} : { applicability }) });
   return {
     id,
     workspaceId: stringValue(memory.workspaceId, "memory workspaceId"),
     ...(memory.spaceId === undefined ? {} : { spaceId: stringValue(memory.spaceId, "memory spaceId") }),
     creatorId: stringValue(memory.creatorId, "memory creatorId"),
     audience: memoryAudience(memory.audience),
-    projectIds: normalizeMemoryProjectIds(
-      memory.projectIds === undefined ? [] : stringArray(memory.projectIds, "memory projectIds"),
-    ),
+    ...(applicability === undefined ? {} : { applicability }),
+    projectIds,
     source,
     summary,
     content: memory.content,
@@ -532,12 +545,14 @@ function parseMemory(value: JsonValue | undefined): PersonalMemory {
 
 function parsePatch(value: JsonValue | undefined): MemoryRevisionPatch {
   const patch = objectValue(value, "memory revision patch");
-  const allowed = new Set(["summary", "content", "tags", "evidence"]);
+  const allowed = new Set(["summary", "content", "tags", "evidence", "applicability", "projectIds"]);
   for (const key of Object.keys(patch)) {
     if (!allowed.has(key)) throw new MemoryEventError(`unknown memory revision field: ${key}`);
   }
   if (Object.keys(patch).length === 0) throw new MemoryEventError("memory revision patch must not be empty");
   const parsed: MemoryRevisionPatch = {
+    ...(patch.applicability === undefined ? {} : { applicability: parseMemoryApplicability(patch.applicability) }),
+    ...(patch.projectIds === undefined ? {} : { projectIds: normalizeMemoryProjectIds(stringArray(patch.projectIds, "projectIds")) }),
     ...(patch.summary === undefined
       ? {}
       : { summary: textValue(patch.summary, "summary") }),

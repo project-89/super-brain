@@ -6,8 +6,8 @@ import {
   type TenantAdministration,
 } from "../src/index.js";
 import type { MemoryRanker } from "@_89/fold-sdk";
-import type { TranscriptImportBundle } from "@_89/fold-transcript";
-import { describe, expect, it } from "vitest";
+import { derivationHash, type TranscriptImportBundle } from "@_89/fold-transcript";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   MEMORY_A,
@@ -16,6 +16,7 @@ import {
   identityDirectory,
   memoryRecordBody,
   startApi,
+  MemorySdkRegistry,
 } from "./helpers.js";
 
 const trajectoryTree = {
@@ -144,6 +145,25 @@ const transcriptBundle: TranscriptImportBundle = {
 };
 
 describe("Fold HTTP API", () => {
+  it("serves filtered event cursor pages without replaying the SDK corpus", async () => {
+    const registry = new MemorySdkRegistry();
+    const sdk = await registry.sdkFor({ organizationId: "local", workspaceId: "workspace-1" });
+    const replay = vi.spyOn(sdk, "listEntries").mockRejectedValue(new Error("Full corpus replay is forbidden"));
+    const eventPage = vi.fn().mockResolvedValueOnce({ entries: [], total: 101, nextCursor: { t: 20, eventId: "last" } })
+      .mockResolvedValueOnce({ entries: [], total: 101 });
+    const api = await startApi({ sdks: { sdkFor: async () => sdk, eventPage } });
+    try {
+      const path = "/v1/workspaces/workspace-1/events?kind=transcript.run-imported&order=desc&limit=100";
+      const first = await apiRequest(api.baseUrl, path, { token: "token-a" });
+      expect(first.status).toBe(200);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+      expect((await apiRequest(api.baseUrl, `${path}&pageCursor=${encodeURIComponent(first.body.nextCursor)}`, { token: "token-a" })).status).toBe(200);
+      expect(eventPage.mock.calls[0]![2]).toEqual({ kinds: ["transcript.run-imported"], limit: 100 });
+      expect(eventPage.mock.calls[1]![2]).toEqual({ kinds: ["transcript.run-imported"], limit: 100, before: { t: 20, eventId: "last" } });
+      expect(replay).not.toHaveBeenCalled();
+    } finally { replay.mockRestore(); await api.close(); }
+  });
+
   it("configures bounded HTTP connection lifetimes", () => {
     const directory = identityDirectory();
     const server = createApiServer({
@@ -542,6 +562,31 @@ describe("Fold HTTP API", () => {
     } finally {
       await api.close();
     }
+  });
+
+  it("paginates System nodes with the same code-unit ordering as its cursor", async () => {
+    const api = await startApi();
+    try {
+      const ids = ["a", "A", "a_", "a-", "Z", "z"];
+      for (const [index, id] of ids.entries()) {
+        const event = apiEvent({ id: `sort-${index}`, t: index + 1 });
+        await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", {
+          method: "POST", token: "token-a",
+          body: { event: { ...event, changes: [{ ...event.changes[0], subject: id }] } },
+        });
+      }
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const response = await apiRequest(api.baseUrl,
+          "/v1/workspaces/workspace-1/projection?section=nodes&limit=2" + (cursor === undefined ? "" : `&pageCursor=${encodeURIComponent(cursor)}`),
+          { token: "token-a" });
+        expect(response.status).toBe(200);
+        seen.push(...response.body.state.nodes.map(([id]: [string]) => id));
+        cursor = response.body.nextCursor;
+      } while (cursor !== undefined);
+      expect(seen).toEqual([...ids].sort());
+    } finally { await api.close(); }
   });
 
   it("streams filtered events after a resumable exclusive cursor", async () => {
@@ -982,7 +1027,7 @@ describe("Fold HTTP API", () => {
           answer: "Relevant evidence: Rotate the access token before retrying.",
           citations: [MEMORY_A],
           provider: { id: "local-evidence-v1", kind: "extractive" },
-          ranking: { id: "local-bm25-v1", kind: "lexical", corpusSize: 1 },
+          ranking: { id: "local-bm25-v2", kind: "lexical", corpusSize: 1 },
           evidence: [{ memoryId: MEMORY_A, source: "conversation", score: 1 }],
         },
       });
@@ -1042,7 +1087,31 @@ describe("Fold HTTP API", () => {
         "/v1/workspaces/workspace-1/events",
         { token: "token-a" },
       );
-      expect(entries.body.entries.map((entry: any) => entry.event.kind)).toEqual(["memory.recorded"]);
+      expect(entries.body.entries.map((entry: any) => entry.event.kind)).toEqual([
+        "memory.recorded",
+        "memory.feedback-recorded",
+        "memory.feedback-recorded",
+      ]);
+
+      const quality = await apiRequest(
+        api.baseUrl,
+        "/v1/workspaces/workspace-1/data-quality",
+        { token: "token-a" },
+      );
+      expect(quality).toMatchObject({
+        status: 200,
+        body: {
+          report: {
+            corpus: { events: 3 },
+            memories: {
+              total: 1,
+              recalled: 1,
+              validated: 0,
+              feedback: { recalled: 2, helpful: 0, unhelpful: 0, superseded: 0 },
+            },
+          },
+        },
+      });
     } finally {
       await api.close();
     }
@@ -1226,6 +1295,51 @@ describe("Fold HTTP API", () => {
     }
   });
 
+  it("appends operator verdicts, pages history, and blocks sensor and generic-event bypasses", async () => {
+    const directory = new StaticIdentityDirectory({
+      operator: { principalId: "operator", workspaces: { "workspace-1": { role: "owner", spaces: { "space-a": "reader" } } } },
+      sensor: { principalId: "sensor", author: { kind: "ingest", id: "sensor" }, capabilities: ["trajectories:review"], workspaces: { "workspace-1": { role: "owner", spaces: { "space-a": "reader" } } } },
+      capture: { principalId: "capture", capabilities: ["trajectories:write"], workspaces: { "workspace-1": { role: "owner" } } },
+      hidden: { principalId: "hidden", workspaces: { "workspace-1": { role: "owner" } } },
+    });
+    const api = await startApi({ authenticator: directory, memberships: directory });
+    const root = "/v1/workspaces/workspace-1";
+    try {
+      expect((await apiRequest(api.baseUrl, `${root}/trajectory-tasks`, { method: "POST", token: "operator", body: { stamp: { id: "tree", t: 1, worldDate: "2026-09-10" }, spaceId: "space-a", tree: trajectoryTree } })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, `${root}/trajectories`, { method: "POST", token: "operator", body: { stamp: { id: "run", t: 2, worldDate: "2026-09-10" }, spaceId: "space-a", input: trajectoryInput("run-a", "model", "success", ["observe", "expiry", "patch", "pass"]) } })).status).toBe(201);
+      const body = { stamp: { id: "review", t: 3, worldDate: "2026-09-10" }, input: { taskId: trajectoryTree.taskId, trajectoryId: "run-a", outcome: "failure", reason: "Manual check found a reproducible regression", previousEventId: null } };
+      for (const token of ["sensor", "capture"]) expect((await apiRequest(api.baseUrl, `${root}/trajectory-outcomes`, { method: "POST", token, body })).status).toBe(403);
+      expect((await apiRequest(api.baseUrl, `${root}/trajectory-outcomes`, { method: "POST", token: "hidden", body })).status).toBe(404);
+      const reviewed = await apiRequest(api.baseUrl, `${root}/trajectory-outcomes`, { method: "POST", token: "operator", body });
+      expect(reviewed).toMatchObject({ status: 201, body: { record: { spaceId: "space-a", actorId: "operator" } } });
+      expect((await apiRequest(api.baseUrl, `${root}/trajectory-outcomes`, { method: "POST", token: "operator", body })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, `${root}/events`, { method: "POST", token: "operator", body: { event: reviewed.body.event } })).body.error.code).toBe("reserved_event_route");
+      expect((await apiRequest(api.baseUrl, `${root}/trajectory-outcomes`, { method: "POST", token: "operator", body: { ...body, stamp: { ...body.stamp, id: "stale", t: 4 } } })).status).toBe(409);
+      expect((await apiRequest(api.baseUrl, `${root}/trajectory-outcomes`, { method: "POST", token: "operator", body: { stamp: { ...body.stamp, id: "withdraw", t: 5 }, input: { ...body.input, outcome: "unknown", previousEventId: "review" } } })).status).toBe(201);
+      const path = `${root}/trajectory-outcomes?taskId=${trajectoryTree.taskId}&trajectoryId=run-a&limit=1`;
+      const history = await apiRequest(api.baseUrl, path, { token: "operator" });
+      expect(history.body).toMatchObject({ total: 2, records: [{ eventId: "withdraw" }], nextCursor: expect.any(String) });
+      expect((await apiRequest(api.baseUrl, `${path}&pageCursor=${history.body.nextCursor}`, { token: "operator" })).body.records).toMatchObject([{ eventId: "review" }]);
+      expect((await apiRequest(api.baseUrl, path, { token: "hidden" })).status).toBe(404);
+      const report = await apiRequest(api.baseUrl, `${root}/trajectory-tasks/${trajectoryTree.taskId}`, { token: "operator" });
+      expect(report.body.report).toMatchObject({ outcomeCounts: { unknown: 1, failure: 0, success: 0 }, records: [{ recordedOutcome: "success", trajectory: { outcome: "unknown" } }] });
+    } finally { await api.close(); }
+  });
+
+  it("pages full-detail task lists before loading tree records", async () => {
+    const registry = new MemorySdkRegistry();
+    const sdk = await registry.sdkFor({ organizationId: "local", workspaceId: "workspace-1" });
+    const summaries = vi.spyOn(sdk, "trajectoryTasks").mockResolvedValue([{ taskId: "task-a", tree: { ...trajectoryTree, taskId: "task-a" } as any, trajectoryCount: 1, successCount: 0, failureCount: 0, unknownCount: 1, lastRecordedAt: 2 }]);
+    const sdkFor = vi.fn(async () => sdk);
+    const api = await startApi({ sdks: { sdkFor, trajectoryTasks: async () => ({ tasks: [{ taskId: "task-a", trajectoryCount: 1, successCount: 0, failureCount: 0, unknownCount: 1, lastRecordedAt: 2 }], total: 400, nextCursor: { lastRecordedAt: 2, taskId: "task-a" } }) } });
+    try {
+      const response = await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/trajectory-tasks?limit=1", { token: "token-a" });
+      expect(response).toMatchObject({ status: 200, body: { tasks: [{ tree: { taskId: "task-a" } }], total: 400, nextCursor: expect.any(String) } });
+      expect(sdkFor).toHaveBeenLastCalledWith({ organizationId: "local", workspaceId: "workspace-1" }, { kindPrefixes: ["trajectory."], trajectoryTaskId: "task-a" });
+      expect(summaries).toHaveBeenCalledTimes(1);
+    } finally { summaries.mockRestore(); await api.close(); }
+  });
+
   it("does not reveal unavailable trajectory tasks", async () => {
     const api = await startApi();
     try {
@@ -1256,6 +1370,58 @@ describe("Fold HTTP API", () => {
         },
       );
       expect(response).toMatchObject({ status: 404, body: { error: { code: "not_found" } } });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("records historical derivations owner-only with idempotent chunks and cursor-paged evidence", async () => {
+    const api = await startApi();
+    const route = "/v1/workspaces/workspace-1/transcript-derivations";
+    try {
+      const retained = { ...transcriptBundle, artifact: { ...transcriptArtifact, stored: true, contentPolicy: "redacted" } };
+      expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/transcript-imports", { method: "POST", token: "token-b", body: retained })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, `${route}/sources`, { token: "token-a" })).body).toMatchObject({ total: 1, sources: [{ run: { id: transcriptRun.id } }] });
+      const records = [0, 1].map((ordinal) => ({ ordinal, line: ordinal + 1, kind: "usage", sourceType: "token_usage_record", data: { tokens: ordinal } }));
+      const manifest = { runId: transcriptRun.id, artifactId: transcriptArtifact.id, sourceSha256: transcriptArtifact.sha256, inputSha256: "d".repeat(64), inputKind: "retained-policy-artifact", parser: { id: "test", version: "1" }, policy: { contentPolicy: "redacted" }, records: 2, sourceRecords: 2, byKind: { usage: 2 }, unclassifiedTypes: {}, chunkHashes: [derivationHash(records)] };
+      expect((await apiRequest(api.baseUrl, route, { method: "POST", token: "token-a", body: { manifest } })).status).toBe(403);
+      expect((await apiRequest(api.baseUrl, route, { method: "POST", token: "token-b", body: { manifest } })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, route, { method: "POST", token: "token-b", body: { manifest } })).status).toBe(200);
+      const derivationId = derivationHash(manifest);
+      const chunk = { runId: transcriptRun.id, derivationId, sequence: 0, records };
+      expect((await apiRequest(api.baseUrl, route, { method: "POST", token: "token-b", body: { chunk } })).status).toBe(201);
+      expect((await apiRequest(api.baseUrl, `${route}?runId=${encodeURIComponent(transcriptRun.id)}`, { token: "token-a" })).body).toMatchObject({ derivations: [{ complete: true, storedChunks: 1 }] });
+      const query = `${route}/${derivationId}?runId=${encodeURIComponent(transcriptRun.id)}&limit=1`;
+      const first = await apiRequest(api.baseUrl, query, { token: "token-a" });
+      expect(first.body).toMatchObject({ total: 2, records: [{ ordinal: 0 }] });
+      const cursor = (first.body as { nextCursor: string }).nextCursor;
+      expect((await apiRequest(api.baseUrl, `${query}&pageCursor=${encodeURIComponent(cursor)}`, { token: "token-a" })).body).toMatchObject({ total: 2, records: [{ ordinal: 1 }] });
+      expect((await apiRequest(api.baseUrl, `${route}/${derivationId}?runId=another-run`, { token: "token-a" })).status).not.toBe(200);
+    } finally { await api.close(); }
+  });
+
+  it("selects only catalog metadata and pages equal-date run identifiers without gaps", async () => {
+    const registry = new MemorySdkRegistry();
+    const sdk = await registry.sdkFor({ organizationId: "local", workspaceId: "workspace-1" });
+    const sdkFor = vi.fn(async () => sdk);
+    const api = await startApi({ sdks: { sdkFor } });
+    try {
+      for (const id of ["codex:run-a", "codex:run_A", "codex:run-A"]) {
+        const bundle = { ...transcriptBundle, run: { ...transcriptRun, id, nativeId: id }, chunks: transcriptBundle.chunks.map((chunk) => ({ ...chunk, runId: id })) };
+        expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/transcript-imports", { method: "POST", token: "token-b", body: bundle })).status).toBe(201);
+        expect(sdkFor).toHaveBeenLastCalledWith({ organizationId: "local", workspaceId: "workspace-1" }, { kinds: ["transcript.project-recorded", "transcript.artifact-imported", "transcript.run-imported", "transcript.chunk-imported"], transcriptChunkRunIds: [id, `${id}:snapshot:${transcriptArtifact.sha256.slice(0, 16)}`] });
+      }
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await apiRequest(api.baseUrl, `/v1/workspaces/workspace-1/transcript-runs?limit=1${cursor === undefined ? "" : `&pageCursor=${encodeURIComponent(cursor)}`}`, { token: "token-a" });
+        expect(page.status).toBe(200);
+        expect(sdkFor).toHaveBeenLastCalledWith({ organizationId: "local", workspaceId: "workspace-1" }, { kinds: ["identity.revised", "transcript.project-recorded", "transcript.run-imported", "transcript.artifact-imported"] });
+        const body = page.body as { runs: { id: string }[]; nextCursor?: string };
+        ids.push(...body.runs.map((run) => run.id));
+        cursor = body.nextCursor;
+      } while (cursor !== undefined);
+      expect(ids).toEqual(["codex:run-A", "codex:run-a", "codex:run_A"]);
     } finally {
       await api.close();
     }

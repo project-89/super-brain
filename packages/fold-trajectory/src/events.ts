@@ -2,7 +2,7 @@ import { parseEvent, type FoldEvent, type JsonValue, type Provenance } from "@_8
 import { canAccessSpace, validateAccessContext } from "@_89/fold-epistemic";
 import { indexTree, projectTrajectory, type RawTrajectory } from "@_89/fold-trace";
 
-import { trajectoryInputSchema, trajectoryLogRecordSchema } from "./schema.js";
+import { trajectoryInputSchema, trajectoryLogRecordSchema, trajectoryOutcomeInputSchema } from "./schema.js";
 import type {
   TrajectoryEventContext,
   TrajectoryEventStamp,
@@ -10,10 +10,13 @@ import type {
   TrajectoryLogRecord,
   TrajectoryRunRecord,
   TrajectoryTreeRecord,
+  TrajectoryOutcomeInput,
+  TrajectoryOutcomeRecord,
 } from "./types.js";
 
 export const TRAJECTORY_TREE_NODE_KIND = "x.fold.trajectory-tree";
 export const TRAJECTORY_NODE_KIND = "x.fold.trajectory";
+export const TRAJECTORY_OUTCOME_NODE_KIND = "x.fold.trajectory-outcome";
 const AUTHORED: Provenance = { basis: "authored" };
 
 export class TrajectoryEventError extends Error {
@@ -119,6 +122,7 @@ export function makeTrajectoryRecordedEvent(
     taskId: parsed.taskId,
     model: parsed.model,
     outcome: parsed.outcome,
+    ...(parsed.outcomeEvidence === undefined ? {} : { outcomeEvidence: parsed.outcomeEvidence }),
     capture: context.capture,
     steps: parsed.steps,
   };
@@ -142,17 +146,48 @@ export function makeTrajectoryRecordedEvent(
   });
 }
 
+export function makeTrajectoryOutcomeRecordedEvent(
+  context: TrajectoryEventContext,
+  stamp: TrajectoryEventStamp,
+  input: TrajectoryOutcomeInput,
+): FoldEvent {
+  if (context.author.kind !== "human") throw new TrajectoryEventError("outcome review requires a human author");
+  const record: TrajectoryOutcomeRecord = {
+    ...trajectoryOutcomeInputSchema.parse(input),
+    recordType: "outcome",
+    eventId: stamp.id,
+    actorId: context.access.principalId,
+    workspaceId: context.access.workspaceId,
+    ...(context.capture.scope.space === undefined ? {} : { spaceId: context.capture.scope.space }),
+    recordedAt: stamp.t,
+  };
+  return eventFor(context, stamp, {
+    kind: "trajectory.outcome-recorded",
+    title: `Operator reviewed trajectory outcome: ${record.outcome}`,
+    subject: `trajectory-outcome:${stamp.id}`,
+    nodeKind: TRAJECTORY_OUTCOME_NODE_KIND,
+    record,
+  });
+}
+
 export function trajectoryLogRecordsFromEvent(event: FoldEvent): TrajectoryLogRecord[] {
   const records: TrajectoryLogRecord[] = [];
   for (const change of event.changes) {
     if (change.verb !== "create") continue;
     const isTrajectoryNode =
-      change.nodeKind === TRAJECTORY_TREE_NODE_KIND || change.nodeKind === TRAJECTORY_NODE_KIND;
+      change.nodeKind === TRAJECTORY_TREE_NODE_KIND || change.nodeKind === TRAJECTORY_NODE_KIND || change.nodeKind === TRAJECTORY_OUTCOME_NODE_KIND;
     if (!isTrajectoryNode) continue;
     const parsed = trajectoryLogRecordSchema.safeParse(change.after);
     if (!parsed.success) {
       throw new TrajectoryEventError(`trajectory event ${event.id} contains an invalid record`);
     }
+    if (parsed.data.recordType === "outcome" && (
+      event.author.kind !== "human" || parsed.data.eventId !== event.id ||
+      parsed.data.recordedAt !== event.at.t ||
+      parsed.data.actorId !== event.capture?.identity?.principal ||
+      parsed.data.workspaceId !== event.capture?.scope.workspace ||
+      parsed.data.spaceId !== event.capture?.scope.space
+    )) throw new TrajectoryEventError(`outcome event ${event.id} has invalid provenance`);
     records.push(parsed.data);
   }
   return records;

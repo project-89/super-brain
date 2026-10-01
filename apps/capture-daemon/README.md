@@ -15,8 +15,10 @@ queue cannot starve live hook ingestion.
 It captures session/project identity, prompts as private artifact references,
 tool calls and outcomes, relative file changes, test/build/lint verification,
 structured reasoning checkpoints, human decisions, session trajectories, and a
-stable transcript import after `SessionEnd`. It does not claim success when no
-verification or explicit verdict was observed.
+stable transcript import after `SessionEnd`. A passing command is verification
+evidence, not task success. Task outcomes remain unknown unless there is an
+operator-authorized verdict or an explicit harness failure, with canonical event
+and artifact references. Legacy recorded outcomes are not rewritten.
 
 The Claude installer subscribes to the full current lifecycle surface,
 including subagents, tasks, permissions, compaction, model switches, worktrees,
@@ -41,6 +43,14 @@ super-brain-capture install-hooks
 super-brain-capture install-service
 super-brain-capture status
 ```
+
+`status` and `/health` include a `delivery` snapshot: current processing or retry
+state, attempt/delivery/failure counters since process startup, last successful
+delivery time, and any blocking job's fingerprint, kind, age timestamp, fixed
+error category, and retry deadline. Raw error text and source content are not
+included in these delivery diagnostics. Top-level `status: ok` means the local
+HTTP server is available, not that the delivery queue is draining. Counters and
+the most recent error reset on restart; durable pending and failed jobs remain.
 
 Capture settings can be changed from the Brain settings dialog with the
 dedicated operator token or from the CLI. Configuration changes restart the
@@ -86,8 +96,19 @@ ID in capture identity.
 Pass `--job <job-id>` to retry or audit-resolve one failure without touching
 unrelated quarantined work.
 
-Agents can publish deliberate, concise reasoning and operator verdicts without
-exposing private transcript content:
+For missing transcript paths, use `recover-transcripts` first. It previews
+recoverable and unavailable failed transcript jobs without requeueing them.
+`recover-transcripts --job <job-id> --confirm` creates a private policy-filtered
+snapshot, renews the delivery window, and retains a local recovery audit receipt.
+Codex relocation searches only the original harness home's `sessions` and
+`archived_sessions` trees, with bounded traversal and native `session_meta` ID
+verification. Ambiguous matches require manual recovery. Unavailable sources
+remain failed with explicit missing-data accounting; recovery never fabricates
+transcript content or treats missing data as delivered. New transcript handoffs
+and legacy pending deliveries also apply this relocation/snapshot protection.
+
+Agents can publish deliberate, concise reasoning without exposing private
+transcript content. Only the operator interface can record an operator verdict:
 
 ```sh
 printf '%s' '{"session_id":"...","summary":"Cache invalidation is the leading hypothesis","evidence":"Focused test fails before refresh"}' \
@@ -96,3 +117,15 @@ printf '%s' '{"session_id":"...","summary":"Cache invalidation is the leading hy
 printf '%s' '{"session_id":"...","summary":"Operator accepted the verified result","verdict":"success","confidence":1}' \
   | super-brain-capture decision codex
 ```
+
+`POST /decision` and the `decision` CLI command use the separate operator token.
+`/hook` and `/checkpoint` use the agent hook token. A `HumanDecision` payload on
+the agent hook interface is retained as an agent-reported claim, not an operator
+verdict or automatically promotable human memory. These boundaries distinguish
+credentials, not individual people on a machine where agents can read the full
+operator configuration. Keep that configuration out of untrusted harnesses.
+
+Verdicts apply to the current evaluation unit before its `Stop`/`SessionEnd`
+boundary. Post-completion outcome annotations and retrospective re-evaluation
+remain separate follow-up work. Reasoning summaries are observations; only a
+checkpoint carrying an explicit `decision` field becomes a decision node.

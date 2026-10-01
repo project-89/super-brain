@@ -7,3 +7,5 @@ export * from "./files.js";
 export * from "./redact.js";
 export * from "./scan.js";
 export * from "./types.js";
+export * from "./native-archives.js";
+export * from "./project-identities.js";

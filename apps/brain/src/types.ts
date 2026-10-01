@@ -99,6 +99,8 @@ export interface FoldLogEntry {
   readonly status: "canon" | "draft";
 }
 
+export type MemoryApplicability = "project" | "general" | "unresolved";
+
 export interface PersonalMemory {
   readonly id: string;
   readonly workspaceId: string;
@@ -106,6 +108,7 @@ export interface PersonalMemory {
   readonly creatorId: string;
   readonly audience: "personal" | "workspace";
   readonly projectIds: readonly string[];
+  readonly applicability?: MemoryApplicability;
   readonly source: string;
   readonly summary: string;
   readonly content: JsonValue;
@@ -138,6 +141,7 @@ export interface MemoryCandidate {
   readonly proposerId: string;
   readonly audience: "personal" | "workspace";
   readonly projectIds: readonly string[];
+  readonly applicability?: MemoryApplicability;
   readonly source: string;
   readonly summary: string;
   readonly content: JsonValue;
@@ -217,7 +221,107 @@ export interface CursorPage<T> {
   readonly nextCursor?: string;
 }
 
-export type BrainPage = "overview" | "memory" | "history" | "trajectories" | "fleet" | "steering" | "events" | "state";
+export interface TranscriptDerivation {
+  readonly derivationId: string;
+  readonly recordedAt: number;
+  readonly complete: boolean;
+  readonly storedChunks: number;
+  readonly manifest: {
+    readonly parser: { readonly id: string; readonly version: string };
+    readonly records: number;
+    readonly sourceRecords: number;
+    readonly byKind: Readonly<Record<string, number>>;
+    readonly unclassifiedTypes: Readonly<Record<string, number>>;
+    readonly inputSha256: string;
+    readonly sourceSha256: string;
+    readonly chunkHashes: readonly string[];
+  };
+}
+
+export interface DerivedTranscriptRecord {
+  readonly ordinal: number;
+  readonly line: number;
+  readonly kind: string;
+  readonly sourceType: string;
+  readonly data: Readonly<Record<string, unknown>>;
+  readonly dataEncoding?: "base64-json-utf8";
+}
+
+export type BrainPage = "overview" | "memory" | "history" | "episodes" | "trajectories" | "fleet" | "steering" | "events" | "state" | "identities";
+
+export interface DataQualityReport {
+  readonly generatedAt: number;
+  readonly corpus: {
+    readonly events: number;
+    readonly firstEventAt?: number;
+    readonly lastEventAt?: number;
+    readonly observations: number;
+    readonly lifecycleSignals: number;
+    readonly archivedRecords: number;
+    readonly derivedRecords: number;
+    readonly observedProjects: number;
+    readonly observedSessions: number;
+  };
+  readonly transcripts: {
+    readonly projects: number;
+    readonly runs: number;
+    readonly resolvedRuns: number;
+    readonly turns: number;
+    readonly actions: number;
+    readonly unknownRecords: number;
+    readonly artifacts: number;
+    readonly storedArtifacts: number;
+    readonly policyDeclaredArtifacts: number;
+    readonly reasoningIncludedArtifacts: number;
+    readonly redactions: number;
+    readonly bySource: readonly {
+      readonly source: string;
+      readonly runs: number;
+      readonly turns: number;
+      readonly actions: number;
+      readonly unknownRecords: number;
+    }[];
+  };
+  readonly memories: {
+    readonly total: number;
+    readonly withEvidence: number;
+    readonly proposed: number;
+    readonly accepted: number;
+    readonly rejected: number;
+    readonly highConfidencePending: number;
+    readonly projectScopedPending: number;
+    readonly duplicatePending: number;
+    readonly oldestPendingAt?: number;
+    readonly recalled: number;
+    readonly validated: number;
+    readonly feedback: {
+      readonly recalled: number;
+      readonly helpful: number;
+      readonly unhelpful: number;
+      readonly superseded: number;
+    };
+    readonly candidateSources: readonly {
+      readonly source: string;
+      readonly proposed: number;
+      readonly accepted: number;
+      readonly rejected: number;
+    }[];
+  };
+  readonly trajectories: {
+    readonly tasks: number;
+    readonly runs: number;
+    readonly successful: number;
+    readonly failed: number;
+    readonly unknown: number;
+    readonly reviewed: number;
+    readonly tasksWithDecisions: number;
+    readonly tasksWithOutcomes: number;
+    readonly nodes: number;
+    readonly decisionNodes: number;
+    readonly mappedSteps: number;
+    readonly totalSteps: number;
+  };
+}
 
 export interface BrainSnapshot {
   readonly events: readonly FoldLogEntry[];
@@ -241,10 +345,11 @@ export interface BrainSnapshot {
   readonly eventTotal: number;
   readonly eventCursor?: string;
   readonly captureHealth?: CaptureHealth;
+  readonly dataQuality?: DataQualityReport;
   readonly loadedAt: number;
 }
 
-export type TranscriptSource = "claude-code" | "codex";
+export type TranscriptSource = "claude-code" | "codex" | "gemini" | "hermes";
 export type HookSource = TranscriptSource | "hermes" | "unknown";
 
 export interface HookArtifact {
@@ -372,6 +477,7 @@ export type MemoryScope =
 export interface MemoryDraft {
   readonly audience: "personal" | "workspace";
   readonly projectIds: readonly string[];
+  readonly applicability?: MemoryApplicability;
   readonly source: string;
   readonly summary: string;
   readonly content: JsonValue;
@@ -445,6 +551,7 @@ export interface TrajectoryInput {
   readonly taskId: string;
   readonly model: { readonly id: string; readonly version?: string };
   readonly outcome: TrajectoryOutcome;
+  readonly outcomeEvidence?: { readonly kind: "operator-verdict" | "harness-error"; readonly eventId: string; readonly artifactId?: string };
   readonly steps: readonly TrajectoryStep[];
   readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
   readonly reviewText?: string;
@@ -452,7 +559,9 @@ export interface TrajectoryInput {
 
 export interface TrajectoryTaskSummary {
   readonly taskId: string;
-  readonly tree: SharedDecisionTree;
+  readonly tree?: SharedDecisionTree;
+  readonly label?: string;
+  readonly nodeCount?: number;
   readonly trajectoryCount: number;
   readonly successCount: number;
   readonly failureCount: number;
@@ -471,6 +580,22 @@ export interface TrajectoryRunRecord {
   };
   readonly assignments: Readonly<Record<string, ProjectionAssignment>>;
   readonly reviewText?: string;
+  readonly recordedOutcome?: TrajectoryOutcome;
+  readonly outcomeReview?: TrajectoryOutcomeRecord;
+}
+
+export interface TrajectoryOutcomeRecord {
+  readonly recordType: "outcome";
+  readonly eventId: string;
+  readonly taskId: string;
+  readonly trajectoryId: string;
+  readonly outcome: TrajectoryOutcome;
+  readonly reason: string;
+  readonly previousEventId: string | null;
+  readonly actorId: string;
+  readonly workspaceId: string;
+  readonly spaceId?: string;
+  readonly recordedAt: number;
 }
 
 export interface ProjectedTrajectory {
@@ -478,6 +603,7 @@ export interface ProjectedTrajectory {
   readonly taskId: string;
   readonly model: TrajectoryInput["model"];
   readonly outcome: TrajectoryOutcome;
+  readonly outcomeEvidence?: TrajectoryInput["outcomeEvidence"];
   readonly capture: FoldEvent["capture"];
   readonly steps: readonly {
     readonly raw: TrajectoryStep;
@@ -526,6 +652,7 @@ export type TrajectoryDivergence =
 
 export interface TrajectoryTaskReport {
   readonly taskId: string;
+  readonly outcomeCounts?: Readonly<Record<TrajectoryOutcome, number>>;
   readonly tree: SharedDecisionTree;
   readonly records: readonly TrajectoryRunRecord[];
   readonly projected: readonly ProjectedTrajectory[];

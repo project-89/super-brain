@@ -1,4 +1,5 @@
 import type { CapturedStep, StoredHookArtifact } from "./types.js";
+import { toolResultFailed } from "@_89/super-brain-importer";
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -44,13 +45,10 @@ function verificationKind(payload: Record<string, unknown>): "test" | "build" | 
   return undefined;
 }
 
-function toolSucceeded(name: string, payload: Record<string, unknown>): boolean {
+function toolSucceeded(name: string, payload: Record<string, unknown>): boolean | null {
   if (name === "PostToolUseFailure") return false;
-  if (payload.is_error === true || payload.success === false) return false;
-  const response = object(payload.tool_response) ?? object(payload.toolResponse) ?? object(payload.result);
-  if (response?.is_error === true || response?.success === false) return false;
-  const exitCode = response?.exit_code ?? response?.exitCode;
-  return typeof exitCode === "number" ? exitCode === 0 : true;
+  const failed = toolResultFailed({ ...payload, output: payload.tool_response ?? payload.toolResponse ?? payload.result ?? payload.output });
+  return failed === null ? null : !failed;
 }
 
 function pendingToolKey(payload: Record<string, unknown>): string {
@@ -123,7 +121,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
       append(artifact, {
         nodeKind: "observation",
         role: "tool_call_response",
-        content: `${tool} ${success ? "completed" : "failed"}`,
+        content: `${tool} ${success === null ? "returned without a verified result" : success ? "completed" : "failed"}`,
         toolName: tool,
         ...timing,
         ...(turnId === undefined ? {} : { turnId }),
@@ -133,7 +131,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         append(artifact, {
           nodeKind: "observation",
           role: "tool_call_response",
-          content: `${verification} verification ${success ? "passed" : "failed"}`,
+          content: `${verification} verification ${success === null ? "unknown" : success ? "passed" : "failed"}`,
           toolName: tool,
           ...timing,
           ...(turnId === undefined ? {} : { turnId }),
@@ -150,7 +148,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
       const summary = text(payload.summary);
       if (summary !== undefined) {
         append(artifact, {
-          nodeKind: "decision",
+          nodeKind: text(payload.decision) === undefined ? "observation" : "decision",
           role: "model_thought",
           content: bounded(summary, 2_000),
           ...(turnId === undefined ? {} : { turnId }),
@@ -173,11 +171,11 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         content: "Operator steering applied",
         ...(turnId === undefined ? {} : { turnId }),
       });
-    } else if (name === "Stop") {
+    } else if (name === "Stop" || name === "StopFailure") {
       append(artifact, {
         nodeKind: "observation",
         role: "model_output",
-        content: "Agent completed a response",
+        content: name === "StopFailure" ? `Agent response failed${text(payload.error_type) === undefined ? "" : `: ${text(payload.error_type)!}`}` : "Agent completed a response",
         ...(turnId === undefined ? {} : { turnId }),
       });
     } else if (name === "TranscriptDelta" && Array.isArray(payload.summaries)) {
@@ -185,7 +183,7 @@ export function recoverCapturedSteps(artifactsInput: readonly StoredHookArtifact
         const summary = text(object(summaryInput)?.text);
         if (summary !== undefined) {
           append(artifact, {
-            nodeKind: "decision",
+            nodeKind: "observation",
             role: "model_thought",
             content: bounded(summary, 2_000),
             ...(turnId === undefined ? {} : { turnId }),

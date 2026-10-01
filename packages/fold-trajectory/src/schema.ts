@@ -62,6 +62,11 @@ export const rawTrajectorySchema = z.object({
   taskId: nonEmpty,
   model: z.object({ id: nonEmpty, version: nonEmpty.optional() }).strict(),
   outcome: z.enum(["success", "failure", "unknown"]),
+  outcomeEvidence: z.object({
+    kind: z.enum(["operator-verdict", "harness-error"]),
+    eventId: nonEmpty,
+    artifactId: nonEmpty.optional(),
+  }).strict().optional(),
   capture: captureEnvelopeSchema,
   steps: z.array(traceStepSchema).min(1),
 }).strict();
@@ -91,7 +96,25 @@ export const trajectoryRunRecordSchema = z.object({
   reviewText: nonEmpty.optional(),
 }).strict();
 
+export const trajectoryOutcomeInputSchema = z.object({
+  taskId: nonEmpty,
+  trajectoryId: nonEmpty,
+  outcome: z.enum(["success", "failure", "unknown"]),
+  reason: z.string().trim().min(10).max(4_000),
+  previousEventId: nonEmpty.nullable(),
+}).strict();
+
+export const trajectoryOutcomeRecordSchema = trajectoryOutcomeInputSchema.extend({
+  recordType: z.literal("outcome"),
+  eventId: nonEmpty,
+  actorId: nonEmpty,
+  workspaceId: nonEmpty,
+  spaceId: nonEmpty.optional(),
+  recordedAt: z.number().finite().nonnegative(),
+}).strict();
+
 export const trajectoryLogRecordSchema = z.discriminatedUnion("recordType", [
   trajectoryTreeRecordSchema,
   trajectoryRunRecordSchema,
+  trajectoryOutcomeRecordSchema,
 ]);

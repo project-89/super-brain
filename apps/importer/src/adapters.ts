@@ -9,7 +9,7 @@ import { fileMetadata, sha256File, sha256Text } from "./files.js";
 import { arrayValue, isoTimestamp, recordValue, stringValue } from "./json.js";
 import type { ParsedTranscript } from "./types.js";
 
-const PARSER_VERSION = "1";
+const PARSER_VERSION = "2";
 
 interface SourceMetadata {
   readonly byteLength: number;
@@ -58,14 +58,16 @@ async function visitJsonl(
   const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
   for await (const line of lines) {
     if (line.trim().length === 0) continue;
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(line) as unknown;
-      const record = recordValue(parsed);
-      if (record === undefined) invalid();
-      else visitor(record);
+      parsed = JSON.parse(line) as unknown;
     } catch {
       invalid();
+      continue;
     }
+    const record = recordValue(parsed);
+    if (record === undefined) invalid();
+    else visitor(record);
   }
 }
 
@@ -81,6 +83,11 @@ function role(value: unknown): "user" | "assistant" | "developer" | "system" | "
     : "other";
 }
 
+function recordTypeLabel(type: unknown, nestedType?: unknown): string {
+  const label = typeof type === "string" && /^[a-zA-Z0-9_.-]{1,100}$/.test(type) ? type : "<missing-or-invalid-type>";
+  return nestedType === undefined ? label : `${label}:${recordTypeLabel(nestedType)}`;
+}
+
 export async function parseClaudeTranscript(path: string): Promise<ParsedTranscript> {
   const parsedMetadata = await fileMetadata(path);
   const source = "claude-code" as const;
@@ -91,7 +98,7 @@ export async function parseClaudeTranscript(path: string): Promise<ParsedTranscr
   ]);
   await visitJsonl(path, (record) => {
     const at = isoTimestamp(record.timestamp);
-    builder.countRecord(at);
+    builder.countRecord(at, recordTypeLabel(record.type));
     builder.observeContext(stringValue(record.cwd), stringValue(record.gitBranch), at);
     builder.setClientVersion(stringValue(record.version));
     const type = stringValue(record.type);
@@ -125,7 +132,7 @@ export async function parseClaudeTranscript(path: string): Promise<ParsedTranscr
           builder.addToolCall(stringValue(value.name), at, stringValue(value.id));
         }
       }
-    } else if (type !== undefined && !knownTypes.has(type)) {
+    } else if (type === undefined || !knownTypes.has(type)) {
       builder.countUnknown();
     }
   }, () => {
@@ -133,7 +140,32 @@ export async function parseClaudeTranscript(path: string): Promise<ParsedTranscr
     builder.countUnknown();
   });
   const artifact = await artifactFor(path, source, "claude-jsonl", parsedMetadata);
-  return { sourcePath: path, bundle: builder.finish(artifact) };
+  return { sourcePath: path, bundle: builder.finish(artifact), diagnostics: builder.diagnostics() };
+}
+
+export function toolResultFailed(payload: Record<string, unknown> | undefined): boolean | null {
+  let output: unknown = payload?.output;
+  if (typeof output === "string") {
+    try { output = JSON.parse(output) as unknown; } catch { /* Plain-text provider envelope. */ }
+  }
+  const result = recordValue(output);
+  const metadata = recordValue(result?.metadata);
+  const signals = [payload, result, metadata];
+  if (signals.some((item) => item?.is_error === true || item?.isError === true || item?.success === false)) return true;
+  const exitCodes = signals.map((item) => item?.exit_code ?? item?.exitCode)
+    .filter((value): value is number => typeof value === "number" && Number.isInteger(value));
+  if (exitCodes.some((code) => code !== 0)) return true;
+  if (exitCodes.length > 0) return false;
+  if (signals.some((item) => item?.success === true || item?.is_error === false || item?.isError === false)) return false;
+  if (typeof output === "string") {
+    // Do not interpret quoted exit-code strings inside a command's actual output.
+    const header = output.split(/\r?\n(?:Final output|Output):(?:\r?\n|$)/, 1)[0]!;
+    if (/^(?:Chunk ID:|Wall time:)/.test(header)) {
+      const code = header.match(/(?:^|\r?\n)Process exited with code (-?\d+)(?:\r?\n|$)/)?.[1];
+      if (code !== undefined) return Number(code) !== 0;
+    }
+  }
+  return null;
 }
 
 export async function parseCodexTranscript(path: string): Promise<ParsedTranscript> {
@@ -142,9 +174,9 @@ export async function parseCodexTranscript(path: string): Promise<ParsedTranscri
   const builder = new TranscriptBuilder(source, nativeIdFromFilename(path));
   await visitJsonl(path, (record) => {
     const at = isoTimestamp(record.timestamp);
-    builder.countRecord(at);
     const type = stringValue(record.type);
     const payload = recordValue(record.payload);
+    builder.countRecord(at, recordTypeLabel(type, type === "response_item" || type === "event_msg" ? payload?.type : undefined));
     if (type === "session_meta") {
       const git = recordValue(payload?.git);
       builder.observeContext(
@@ -168,7 +200,13 @@ export async function parseCodexTranscript(path: string): Promise<ParsedTranscri
         builder.addToolCall(stringValue(payload?.name), at, stringValue(payload?.call_id));
       } else if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
         const callId = stringValue(payload?.call_id);
-        builder.addToolResult(callId, at, false, callId);
+        builder.addToolResult(callId, at, toolResultFailed(payload), callId);
+      } else if (payloadType === "web_search_call") {
+        const callId = stringValue(payload?.id) ?? stringValue(payload?.call_id);
+        builder.addToolCall("web_search", at, callId);
+        if (payload?.status === "completed" || payload?.status === "failed") {
+          builder.addToolResult("web_search", at, payload.status === "failed", callId);
+        }
       } else if (payloadType !== "reasoning") {
         builder.countUnknown();
       }
@@ -180,5 +218,5 @@ export async function parseCodexTranscript(path: string): Promise<ParsedTranscri
     builder.countUnknown();
   });
   const artifact = await artifactFor(path, source, "codex-jsonl", parsedMetadata);
-  return { sourcePath: path, bundle: builder.finish(artifact) };
+  return { sourcePath: path, bundle: builder.finish(artifact), diagnostics: builder.diagnostics() };
 }
