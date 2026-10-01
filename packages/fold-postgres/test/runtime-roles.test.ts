@@ -66,7 +66,7 @@ integration("migrated runtime roles and recovery boundary", () => {
     const rollback = new PostgresFoldDatabase({ connectionString: roleUrl(migrator), schema });
     try { await expect(rollback.open()).rejects.toThrow(/newer schema/); } finally { await rollback.close(); }
     expect((await admin.query<{ version: number }>(`SELECT version FROM "${schema}".fold_schema_versions WHERE component='store'`)).rows[0]!.version).toBe(999);
-    await admin.query(`UPDATE "${schema}".fold_schema_versions SET version=2 WHERE component='store'`);
+    await admin.query(`UPDATE "${schema}".fold_schema_versions SET version=3 WHERE component='store'`);
     await admin.query(`GRANT UPDATE ON "${schema}".fold_schema_versions TO "${runtime}"`);
     const mutable = new PostgresFoldDatabase({ connectionString: roleUrl(runtime), schema, schemaMode: "verify" });
     try { await expect(mutable.open()).rejects.toThrow(/outside its contract/); } finally { await mutable.close(); }
@@ -79,7 +79,7 @@ integration("migrated runtime roles and recovery boundary", () => {
     try {
       await writer.query("BEGIN");
       await writer.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
-      const event = { specVersion: "0.7", id: "barrier-event", kind: "test.observed", title: "Snapshot witness", at: { t: 1, worldDate: "2026-09-05" }, author: { kind: "human", id: "person" }, capture: { scope: { organization: "org", workspace: "workspace" } }, changes: [{ verb: "create", subject: "urn:test:barrier", nodeKind: "fact", after: { observed: true }, provenance: { basis: "authored" } }] };
+      const event = { specVersion: "0.7", id: "barrier-event", kind: "test.observed", title: "Snapshot witness", at: { t: 1, worldDate: "2026-09-05" }, author: { kind: "human", id: "person" }, capture: { scope: { workspace: "workspace" } }, changes: [{ verb: "create", subject: "urn:test:barrier", nodeKind: "fact", after: { observed: true }, provenance: { basis: "authored" } }] };
       await writer.query(`INSERT INTO "${schema}".fold_events (organization_id,workspace_id,t,event_id,kind,status,event) VALUES ('org','workspace',1,'barrier-event','test.observed','canon',$1::jsonb)`, [JSON.stringify(event)]);
       barrier = withRecoveryBarrier({ connectionString: roleUrl(recovery), schema }, async (receipt) => {
         expect(BigInt(receipt.maxIngestionPosition)).toBeGreaterThan(0n);

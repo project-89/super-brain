@@ -727,7 +727,7 @@ integrationDescribe("Postgres Fold store", () => {
       },
     });
     try {
-      const result = await ranker.rank({
+      const rankingRequest = ({
         workspaceId,
         query: "postgres database",
         limit: 2,
@@ -755,7 +755,10 @@ integrationDescribe("Postgres Fold store", () => {
             revision: 0,
           },
         ],
-      });
+      } as const);
+      // Indexing is asynchronous on rank; refresh first so the assertions exercise pgvector, not the lexical fallback.
+      await ranker.refresh(rankingRequest);
+      const result = await ranker.rank(rankingRequest);
       expect(result[0]).toMatchObject({ memoryId: "memory-postgres", score: 1 });
       expect(result[1]).toMatchObject({ memoryId: "memory-sqlite", score: 0 });
 
@@ -777,12 +780,15 @@ integrationDescribe("Postgres Fold store", () => {
         limit: 1,
         documents: [sharedDocument("Postgres tenant memory")],
       };
-      await expect(ranker.rank(leftRequest)).resolves.toMatchObject([{ score: 1 }]);
-      await expect(ranker.rank({
+      const rightRequest = {
         ...leftRequest,
         organizationId: `vector-right-${workspaceId}`,
         documents: [sharedDocument("SQLite tenant memory")],
-      })).resolves.toMatchObject([{ score: 0 }]);
+      };
+      await ranker.refresh(leftRequest);
+      await ranker.refresh(rightRequest);
+      await expect(ranker.rank(leftRequest)).resolves.toMatchObject([{ score: 1 }]);
+      await expect(ranker.rank(rightRequest)).resolves.toMatchObject([{ score: 0 }]);
       await expect(ranker.rank(leftRequest)).resolves.toMatchObject([{ score: 1 }]);
     } finally {
       await ranker.close();
