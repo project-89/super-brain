@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
+import { checkedSchemaMode, recordSchemaVersion, TENANCY_SCHEMA, verifyPostgresSchema, type PostgresSchemaMode } from "./schema.js";
 
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/i;
 
@@ -17,6 +18,7 @@ export interface PostgresTenantAdministrationOptions {
   readonly schema?: string;
   readonly pool?: Omit<PoolConfig, "connectionString">;
   readonly requireRlsEnforcement?: boolean;
+  readonly schemaMode?: PostgresSchemaMode;
 }
 
 export interface RepositoryEnrollment {
@@ -147,12 +149,16 @@ export class PostgresTenantAdministration {
   private readonly schema: string;
   private readonly ready: Promise<void>;
   private readonly requireRlsEnforcement: boolean;
+  private readonly schemaMode: PostgresSchemaMode;
+  private readonly schemaName: string;
   private closed = false;
 
   constructor(options: PostgresTenantAdministrationOptions) {
     if (options.connectionString.trim().length === 0) throw new TypeError("connectionString is required");
-    this.pool = new Pool({ connectionString: options.connectionString, ...options.pool });
-    this.schema = checkedIdentifier(options.schema ?? "public");
+    this.pool = new Pool({ connectionString: options.connectionString, connectionTimeoutMillis: 5_000, ...options.pool });
+    this.schemaName = options.schema ?? "public";
+    this.schema = checkedIdentifier(this.schemaName);
+    this.schemaMode = checkedSchemaMode(options.schemaMode);
     this.requireRlsEnforcement = options.requireRlsEnforcement === true;
     this.ready = this.initialize();
   }
@@ -164,6 +170,13 @@ export class PostgresTenantAdministration {
   private async initialize(): Promise<void> {
     const client = await this.pool.connect();
     try {
+      if (this.schemaMode === "verify") {
+        await client.query("BEGIN READ ONLY");
+        await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
+        await verifyPostgresSchema(client, this.schemaName, TENANCY_SCHEMA);
+        await client.query("COMMIT");
+        return;
+      }
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-schema-v1'))");
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
@@ -307,6 +320,7 @@ export class PostgresTenantAdministration {
       await client.query(`CREATE TRIGGER fold_platform_access_audit_append_only
         BEFORE UPDATE OR DELETE ON ${this.table("fold_platform_access_audit")}
         FOR EACH ROW EXECUTE FUNCTION ${this.schema}.reject_fold_audit_mutation()`);
+      await recordSchemaVersion(client, this.schemaName, TENANCY_SCHEMA);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -314,6 +328,11 @@ export class PostgresTenantAdministration {
     } finally {
       client.release();
     }
+  }
+
+  async open(): Promise<void> {
+    if (this.closed) throw new Error("PostgreSQL tenant administration is closed");
+    await this.ready;
   }
 
   private async transaction<T>(organizationIdInput: string, operation: (client: PoolClient) => Promise<T>): Promise<T> {

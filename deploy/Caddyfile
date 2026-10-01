@@ -1,0 +1,30 @@
+{
+  admin off
+  auto_https disable_redirects
+}
+
+https://{$FOLD_PUBLIC_HOST:localhost}:8443 {
+  tls internal
+  header {
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+    -Server
+  }
+  handle_path /api/* {
+    reverse_proxy api-a:3000 api-b:3000 {
+      lb_policy round_robin
+      health_uri /ready
+      health_interval 5s
+      health_timeout 4s
+      flush_interval -1
+    }
+  }
+  handle /capture/* {
+    respond "Capture requires an enrolled local relay" 503
+  }
+  handle {
+    root * /srv
+    try_files {path} /index.html
+    file_server
+  }
+}

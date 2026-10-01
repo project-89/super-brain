@@ -1,0 +1,130 @@
+name: super-brain-private
+
+x-api: &api
+  image: ${FOLD_API_IMAGE:-super-brain-private-api:local}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    target: api
+  environment: &runtime-environment
+    FOLD_API_HOST: 0.0.0.0
+    FOLD_API_PORT: "3000"
+    FOLD_POSTGRES_SCHEMA: fold
+    FOLD_POSTGRES_SCHEMA_MODE: verify
+    FOLD_REQUIRE_TENANT_RLS: "true"
+    FOLD_API_SEED_MEMBERSHIPS: "false"
+    FOLD_DATABASE_URL_FILE: /run/secrets/runtime_database_url
+    FOLD_API_CREDENTIALS_JSON_FILE: /run/secrets/api_credentials
+    FOLD_API_RATE_LIMIT_PER_MINUTE: "3000"
+    FOLD_API_PRINCIPAL_RATE_LIMIT_PER_MINUTE: "300"
+    FOLD_API_TENANT_RATE_LIMIT_PER_MINUTE: "3000"
+  secrets:
+    - runtime_database_url
+    - api_credentials
+  read_only: true
+  tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 20s
+  healthcheck:
+    test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
+  depends_on:
+    database: {condition: service_healthy}
+    migrate: {condition: service_completed_successfully}
+
+services:
+  database:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    environment:
+      POSTGRES_DB: super_brain
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_admin_password
+    secrets:
+      - database_admin_password
+      - migration_password
+      - runtime_password
+      - recovery_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-database.sh:/docker-entrypoint-initdb.d/10-fold-roles.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d super_brain"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    stop_grace_period: 30s
+  migrate:
+    image: ${FOLD_API_IMAGE:-super-brain-private-api:local}
+    build: {context: .., dockerfile: deploy/Dockerfile, target: api}
+    command: [node, apps/api/dist/main.js, migrate]
+    environment:
+      FOLD_DATABASE_URL_FILE: /run/secrets/migration_database_url
+      FOLD_POSTGRES_SCHEMA: fold
+      FOLD_RUNTIME_ROLE: fold_runtime
+      FOLD_RECOVERY_ROLE: fold_recovery
+    secrets: [migration_database_url]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      database: {condition: service_healthy}
+  # Run deliberately once to enroll initial configured users. Normal up/restart
+  # runs only `migrate` and never replaces revoked memberships.
+  bootstrap:
+    image: ${FOLD_API_IMAGE:-super-brain-private-api:local}
+    profiles: [bootstrap]
+    command: [node, apps/api/dist/main.js, bootstrap]
+    environment:
+      FOLD_DATABASE_URL_FILE: /run/secrets/migration_database_url
+      FOLD_API_CREDENTIALS_JSON_FILE: /run/secrets/api_credentials
+      FOLD_POSTGRES_SCHEMA: fold
+      FOLD_RUNTIME_ROLE: fold_runtime
+      FOLD_RECOVERY_ROLE: fold_recovery
+    secrets: [migration_database_url, api_credentials]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      database: {condition: service_healthy}
+  api-a:
+    <<: *api
+  api-b:
+    <<: *api
+  proxy:
+    image: ${FOLD_BRAIN_IMAGE:-super-brain-private-brain:local}
+    build: {context: .., dockerfile: deploy/Dockerfile, target: brain}
+    environment:
+      FOLD_PUBLIC_HOST: ${FOLD_PUBLIC_HOST:-localhost}
+    ports: ["${FOLD_BIND_ADDRESS:-127.0.0.1}:${FOLD_HTTPS_PORT:-8443}:8443"]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=8m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    depends_on:
+      api-a: {condition: service_healthy}
+      api-b: {condition: service_healthy}
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  database_admin_password: {file: "${FOLD_DEPLOY_SECRETS_DIR:?Set a private secret directory}/database-admin-password"}
+  migration_password: {file: "${FOLD_DEPLOY_SECRETS_DIR}/migration-password"}
+  runtime_password: {file: "${FOLD_DEPLOY_SECRETS_DIR}/runtime-password"}
+  recovery_password: {file: "${FOLD_DEPLOY_SECRETS_DIR}/recovery-password"}
+  migration_database_url: {file: "${FOLD_DEPLOY_SECRETS_DIR}/migration-database-url"}
+  runtime_database_url: {file: "${FOLD_DEPLOY_SECRETS_DIR}/runtime-database-url"}
+  api_credentials: {file: "${FOLD_DEPLOY_SECRETS_DIR}/api-credentials.json"}

@@ -1,3 +1,5 @@
+import { PrivateRootSealedError, withPrivateRootWrite, withPrivateRootWrites } from "@_89/super-brain-importer";
+import { CaptureIngressJournal } from "./ingress.js";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -6,6 +8,8 @@ import { readBoundedPrivateText, secureDirectory, syncPrivateDirectory } from ".
 import { trajectoryInputSchema } from "@_89/fold-trajectory";
 import type { CaptureEngine } from "./capture.js";
 import type { CaptureConfig, CaptureState, HookAuthority, HookSource, SpoolJob, VaultArtifact } from "./types.js";
+
+export interface CaptureAcknowledgement { readonly accepted: true; readonly receiptId: string; readonly artifactId?: string; readonly deferred?: true }
 
 export interface HookOccurrence {
   readonly version: 1;
@@ -69,34 +73,53 @@ const hash = (value: string): string => createHash("sha256").update(value).diges
 const filename = (id: string): string => `${hash(id)}.json.enc`;
 
 export async function receiptEncryptionKey(config: CaptureConfig): Promise<Uint8Array> {
-  return config.vaultKeyPath === undefined
-    ? (await ensureVaultKey(join(config.stateRoot, "receipts.key"))).key
-    : readVaultKey(config.vaultKeyPath);
+  if (config.vaultKeyPath !== undefined) return readVaultKey(config.vaultKeyPath);
+  const path = join(config.stateRoot, "receipts.key");
+  try { return await readVaultKey(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return withPrivateRootWrite(config.stateRoot, "capture", async () => (await ensureVaultKey(path)).key);
 }
 
 export class HookOutbox {
   private readonly root: string;
-  constructor(stateRoot: string, private readonly key: Uint8Array, private readonly retainEncryptedReasoning = false) { this.root = join(stateRoot, "receipts", "sender"); }
+  constructor(private readonly stateRoot: string, private readonly key: Uint8Array, private readonly retainEncryptedReasoning = false) { this.root = join(stateRoot, "receipts", "sender"); }
   async persist(source: HookSource, payload: Record<string, unknown>, endpoint: HookOccurrence["endpoint"] = "/hook", id: string = randomUUID()): Promise<HookOccurrence> {
     const occurrence: HookOccurrence = { version: 1, id, source, endpoint, occurredAt: new Date().toISOString(),
       payload: redactJsonValue(payload, { retainEncryptedContent: this.retainEncryptedReasoning }).value as Record<string, unknown> };
-    const path = join(this.root, filename(id));
-    if (await writeProtected(path, occurrence, this.key, true)) return occurrence;
-    const existing = await this.read(path);
-    if (JSON.stringify([existing.source, existing.endpoint, existing.payload]) !== JSON.stringify([source, endpoint, occurrence.payload])) throw new Error("receipt ID was reused for a different occurrence");
-    return existing;
+    const journal = new CaptureIngressJournal(this.stateRoot,this.key);
+    try {
+      return await withPrivateRootWrite(this.stateRoot,"hook-relay",async()=>{
+        const deferred = (await journal.pending("sender")).find(record=>record.occurrence.id===id);
+        const protectedOccurrence = deferred?.occurrence ?? occurrence;
+        if (JSON.stringify([protectedOccurrence.source,protectedOccurrence.endpoint,protectedOccurrence.payload]) !== JSON.stringify([source,endpoint,occurrence.payload])) throw new TypeError("receipt ID was reused for a different occurrence");
+        const path = join(this.root, filename(id));
+        if (await writeProtected(path, protectedOccurrence, this.key, true)) return protectedOccurrence;
+        const existing = await this.read(path);
+        if (JSON.stringify([existing.source, existing.endpoint, existing.payload]) !== JSON.stringify([source, endpoint, occurrence.payload])) throw new TypeError("receipt ID was reused for a different occurrence");
+        return existing;
+      });
+    } catch(error) {
+      if (!(error instanceof PrivateRootSealedError)) throw error;
+      return (await journal.append({version:1,kind:"sender",occurrence})).occurrence;
+    }
   }
+
   private async read(path: string): Promise<HookOccurrence> { return JSON.parse(decryptVaultLine((await readFile(path, "utf8")).trim(), this.key)) as HookOccurrence; }
   async pending(): Promise<readonly HookOccurrence[]> {
     let names: string[];
-    try { names = await readdir(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    try { names = await readdir(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") names = []; else throw error; }
     const values = await Promise.all(names.filter((name) => name.endsWith(".json.enc")).map(async (name) => {
       try { return await this.read(join(this.root, name)); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
     }));
-    return values.filter((value): value is HookOccurrence => value !== undefined).sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.id.localeCompare(b.id));
+    const deferred = await new CaptureIngressJournal(this.stateRoot,this.key).pending("sender");
+    const merged = new Map([...deferred.map(record=>record.occurrence), ...values.filter((value): value is HookOccurrence => value !== undefined)].map(value=>[value.id,value]));
+    return [...merged.values()].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.id.localeCompare(b.id));
   }
   async acknowledge(id: string): Promise<void> {
-    try { await unlink(join(this.root, filename(id))); await syncPrivateDirectory(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    return withPrivateRootWrite(this.stateRoot,"hook-relay",async()=>{
+      try { await unlink(join(this.root, filename(id))); await syncPrivateDirectory(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const journal = new CaptureIngressJournal(this.stateRoot,this.key);
+      for (const record of await journal.pending("sender")) if(record.occurrence.id===id) await journal.acknowledge(record);
+    });
   }
 }
 
@@ -139,7 +162,7 @@ export class CaptureReceiptQueue {
     for (const receipt of receipts) {
       try {
         await readFile(join(this.root, "completed", filename(receipt.occurrence.id)), "utf8");
-        await unlink(this.path(receipt.occurrence.id)).catch(() => undefined);
+        // Completed duplicates are harmless and are retained until a fenced drain removes them.
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         pending.push(receipt);
@@ -152,8 +175,7 @@ export class CaptureReceiptQueue {
       this.lastEventTime = Math.max(this.engine.eventWatermark(), ...receipts.map((receipt) => receipt.artifact.eventTime));
     });
   }
-  accept(occurrence: HookOccurrence, authority?: HookAuthority): Promise<{ readonly accepted: true; readonly receiptId: string; readonly artifactId: string }> {
-    const operation = this.acceptanceChain.then(async () => {
+  private async acceptNow(occurrence: HookOccurrence, authority?: HookAuthority, originalReceivedAt?: string): Promise<CaptureAcknowledgement> {
       await this.initialize();
       if (occurrence.id.length === 0 || occurrence.id.length > 200) throw new TypeError("receipt ID must contain 1 to 200 characters");
       const protectedPayload = redactJsonValue(occurrence.payload, { retainEncryptedContent: this.engine.config.reasoningPolicy === "include" && this.engine.config.retainEncryptedReasoning }).value as Record<string, unknown>;
@@ -163,17 +185,52 @@ export class CaptureReceiptQueue {
         if (existing.fingerprint !== fingerprint) throw new TypeError("receipt ID was reused for different evidence or authority");
         return { accepted: true as const, receiptId: occurrence.id, artifactId: existing.artifact.id };
       }
-      const receivedAt = new Date().toISOString();
+      const receivedAt = originalReceivedAt ?? new Date().toISOString();
       this.lastEventTime = Math.max(Date.now(), this.lastEventTime + 1, this.engine.eventWatermark() + 1);
       const artifact = await this.engine.vault.store(occurrence.source, protectedPayload, this.lastEventTime, { receiptId: occurrence.id, ...(authority === undefined ? {} : { authority }) });
       const receipt: CaptureReceipt = { version: 1, tenant: { organizationId: this.engine.config.organizationId, workspaceId: this.engine.config.workspaceId, sensorId: this.engine.config.sensorId }, occurrence: { ...occurrence, payload: protectedPayload }, fingerprint,
         receivedAt, artifact, status: "accepted", ...(authority === undefined ? {} : { authority }) };
       await writeProtected(this.path(occurrence.id), receipt, this.key, true);
       return { accepted: true as const, receiptId: occurrence.id, artifactId: artifact.id };
+  }
+  private async reconcileInternal(): Promise<void> {
+    const journal = new CaptureIngressJournal(this.engine.config.stateRoot,this.key);
+    for (const record of await journal.pending("receiver")) {
+      const config=this.engine.config;
+      if(record.tenant?.organizationId!==config.organizationId || record.tenant.workspaceId!==config.workspaceId || record.tenant.sensorId!==config.sensorId) throw new Error("Deferred ingress belongs to a different capture tenant");
+      await this.acceptNow(record.occurrence,record.authority,record.receivedAt);
+      await journal.acknowledge(record);
+    }
+  }
+  accept(occurrence: HookOccurrence, authority?: HookAuthority): Promise<CaptureAcknowledgement> {
+    const receivedAt = new Date().toISOString();
+    const operation = this.acceptanceChain.then(async()=>{
+      const config=this.engine.config;
+      if (occurrence.id.length === 0 || occurrence.id.length > 200) throw new TypeError("receipt ID must contain 1 to 200 characters");
+      const protectedOccurrence = {...occurrence,payload:redactJsonValue(occurrence.payload,{retainEncryptedContent:config.reasoningPolicy==="include"&&config.retainEncryptedReasoning}).value as Record<string,unknown>};
+      try {
+        return await withPrivateRootWrites([config.stateRoot,config.vaultRoot],"capture",async()=>{
+          await this.reconcileInternal();
+          return this.acceptNow(protectedOccurrence,authority,receivedAt);
+        });
+      } catch(error) {
+        if(!(error instanceof PrivateRootSealedError))throw error;
+        const existing=await this.read(occurrence.id);
+        const fingerprint=hash(JSON.stringify([occurrence.source,occurrence.endpoint,protectedOccurrence.payload,authority?.kind,authority?.principalId]));
+        if(existing!==undefined){if(existing.fingerprint!==fingerprint)throw new TypeError("receipt ID was reused for different evidence or authority");return {accepted:true as const,receiptId:occurrence.id,artifactId:existing.artifact.id};}
+        await new CaptureIngressJournal(config.stateRoot,this.key).append({version:1,kind:"receiver",occurrence:protectedOccurrence,receivedAt,tenant:{organizationId:config.organizationId,workspaceId:config.workspaceId,sensorId:config.sensorId},...(authority===undefined?{}:{authority})});
+        return {accepted:true as const,receiptId:occurrence.id,deferred:true as const};
+      }
     });
-    this.acceptanceChain = operation.catch(() => undefined);
+    this.acceptanceChain=operation.catch(()=>undefined);
     return operation;
   }
+  private async reconcileDeferred(): Promise<void> {
+    const operation=this.acceptanceChain.then(()=>withPrivateRootWrites([this.engine.config.stateRoot,this.engine.config.vaultRoot],"capture",()=>this.reconcileInternal()));
+    this.acceptanceChain=operation.catch(()=>undefined);
+    await operation;
+  }
+
   start(): void {
     if (this.processing === undefined) this.processing = this.drain().catch((error: unknown) => {
       this.lastError = error instanceof Error ? error.message : "receipt queue unavailable";
@@ -209,6 +266,8 @@ export class CaptureReceiptQueue {
   }
   async idle(): Promise<void> { await this.processing; }
   async drain(): Promise<void> {
+    await this.reconcileDeferred();
+    return withPrivateRootWrites([this.engine.config.stateRoot,this.engine.config.vaultRoot],"capture",async()=>{
     const receipts = await this.list();
     for (const receipt of receipts) {
       this.lastEventTime = Math.max(this.lastEventTime, receipt.artifact.eventTime);
@@ -233,6 +292,7 @@ export class CaptureReceiptQueue {
         break;
       }
     }
+    });
   }
 }
 

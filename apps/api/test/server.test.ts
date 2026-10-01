@@ -212,8 +212,8 @@ describe("Fold HTTP API", () => {
     }
   });
 
-  it("does not let one credential consume another credential's rate limit", async () => {
-    const api = await startApi({ rateLimiter: new FixedWindowRateLimiter(1) });
+  it("isolates authenticated principal budgets on the same network address", async () => {
+    const api = await startApi({ principalRateLimiter: new FixedWindowRateLimiter(1) });
     try {
       expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { token: "token-a" })).status).toBe(200);
       expect((await apiRequest(api.baseUrl, "/v1/workspaces/workspace-1/events", { token: "token-a" })).status).toBe(429);

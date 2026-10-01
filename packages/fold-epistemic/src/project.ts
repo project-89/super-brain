@@ -93,6 +93,18 @@ export function rebuildMemories(events: readonly FoldEvent[]): MemoryProjection 
       }
     }
   }
+  // Evidence and incoming relations are indexed once for the complete replay.
+  const eventIds = new Set(events.map(({ id }) => id));
+  const incomingSupersedes = new Map<string, number[]>();
+  const incomingContradictions = new Map<string, number[]>();
+  for (const memory of memories.values()) {
+    for (const [references, index] of [[memory.supersedes, incomingSupersedes], [memory.contradicts, incomingContradictions]] as const) {
+      for (const reference of references ?? []) {
+        const revisions = index.get(reference.memoryId) ?? [];
+        revisions.push(reference.revision); index.set(reference.memoryId, revisions);
+      }
+    }
+  }
   const statuses = new Map<string, NonNullable<PersonalMemory["currentness"]>>();
   const currentness = (id: string, visiting: ReadonlySet<string>): NonNullable<PersonalMemory["currentness"]> => {
     const cached = statuses.get(id); if (cached !== undefined) return cached;
@@ -109,14 +121,11 @@ export function rebuildMemories(events: readonly FoldEvent[]): MemoryProjection 
       else if (source.revision !== ref.revision) reasons.push("source-revised");
       else if (currentness(source.id, path).status !== "current") reasons.push("source-needs-review");
     }
-    if (memory.evidence?.some((item) => !events.some((event) => event.id === item.eventId))) reasons.push("evidence-unavailable");
+    if (memory.evidence?.some((item) => !eventIds.has(item.eventId))) reasons.push("evidence-unavailable");
     if (memory.evidence?.some((item) => item.relation === "opposes")) reasons.push("opposing-evidence");
     const sameClaim = (ref: { memoryId: string; revision: number }, target: PersonalMemory) => ref.memoryId === target.id && ref.revision >= (claimRevisions.get(target.id) ?? target.revision) && ref.revision <= target.revision;
-    let superseded = false;
-    for (const other of memories.values()) {
-      if (other.supersedes?.some((ref) => sameClaim(ref, memory))) superseded = true;
-      if (other.contradicts?.some((ref) => sameClaim(ref, memory))) reasons.push("contradictory-memory");
-    }
+    const superseded = (incomingSupersedes.get(id) ?? []).some((revision) => sameClaim({ memoryId: id, revision }, memory));
+    if ((incomingContradictions.get(id) ?? []).some((revision) => sameClaim({ memoryId: id, revision }, memory))) reasons.push("contradictory-memory");
     if (validity.contradicts.some((ref) => { const target = memories.get(ref.memoryId); return target !== undefined && sameClaim(ref, target); })) reasons.push("contradictory-memory");
     const result = { status: superseded ? "superseded" as const : reasons.length ? "needs-review" as const : "current" as const, reasons: [...new Set(superseded ? [...reasons, "superseded"] : reasons)] };
     statuses.set(id, result); return result;

@@ -41,14 +41,21 @@ export class FixedWindowRateLimiter implements RequestRateLimiter {
     }
 
     const startedAt = Math.floor(nowMs / this.windowMs) * this.windowMs;
+    const resetAt = startedAt + this.windowMs;
     let window = this.windows.get(key);
     if (window === undefined || window.startedAt !== startedAt) {
-      this.expireAndMakeRoom(startedAt);
+      this.expire(startedAt);
+      // Never evict a live principal: doing so resets its budget and lets a
+      // high-cardinality caller buy unlimited requests. Capacity recovers at
+      // the next window without retaining any new rejected key.
+      if (!this.windows.has(key) && this.windows.size >= this.maxKeys) {
+        return { allowed: false, limit: this.limit, remaining: 0, resetAt,
+          retryAfterSeconds: Math.max(1, Math.ceil((resetAt - nowMs) / 1_000)) };
+      }
       window = { startedAt, count: 0 };
       this.windows.set(key, window);
     }
 
-    const resetAt = startedAt + this.windowMs;
     if (window.count >= this.limit) {
       return {
         allowed: false,
@@ -68,14 +75,9 @@ export class FixedWindowRateLimiter implements RequestRateLimiter {
     };
   }
 
-  private expireAndMakeRoom(currentWindowStart: number): void {
+  private expire(currentWindowStart: number): void {
     for (const [key, window] of this.windows) {
       if (window.startedAt < currentWindowStart) this.windows.delete(key);
-    }
-    while (this.windows.size >= this.maxKeys) {
-      const oldestKey = this.windows.keys().next().value as string | undefined;
-      if (oldestKey === undefined) break;
-      this.windows.delete(oldestKey);
     }
   }
 }

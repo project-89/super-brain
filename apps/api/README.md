@@ -159,7 +159,8 @@ pnpm --filter @_89/super-brain-api start -- install-service
 
 ## Routes
 
-`GET /health` is public. `POST /v1/webhooks/clerk` uses a verified webhook
+`GET /health` is public process liveness; `GET /ready` reports bounded required-store
+readiness without dependency details. `POST /v1/webhooks/clerk` uses a verified webhook
 signature. All other routes require `Authorization: Bearer <token>`.
 
 The canonical route prefix is
@@ -289,9 +290,14 @@ only after enforcing a distributed limit upstream. HTTP request, header,
 keep-alive, per-socket request-count, and shutdown-drain bounds prevent indefinite
 connections.
 
-TLS termination, recovery actuation, embedding/model
-sidecars, multi-host failover, and distributed proxy rate limits remain
-deployment concerns rather than implicit behavior in this local service.
+The [private deployment runbook](../../deploy/README.md) provides pinned Node24 images,
+two API processes, same-origin hosted Brain, a TLS proxy, separate migration/runtime
+roles and explicit bootstrap. Runtime `FOLD_POSTGRES_SCHEMA_MODE=verify` never reseeds
+revoked memberships. Principal/tenant request and stream budgets are process-local;
+strict distributed quotas and multi-host failover require an operated topology.
+`operations:read` plus current organization administration membership enables
+sanitized diagnostics. The local threshold probe reports dependency, consumer-lag,
+process-error and verified-backup-age alerts without outbound notifications.
 
 ## Semantic memory
 

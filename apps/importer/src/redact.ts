@@ -1,3 +1,4 @@
+import { withPrivateRootWrite } from "./private-fence.js";
 import { createReadStream } from "node:fs";
 import { chmod, link, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -118,6 +119,7 @@ export async function storeRedactedArtifact(
     readonly anonymizer?: RecordAnonymizer;
   } = {},
 ): Promise<ParsedTranscript> {
+    return withPrivateRootWrite(vaultRoot, "importer", async () => {
   const { artifact } = transcript.bundle;
   const beforeHash = await fileMetadata(transcript.sourcePath);
   const sourceSha256 = await sha256File(transcript.sourcePath);
@@ -208,4 +210,6 @@ export async function storeRedactedArtifact(
     sourcePath: transcript.sourcePath,
     bundle: options.anonymizer?.transcriptBundle(bundle) ?? bundle,
   };
-}
+
+    });
+  }

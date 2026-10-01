@@ -31,7 +31,7 @@ jobs:
 
   postgres-isolation:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -69,11 +69,27 @@ jobs:
       - name: Exercise PostgreSQL tenancy and RLS
         env:
           FOLD_TEST_DATABASE_URL: postgres://fold_app:fold_test@127.0.0.1:5432/super_brain_test
+          FOLD_TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/super_brain_test
         run: pnpm --filter @_89/fold-postgres test
       - name: Exercise two-process API commands, delivery, and revocation
         env:
           FOLD_TEST_DATABASE_URL: postgres://fold_app:fold_test@127.0.0.1:5432/super_brain_test
         run: pnpm --filter @_89/super-brain-api test test/postgres-concurrency.test.ts
+
+  private-deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Enable pinned pnpm
+        run: corepack enable && corepack prepare pnpm@10.8.1 --activate
+      - name: Install locked smoke dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Exercise private TLS deployment with two runtime API processes
+        run: node scripts/deployment-smoke.mjs
 
   secrets:
     runs-on: ubuntu-latest

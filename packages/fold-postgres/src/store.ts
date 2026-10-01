@@ -3,7 +3,9 @@ import { isDeepStrictEqual } from "node:util";
 import { Pool, type PoolClient, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
 
 import type { FoldLogEntry } from "@_89/fold";
-import type { FoldSdkCursor, FoldSdkStore, FoldDeliveryCursor, FoldConsumerCursor, FoldCommandReceipt, FoldCommitOptions } from "@_89/fold-sdk";
+import { BoundedCache, immutable } from "@_89/fold-sdk";
+import type { FoldSdkProjectionCheckpoint, FoldSdkProjectionCheckpointKey, FoldSdkCursor, FoldSdkStore, FoldDeliveryCursor, FoldConsumerCursor, FoldCommandReceipt, FoldCommitOptions } from "@_89/fold-sdk";
+import { checkedSchemaMode, recordSchemaVersion, STORE_SCHEMA, verifyPostgresSchema, type PostgresSchemaMode } from "./schema.js";
 
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/i;
 
@@ -18,8 +20,8 @@ interface SequencedEventRow extends EventRow {
 
 interface WorkspaceEventCache {
   sequence: bigint;
-  readonly entries: FoldLogEntry[];
-  readonly eventIds: Set<string>;
+  readonly entries: readonly FoldLogEntry[];
+  readonly bytes: number;
 }
 
 interface EventPageRow extends EventRow {
@@ -38,6 +40,9 @@ export interface PostgresFoldDatabaseOptions {
   readonly schema?: string;
   readonly pool?: Omit<PoolConfig, "connectionString">;
   readonly requireRlsEnforcement?: boolean;
+  readonly schemaMode?: PostgresSchemaMode;
+  readonly eventCacheBytes?: number;
+  readonly eventPageSize?: number;
 }
 
 export interface PostgresTenantScope {
@@ -108,16 +113,26 @@ export class PostgresFoldDatabase {
   private readonly schema: string;
   private readonly ready: Promise<void>;
   private readonly requireRlsEnforcement: boolean;
+  private readonly schemaMode: PostgresSchemaMode;
+  private readonly schemaName: string;
   private closed = false;
-  private readonly eventCaches = new Map<string, WorkspaceEventCache>();
+  private readonly eventCaches: BoundedCache<string, WorkspaceEventCache>;
+  private readonly eventReads = new Map<string, { readonly minimum: bigint; readonly promise: Promise<{ readonly entries: readonly FoldLogEntry[]; readonly revision: string }> }>();
+  private readonly eventPageSize: number;
 
   constructor(options: PostgresFoldDatabaseOptions) {
     if (options.connectionString.trim().length === 0) {
       throw new TypeError("connectionString must not be empty");
     }
-    this.schema = checkedIdentifier(options.schema ?? "public");
-    this.pool = new Pool({ connectionString: options.connectionString, ...options.pool });
+    this.schemaName = options.schema ?? "public";
+    this.schema = checkedIdentifier(this.schemaName);
+    this.schemaMode = checkedSchemaMode(options.schemaMode);
+    this.pool = new Pool({ connectionString: options.connectionString, connectionTimeoutMillis: 5_000, ...options.pool });
     this.requireRlsEnforcement = options.requireRlsEnforcement === true;
+    const budget = options.eventCacheBytes ?? 128 * 1024 * 1024;
+    this.eventPageSize = options.eventPageSize ?? 1_000;
+    if (!Number.isSafeInteger(budget) || budget < 0 || !Number.isInteger(this.eventPageSize) || this.eventPageSize < 1 || this.eventPageSize > 10_000) throw new TypeError("invalid bounded snapshot options");
+    this.eventCaches = new BoundedCache(budget, 64, (cache) => cache.bytes);
     this.ready = this.initialize();
   }
 
@@ -128,6 +143,13 @@ export class PostgresFoldDatabase {
   private async initialize(): Promise<void> {
     const client = await this.pool.connect();
     try {
+      if (this.schemaMode === "verify") {
+        await client.query("BEGIN READ ONLY");
+        await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))");
+        await verifyPostgresSchema(client, this.schemaName, STORE_SCHEMA);
+        await client.query("COMMIT");
+        return;
+      }
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('fold-schema-v1'))");
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${this.schema}`);
@@ -225,6 +247,12 @@ export class PostgresFoldDatabase {
       `);
       await client.query(`ALTER TABLE ${this.table("fold_projection_checkpoints")}
         ADD COLUMN IF NOT EXISTS organization_id text NOT NULL DEFAULT '${POSTGRES_DEFAULT_ORGANIZATION_ID}'`);
+      await client.query(`ALTER TABLE ${this.table("fold_projection_checkpoints")}
+        ADD COLUMN IF NOT EXISTS format_version integer NOT NULL DEFAULT 1,
+        ADD COLUMN IF NOT EXISTS state_version text,
+        ADD COLUMN IF NOT EXISTS source_revision text,
+        ADD COLUMN IF NOT EXISTS ingestion_sequence bigint,
+        ADD COLUMN IF NOT EXISTS access_digest text`);
       for (const [tableName, oldConstraint, columns] of [
         ["fold_consumer_offsets", "fold_consumer_offsets_pkey", "organization_id, workspace_id, consumer_id"],
         ["fold_projection_checkpoints", "fold_projection_checkpoints_pkey", "organization_id, workspace_id, projection"],
@@ -260,6 +288,7 @@ export class PostgresFoldDatabase {
           USING (organization_id = current_setting('app.organization_id', true))
           WITH CHECK (organization_id = current_setting('app.organization_id', true))`);
       }
+      await recordSchemaVersion(client, this.schemaName, STORE_SCHEMA);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -307,30 +336,45 @@ export class PostgresFoldDatabase {
 
   async readSnapshot(input: PostgresTenantInput): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly revision: string }> {
     await this.open();
-    const tenant = tenantScope(input);
-    const key = tenantCacheKey(tenant);
-    let cache = this.eventCaches.get(key);
-    if (cache === undefined) {
-      cache = { sequence: 0n, entries: [], eventIds: new Set() };
-      this.eventCaches.set(key, cache);
-    }
-    const result = await this.tenantQuery<SequencedEventRow>(tenant, `
-      SELECT sequence, event, status
-      FROM ${this.table("fold_events")}
-      WHERE organization_id = $1 AND workspace_id = $2 AND sequence > $3
-      ORDER BY sequence
-    `, [tenant.organizationId, tenant.workspaceId, cache.sequence.toString()]);
-    for (const row of result.rows) {
-      cache.sequence = BigInt(row.sequence) > cache.sequence ? BigInt(row.sequence) : cache.sequence;
-      const event = row.event as FoldLogEntry["event"];
-      if (cache.eventIds.has(event.id)) continue;
-      cache.eventIds.add(event.id);
-      cache.entries.push({ event, status: row.status });
-    }
-    cache.entries.sort((left, right) =>
-      left.event.at.t - right.event.at.t || (left.event.id < right.event.id ? -1 : left.event.id > right.event.id ? 1 : 0));
-    return { entries: [...cache.entries], revision: cache.sequence.toString() };
+    const tenant = tenantScope(input), key = tenantCacheKey(tenant);
+    const minimum = BigInt(await this.workspaceRevision(tenant));
+    const active = this.eventReads.get(key);
+    if (active !== undefined && active.minimum >= minimum) return active.promise;
+    const load = () => this.loadSnapshot(tenant, key, minimum);
+    const reading = active === undefined ? load() : active.promise.then(load, load);
+    const flight = { minimum, promise: reading };
+    this.eventReads.set(key, flight);
+    try { return await reading; }
+    finally { if (this.eventReads.get(key) === flight) this.eventReads.delete(key); }
   }
+
+  private async loadSnapshot(tenant: PostgresTenantScope, key: string, head: bigint): Promise<{ readonly entries: readonly FoldLogEntry[]; readonly revision: string }> {
+    // Pin ingestion head first. New/backdated arrivals cannot extend this read indefinitely.
+    let prior = this.eventCaches.get(key);
+    if (prior !== undefined && prior.sequence > head) prior = undefined;
+    if (prior?.sequence === head) return { entries: prior.entries, revision: head.toString() };
+    let sequence = prior?.sequence ?? 0n, bytes = prior?.bytes ?? 0;
+    const added: FoldLogEntry[] = [];
+    while (sequence < head) {
+      const page = await this.tenantQuery<SequencedEventRow>(tenant, `
+        SELECT sequence, event, status FROM ${this.table("fold_events")}
+        WHERE organization_id = $1 AND workspace_id = $2 AND sequence > $3 AND sequence <= $4
+        ORDER BY sequence LIMIT $5
+      `, [tenant.organizationId, tenant.workspaceId, sequence.toString(), head.toString(), this.eventPageSize]);
+      if (page.rows.length === 0) throw new PostgresFoldConflictError("pinned ingestion snapshot is incomplete");
+      for (const row of page.rows) {
+        const entry = immutable({ event: row.event as FoldLogEntry["event"], status: row.status });
+        added.push(entry); bytes += 2 * Buffer.byteLength(JSON.stringify(entry)) + 128;
+        sequence = BigInt(row.sequence);
+      }
+    }
+    const entries = Object.freeze([...(prior?.entries ?? []), ...added].sort((left, right) =>
+      left.event.at.t - right.event.at.t || (left.event.id < right.event.id ? -1 : left.event.id > right.event.id ? 1 : 0)));
+    this.eventCaches.set(key, { sequence: head, entries, bytes });
+    return { entries, revision: head.toString() };
+  }
+
+  eventCacheUsageBytes(): number { return this.eventCaches.bytes; }
 
   async readEntries(input: PostgresTenantInput): Promise<readonly FoldLogEntry[]> {
     return (await this.readSnapshot(input)).entries;
@@ -591,6 +635,43 @@ export class PostgresFoldDatabase {
     if (result.rowCount === 0) throw new PostgresFoldConflictError(`consumer cursor cannot move backward or beyond delivery head: ${consumerId}`);
   }
 
+  async readProjectionCheckpoint(input: PostgresTenantInput, key: FoldSdkProjectionCheckpointKey): Promise<FoldSdkProjectionCheckpoint | undefined> {
+    await this.open(); const tenant = tenantScope(input);
+    const result = await this.tenantQuery<QueryResultRow & { cursor_t: number; cursor_event_id: string; state: unknown; ingestion_sequence: string }>(tenant, `
+      SELECT cursor_t, cursor_event_id, state, ingestion_sequence FROM ${this.table("fold_projection_checkpoints")}
+      WHERE organization_id=$1 AND workspace_id=$2 AND projection=$3 AND format_version=2
+        AND state_version=$4 AND source_revision=$5 AND access_digest=$6 AND configuration_digest=$7
+        AND ingestion_sequence=(SELECT COALESCE(MAX(sequence),0) FROM ${this.table("fold_events")} WHERE organization_id=$1 AND workspace_id=$2)
+        AND ingestion_sequence::text=source_revision
+    `, [tenant.organizationId, tenant.workspaceId, key.projection, key.stateVersion, key.sourceRevision, key.accessDigest, key.configurationDigest]);
+    const row = result.rows[0];
+    return row === undefined ? undefined : { ...key, formatVersion: 2, ingestionSequence: String(row.ingestion_sequence), through: { t: Number(row.cursor_t), eventId: row.cursor_event_id }, state: row.state };
+  }
+
+  async writeProjectionCheckpoint(input: PostgresTenantInput, checkpoint: FoldSdkProjectionCheckpoint): Promise<boolean> {
+    const state = JSON.stringify(checkpoint.state);
+    if (checkpoint.formatVersion !== 2 || !/^(0|[1-9][0-9]*)$/.test(checkpoint.ingestionSequence) || checkpoint.sourceRevision !== checkpoint.ingestionSequence || Buffer.byteLength(state) > 8 * 1024 * 1024 || checkpoint.projection.length > 300) return false;
+    await this.open(); const tenant = tenantScope(input), client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('fold-schema-v1'))"); await this.setTenant(client, tenant);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fold:${tenantCacheKey(tenant)}`]);
+      const head = await client.query<{ revision: string }>(`SELECT COALESCE(MAX(sequence),0)::text AS revision FROM ${this.table("fold_events")} WHERE organization_id=$1 AND workspace_id=$2`, [tenant.organizationId, tenant.workspaceId]);
+      if (head.rows[0]?.revision !== checkpoint.sourceRevision) { await client.query("ROLLBACK"); return false; }
+      await client.query(`INSERT INTO ${this.table("fold_projection_checkpoints")}
+        (organization_id,workspace_id,projection,cursor_t,cursor_event_id,state,configuration_digest,format_version,state_version,source_revision,ingestion_sequence,access_digest)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,2,$8,$9,$10::bigint,$11)
+        ON CONFLICT (organization_id,workspace_id,projection) DO UPDATE SET cursor_t=EXCLUDED.cursor_t,cursor_event_id=EXCLUDED.cursor_event_id,
+          state=EXCLUDED.state,configuration_digest=EXCLUDED.configuration_digest,format_version=2,state_version=EXCLUDED.state_version,
+          source_revision=EXCLUDED.source_revision,ingestion_sequence=EXCLUDED.ingestion_sequence,access_digest=EXCLUDED.access_digest,updated_at=clock_timestamp()
+      `, [tenant.organizationId,tenant.workspaceId,checkpoint.projection,checkpoint.through.t,checkpoint.through.eventId,state,checkpoint.configurationDigest,checkpoint.stateVersion,checkpoint.sourceRevision,checkpoint.ingestionSequence,checkpoint.accessDigest]);
+      await client.query(`DELETE FROM ${this.table("fold_projection_checkpoints")} WHERE organization_id=$1 AND workspace_id=$2 AND format_version=2 AND projection IN
+        (SELECT projection FROM ${this.table("fold_projection_checkpoints")} WHERE organization_id=$1 AND workspace_id=$2 AND format_version=2 ORDER BY updated_at DESC,projection LIMIT ALL OFFSET 16)`, [tenant.organizationId,tenant.workspaceId]);
+      await client.query("COMMIT"); return true;
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+    finally { client.release(); }
+  }
+
   async projectionCheckpoint(
     input: PostgresTenantInput,
     projection: string,
@@ -660,6 +741,9 @@ export class PostgresFoldDatabase {
 }
 
 export class PostgresFoldStore implements FoldSdkStore {
+  readonly immutableSnapshots = true;
+  readProjectionCheckpoint(key: FoldSdkProjectionCheckpointKey): Promise<FoldSdkProjectionCheckpoint | undefined> { return this.database.readProjectionCheckpoint(this.tenant, key); }
+  writeProjectionCheckpoint(checkpoint: FoldSdkProjectionCheckpoint): Promise<boolean> { return this.database.writeProjectionCheckpoint(this.tenant, checkpoint); }
   constructor(
     private readonly database: PostgresFoldDatabase,
     readonly tenant: PostgresTenantScope,

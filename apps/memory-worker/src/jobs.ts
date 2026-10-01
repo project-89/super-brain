@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { decryptVaultLine, encryptVaultLine, ensureVaultKey } from "@_89/super-brain-importer";
+import { decryptVaultLine, encryptVaultLine, ensureVaultKey, withPrivateRootWrite } from "@_89/super-brain-importer";
 
 export type WorkerJobState = "pending" | "waiting" | "retry" | "completed" | "excluded" | "exhausted";
 export interface WorkerJob {
@@ -68,7 +68,7 @@ export class DurableWorkerJobs {
   }
 
   open(): Promise<void> {
-    if (this.opening === undefined) this.opening = this.initialize().catch((error) => { this.opening = undefined; throw error; });
+    if (this.opening === undefined) this.opening = withPrivateRootWrite(this.root,"worker-jobs",()=>this.initialize()).catch((error) => { this.opening = undefined; throw error; });
     return this.opening;
   }
 
@@ -78,7 +78,7 @@ export class DurableWorkerJobs {
     for (let attempt = 0; ; attempt += 1) {
       try {
         const handle = await open(leasePath, "wx", 0o600);
-        try { await handle.writeFile(JSON.stringify({ pid: process.pid, token: this.token })); await handle.sync(); }
+        try { await handle.writeFile(JSON.stringify({ pid: process.pid, token: this.token, privateWriterProtocol: 1 })); await handle.sync(); }
         finally { await handle.close(); }
         await syncDirectory(this.directory);
         break;
@@ -95,7 +95,7 @@ export class DurableWorkerJobs {
         const recoveryPath = `${leasePath}.recovery`;
         const recovery = await open(recoveryPath, "wx", 0o600);
         try {
-          await recovery.writeFile(JSON.stringify({ pid: process.pid, token: this.token }));
+          await recovery.writeFile(JSON.stringify({ pid: process.pid, token: this.token, privateWriterProtocol: 1 }));
           await recovery.sync();
           const current = JSON.parse(await readFile(leasePath, "utf8")) as { pid?: number; token?: string };
           if (current.token !== existing.token) throw new Error("Another worker acquired the processing namespace");
@@ -134,7 +134,8 @@ export class DurableWorkerJobs {
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(operation, operation);
+    const run = () => withPrivateRootWrite(this.root,"worker-jobs",operation);
+    const result = this.queue.then(run, run);
     this.queue = result.then(() => undefined, () => undefined);
     return result;
   }
@@ -199,10 +200,11 @@ export class DurableWorkerJobs {
   async close(): Promise<void> {
     await this.queue;
     if (!this.opened) return;
-    this.opened = false;
-    this.opening = undefined;
     const path = join(this.directory, "lease.json");
     const owner = await readFile(path, "utf8").then((text) => JSON.parse(text) as { token?: string }).catch(() => undefined);
-    if (owner?.token === this.token) { await unlink(path); await syncDirectory(this.directory); }
+    await withPrivateRootWrite(this.root,"worker-jobs",async()=>{
+      if (owner?.token === this.token) { await unlink(path); await syncDirectory(this.directory); }
+      this.opened = false; this.opening = undefined;
+    });
   }
 }

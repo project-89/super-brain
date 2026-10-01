@@ -1,3 +1,4 @@
+import { withPrivateRootWrite } from "@_89/super-brain-importer";
 import { randomBytes } from "node:crypto";
 import { hostname, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -140,6 +141,7 @@ export async function readCaptureConfig(path = defaultConfigPath()): Promise<Cap
 }
 
 async function writePrivateJson(path: string, value: unknown): Promise<void> {
+    return withPrivateRootWrite(dirname(path), "configuration", async () => {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await chmod(dirname(path), 0o700);
   const temporary = `${path}.${process.pid}.tmp`;
@@ -155,7 +157,9 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
-}
+
+    });
+  }
 
 export async function enableCaptureVaultEncryption(
   pathInput = defaultConfigPath(),

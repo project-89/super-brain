@@ -1,3 +1,4 @@
+import { withPrivateRootWrite } from "@_89/super-brain-importer";
 import { constants, createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -207,6 +208,7 @@ export class StateStore {
   }
 
   save(state: CaptureState): Promise<void> {
+    return withPrivateRootWrite(dirname(this.path), "capture", async () => {
     return atomicPrivateJson(this.path, {
       ...state,
       sessions: Object.fromEntries(Object.entries(state.sessions).map(([key, session]) => [key, {
@@ -214,6 +216,8 @@ export class StateStore {
         steps: [],
         stepCount: session.steps.length,
       }])),
+    });
+  
     });
   }
 }
@@ -269,7 +273,10 @@ export class SessionStepStore {
   }
 
   async initialize(): Promise<void> {
+    return withPrivateRootWrite(dirname(this.root), "capture", async () => {
     await secureDirectory(this.root);
+  
+    });
   }
 
   private async read(source: HookSource, sessionId: string): Promise<CapturedStep[]> {
@@ -316,6 +323,7 @@ export class SessionStepStore {
   }
 
   async synchronize(session: CaptureSession): Promise<CaptureSession> {
+    return withPrivateRootWrite(dirname(this.root), "capture", async () => {
     await this.initialize();
     const existing = await this.read(session.source, session.sessionId);
     const evidence = new Map(existing.map((step) => [stepEvidenceKey(step), step]));
@@ -342,9 +350,12 @@ export class SessionStepStore {
       existing.push(...additions);
     }
     return { ...session, steps: [...existing], stepCount: existing.length };
+  
+    });
   }
 
   async replace(session: CaptureSession, stepsInput: readonly CapturedStep[]): Promise<CaptureSession> {
+    return withPrivateRootWrite(dirname(this.root), "capture", async () => {
     await this.initialize();
     const steps = stepsInput.map((step, index) => ({
       ...step,
@@ -355,6 +366,8 @@ export class SessionStepStore {
     await atomicPrivateText(path, steps.map((step) => `${JSON.stringify(step)}\n`).join(""));
     this.cache.set(this.identity(session.source, session.sessionId), steps);
     return { ...session, steps, stepCount: steps.length };
+  
+    });
   }
 }
 
@@ -372,6 +385,7 @@ export class TranscriptSnapshotStore {
   }
 
   async store(source: HookSource, sourcePath: string): Promise<string> {
+    return withPrivateRootWrite(dirname(this.root), "capture", async () => {
     const before = await stat(sourcePath);
     if (!before.isFile()) throw new Error(`transcript source is not a regular file: ${sourcePath}`);
     const directory = join(this.root, safeSource(source));
@@ -417,14 +431,19 @@ export class TranscriptSnapshotStore {
       await unlink(temporary).catch(() => undefined);
       throw error;
     }
+  
+    });
   }
 
   async complete(pathInput: string): Promise<void> {
+    return withPrivateRootWrite(dirname(this.root), "capture", async () => {
     const path = resolve(pathInput);
     if (path !== this.root && !path.startsWith(`${this.root}${sep}`)) {
       throw new Error("refusing to remove a transcript outside the snapshot store");
     }
     await unlink(path);
+  
+    });
   }
 }
 
@@ -439,6 +458,7 @@ export class HookVault {
   ) {}
 
   async store(source: HookSource, payload: unknown, eventTime: number, metadata: { readonly receiptId?: string; readonly authority?: HookAuthority } = {}): Promise<VaultArtifact> {
+    return withPrivateRootWrite(this.root, "capture", async () => {
     const anonymized = this.options.anonymizer?.value(payload) ?? payload;
     const redacted = redactJsonValue(anonymized, {
       ...(this.options.retainEncryptedReasoning === undefined
@@ -462,6 +482,8 @@ export class HookVault {
       this.encryptionKey === undefined ? serialized : `${encryptVaultLine(serialized.trimEnd(), this.encryptionKey)}\n`,
     );
     return { id, receivedAt, eventTime, path, ...metadata };
+  
+    });
   }
 
   async sessionArtifacts(source: HookSource, sessionId: string): Promise<readonly StoredHookArtifact[]> {
@@ -567,12 +589,16 @@ export class DurableSpool {
   }
 
   async initialize(): Promise<void> {
+    return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     await secureDirectory(this.pending);
     await secureDirectory(this.failed);
     await secureDirectory(this.resolved);
+  
+    });
   }
 
   async enqueue(job: SpoolJob): Promise<void> {
+    return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     await this.initialize();
     const filename = `${job.id.replace(/[^a-zA-Z0-9._-]/g, "_")}.json`;
     const path = join(this.pending, filename);
@@ -582,6 +608,8 @@ export class DurableSpool {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await atomicPrivateJson(path, job);
     }
+  
+    });
   }
 
   async list(): Promise<readonly { readonly path: string; readonly job: SpoolJob }[]> {
@@ -599,14 +627,20 @@ export class DurableSpool {
   }
 
   complete(path: string): Promise<void> {
+    return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     return unlink(path);
+  
+    });
   }
 
   async reject(path: string, reason: string): Promise<void> {
+    return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     const name = path.split("/").at(-1) ?? `${Date.now()}.json`;
     const target = join(this.failed, name);
     await rename(path, target);
     await atomicPrivateJson(`${target}.error.json`, { failedAt: new Date().toISOString(), reason });
+  
+    });
   }
 
   async snapshot(): Promise<SpoolSnapshot> {
@@ -637,6 +671,7 @@ export class DurableSpool {
     reason: string,
     confirm = false,
   ): Promise<{ readonly matched: number; readonly resolved: number }> {
+    return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     await this.initialize();
     const normalizedReason = reason.trim();
     if (normalizedReason.length === 0) throw new TypeError("failed-job resolution requires a reason");
@@ -677,12 +712,15 @@ export class DurableSpool {
       resolved += 1;
     }
     return { matched: names.length, resolved };
+  
+    });
   }
 
   async retryFailed(
     confirm = false,
     options: { readonly rebaseEvents?: boolean; readonly rebaseTrajectories?: boolean } = {},
   ): Promise<{ readonly matched: number; readonly retried: number; readonly rebased: number }> {
+    return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     await this.initialize();
     const names = (await readdir(this.failed))
       .filter((name) => name.endsWith(".json") && !name.endsWith(".error.json"))
@@ -719,6 +757,8 @@ export class DurableSpool {
       retried += 1;
     }
     return { matched: names.length, retried, rebased };
+  
+    });
   }
 }
 
@@ -732,6 +772,7 @@ export async function recordRelayFailure(
   endpoint: string,
   error: unknown,
 ): Promise<void> {
+    return withPrivateRootWrite(stateRoot, "hook-relay", async () => {
   await secureDirectory(stateRoot);
   const path = relayFailurePath(stateRoot);
   const file = await open(path, "a", 0o600);
@@ -742,7 +783,9 @@ export async function recordRelayFailure(
     await file.close();
     await chmod(path, 0o600).catch(() => undefined);
   }
-}
+
+    });
+  }
 
 export async function readRelayFailureSummary(stateRoot: string): Promise<RelayFailureSummary> {
   try {

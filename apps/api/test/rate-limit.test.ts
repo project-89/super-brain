@@ -22,12 +22,15 @@ describe("fixed-window request limiter", () => {
     });
   });
 
-  it("bounds tracked client keys", () => {
+  it("rejects new keys at capacity without resetting live budgets, then recovers", () => {
     const limiter = new FixedWindowRateLimiter(1, 1_000, 2);
     limiter.consume("client-a", 100);
     limiter.consume("client-b", 100);
-    limiter.consume("client-c", 100);
-    expect(limiter.consume("client-a", 100)).toMatchObject({ allowed: true });
+    expect(limiter.consume("client-c", 100)).toMatchObject({ allowed: false });
+    for (let index = 0; index < 50; index += 1) expect(limiter.consume(`other-${index}`, 100).allowed).toBe(false);
+    expect(limiter.consume("client-a", 100)).toMatchObject({ allowed: false });
+    expect(limiter.consume("client-c", 1_000)).toMatchObject({ allowed: true });
+    expect(limiter.consume("client-a", 1_000)).toMatchObject({ allowed: true });
   });
 
   it("rejects invalid configuration and input", () => {
