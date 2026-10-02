@@ -28,8 +28,8 @@
   },
   "dependencies": {
     "@_89/super-brain-client": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^3.25.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^4.6.5",
     "@_89/super-brain-importer": "workspace:*"
   }
 }
