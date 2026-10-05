@@ -75,6 +75,39 @@ describe("spool delivery scheduling", () => {
     expect((await spool.list())).toEqual([]);
   });
 
+  it("folds an older queued tree snapshot into the newer one for the same task", async () => {
+    const root = await mkdtemp(join(tmpdir(), "super-brain-tree-coalesce-"));
+    const spool = new DurableSpool(root);
+    const node = (id: string) => ({ id, kind: "observation" as const, label: id });
+    const edge = (id: string) => ({ id: `root-${id}`, sourceId: "root", targetId: id, label: "next" });
+    const snapshot = (id: string, t: number, nodes: readonly string[]) => spool.enqueue({
+      version: 1, kind: "trajectory-tree", id, createdAt: new Date(t).toISOString(), treeStamp: { id, t, worldDate: "2026-09-15" },
+      tree: { taskId: "task", rootNodeId: "root", nodes: nodes.map(node), edges: nodes.slice(1).map(edge) }, captureIdentity: { session: "session" },
+    });
+    await snapshot("tree-older", 1, ["root", "only-in-older"]);
+    await snapshot("tree-newer", 2, ["root", "only-in-newer"]);
+    const merged = { taskId: "task", rootNodeId: "root", nodes: ["root", "only-in-older", "only-in-newer"].map(node), edges: ["only-in-older", "only-in-newer"].map(edge) };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ record: { tree: merged } }));
+    const processor = new SpoolProcessor(config(root), spool, undefined, undefined, { fetch: fetcher });
+    await processor.flush();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(processor.snapshot().countersSinceStart).toMatchObject({ coalesced: 1, delivered: 1 });
+    expect(await spool.entries()).toEqual([]);
+  });
+
+  it("orders pending jobs from their stamps and indexes files queued by another process", async () => {
+    const spool = await queuedSpool(3);
+    const root = (await spool.entries())[0]!.path.split("/spool/")[0]!;
+    const late = event(-1);
+    await writeFile(join(root, "spool", "pending", "external.json"), JSON.stringify({ version: 1, kind: "event", id: late.id, createdAt: new Date(0).toISOString(), event: late }));
+    const entries = await spool.entries();
+    expect(entries.map((entry) => entry.t)).toEqual([-1, 0, 1, 2]);
+    expect(entries[0]).not.toHaveProperty("job");
+    expect(await spool.read(entries[0]!.path)).toMatchObject({ kind: "event", id: late.id });
+    await spool.complete(entries[0]!.path);
+    expect((await spool.entries()).map((entry) => entry.t)).toEqual([0, 1, 2]);
+  });
+
   it("upgrades a relocated legacy transcript to a durable snapshot before backend delivery", async () => {
     const root = await mkdtemp(join(tmpdir(), "super-brain-relocated-delivery-"));
     const id = "01a06ea8-b61d-7c11-af0d-1fc3dc02779d";
@@ -174,7 +207,7 @@ describe("spool delivery scheduling", () => {
     expect(processor.snapshot()).toMatchObject({ status: "processing", currentJob: { kind: "event" } });
     complete(new Response(JSON.stringify({ entry: {} }), { status: 200 }));
     await flush;
-    const list = vi.spyOn(spool, "list").mockRejectedValueOnce(new Error("sensitive local file"));
+    const list = vi.spyOn(spool, "entries").mockRejectedValueOnce(new Error("sensitive local file"));
     await expect(processor.flush()).rejects.toThrow("sensitive local file");
     expect(processor.snapshot()).toMatchObject({ status: "retrying" });
     expect(processor.snapshot().nextRetryAt).toBeDefined();

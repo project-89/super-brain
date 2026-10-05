@@ -590,7 +590,22 @@ export async function readHookVaultArtifact(options: {
   return parsed as StoredHookArtifact;
 }
 
+export interface SpoolEntry {
+  readonly path: string;
+  readonly t: number;
+  readonly id: string;
+  readonly kind: SpoolJob["kind"];
+  /** Set for trajectory-tree snapshots, which a later snapshot of the same task supersedes. */
+  readonly taskId?: string;
+}
+
+function spoolEntryMeta(job: SpoolJob): Omit<SpoolEntry, "path"> {
+  const stamp = spoolOrderStamp(job);
+  return { t: stamp.t, id: stamp.id, kind: job.kind, ...(job.kind === "trajectory-tree" ? { taskId: job.tree.taskId } : {}) };
+}
+
 export class DurableSpool {
+  private readonly index = new Map<string, Omit<SpoolEntry, "path">>();
   private readonly pending: string;
   private readonly failed: string;
   private readonly resolved: string;
@@ -620,28 +635,48 @@ export class DurableSpool {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await atomicPrivateJson(path, job);
+      this.index.set(filename, spoolEntryMeta(job));
     }
   
     });
   }
 
   async list(): Promise<readonly { readonly path: string; readonly job: SpoolJob }[]> {
+    const entries = await this.entries();
+    const jobs: { readonly path: string; readonly job: SpoolJob }[] = [];
+    for (const entry of entries) jobs.push({ path: entry.path, job: await this.read(entry.path) });
+    return jobs;
+  }
+
+  /**
+   * Pending jobs in delivery order, without their bodies. A job file is parsed once to learn its
+   * order stamp; bodies are read one at a time by the caller, so the backlog never has to fit in memory.
+   */
+  async entries(): Promise<readonly SpoolEntry[]> {
     await this.initialize();
-    const files = (await readdir(this.pending)).filter((name) => name.endsWith(".json")).sort();
-    const jobs = await Promise.all(files.map(async (name) => {
-      const path = join(this.pending, name);
-      return { path, job: JSON.parse(await readFile(path, "utf8")) as SpoolJob };
-    }));
-    return jobs.sort((left, right) => {
-      const leftStamp = spoolOrderStamp(left.job);
-      const rightStamp = spoolOrderStamp(right.job);
-      return leftStamp.t - rightStamp.t || leftStamp.id.localeCompare(rightStamp.id);
-    });
+    const names = new Set((await readdir(this.pending)).filter((name) => name.endsWith(".json")));
+    for (const name of this.index.keys()) if (!names.has(name)) this.index.delete(name);
+    for (const name of names) {
+      if (this.index.has(name)) continue;
+      try {
+        this.index.set(name, spoolEntryMeta(await this.read(join(this.pending, name))));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+    }
+    return [...this.index].map(([name, meta]) => ({ path: join(this.pending, name), ...meta }))
+      .sort((left, right) => left.t - right.t || left.id.localeCompare(right.id));
+  }
+
+  async read(path: string): Promise<SpoolJob> {
+    return JSON.parse(await readFile(path, "utf8")) as SpoolJob;
   }
 
   complete(path: string): Promise<void> {
     return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
-    return unlink(path);
+    await unlink(path);
+    this.index.delete(basename(path));
   
     });
   }
@@ -650,6 +685,7 @@ export class DurableSpool {
     return withPrivateRootWrite(dirname(dirname(this.pending)), "capture", async () => {
     if (dirname(resolve(path)) !== resolve(this.pending)) throw new Error("job is outside the pending spool");
     await atomicPrivateJson(path, job);
+    this.index.set(basename(path), spoolEntryMeta(job));
     });
   }
 
@@ -658,6 +694,7 @@ export class DurableSpool {
     const name = path.split("/").at(-1) ?? `${Date.now()}.json`;
     const target = join(this.failed, name);
     await rename(path, target);
+    this.index.delete(name);
     await atomicPrivateJson(`${target}.error.json`, { failedAt: new Date().toISOString(), reason });
   
     });

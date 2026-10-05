@@ -12,7 +12,7 @@ import {
   TranscriptDeliveryError,
 } from "@_89/super-brain-importer";
 
-import { DurableSpool, TranscriptSnapshotStore } from "./storage.js";
+import { DurableSpool, TranscriptSnapshotStore, type SpoolEntry } from "./storage.js";
 import type { CaptureConfig, SpoolJob } from "./types.js";
 
 const DEFAULT_BATCH_SIZE = 50;
@@ -44,7 +44,7 @@ interface DeliveryJobMetadata {
 
 export interface DeliverySnapshot {
   readonly status: "idle" | "processing" | "retrying";
-  readonly countersSinceStart: { readonly attempted: number; readonly delivered: number; readonly failures: number };
+  readonly countersSinceStart: { readonly attempted: number; readonly delivered: number; readonly failures: number; readonly coalesced: number };
   readonly lastAttemptAt?: string;
   readonly lastDeliveredAt?: string;
   readonly currentJob?: DeliveryJobMetadata;
@@ -94,6 +94,7 @@ export class SpoolProcessor {
   private nextFlushAt = 0;
   private attempted = 0;
   private delivered = 0;
+  private coalesced = 0;
   private failures = 0;
   private lastAttemptAt: string | undefined;
   private lastDeliveredAt: string | undefined;
@@ -159,7 +160,7 @@ export class SpoolProcessor {
   snapshot(): DeliverySnapshot {
     return {
       status: this.processing !== undefined ? "processing" : this.blockedJob !== undefined || this.nextFlushAt > Date.now() ? "retrying" : "idle",
-      countersSinceStart: { attempted: this.attempted, delivered: this.delivered, failures: this.failures },
+      countersSinceStart: { attempted: this.attempted, delivered: this.delivered, failures: this.failures, coalesced: this.coalesced },
       ...(this.lastAttemptAt === undefined ? {} : { lastAttemptAt: this.lastAttemptAt }),
       ...(this.lastDeliveredAt === undefined ? {} : { lastDeliveredAt: this.lastDeliveredAt }),
       ...(this.currentJob === undefined ? {} : { currentJob: this.currentJob }),
@@ -227,15 +228,35 @@ export class SpoolProcessor {
 
   private async processPending(): Promise<void> {
     if (this.nextFlushAt > Date.now()) return;
-    const pending = await this.spool.list();
+    const pending = await this.spool.entries();
     this.blockedJob = undefined;
     let attempted = 0;
+    const latestTree = new Map<string, SpoolEntry>();
+    for (const entry of pending) if (entry.taskId !== undefined) latestTree.set(entry.taskId, entry);
     for (const entry of pending) {
       const { path } = entry;
-      let { job } = entry;
       if (attempted >= this.batchSize) break;
-      if (job.kind === "transcript" && Date.parse(job.notBefore) > Date.now()) continue;
       if ((this.retryAt.get(path) ?? 0) > Date.now()) continue;
+      let job: SpoolJob;
+      try {
+        job = await this.spool.read(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (job.kind === "transcript" && Date.parse(job.notBefore) > Date.now()) continue;
+      const newer = entry.taskId === undefined ? undefined : latestTree.get(entry.taskId);
+      if (job.kind === "trajectory-tree" && newer !== undefined && newer.path !== path) {
+        // A later snapshot of the same task is queued: fold this one into it instead of sending both.
+        const later = await this.spool.read(newer.path);
+        const merged = later.kind === "trajectory-tree" ? coalescedTree(job.tree, later.tree) : undefined;
+        if (later.kind === "trajectory-tree" && merged !== undefined) {
+          await this.spool.replacePending(newer.path, { ...later, tree: merged });
+          await this.spool.complete(path);
+          this.coalesced += 1;
+          continue;
+        }
+      }
       attempted += 1;
       this.attempted += 1;
       this.lastAttemptAt = new Date().toISOString();
@@ -276,5 +297,18 @@ export class SpoolProcessor {
         break;
       }
     }
+  }
+}
+
+/** Merge an older queued snapshot into a newer one; undefined when they conflict and must be sent separately. */
+function coalescedTree(
+  older: Extract<SpoolJob, { kind: "trajectory-tree" }>["tree"],
+  newer: Extract<SpoolJob, { kind: "trajectory-tree" }>["tree"],
+): Extract<SpoolJob, { kind: "trajectory-tree" }>["tree"] | undefined {
+  try {
+    return mergeSharedDecisionTrees(older, newer);
+  } catch (error) {
+    if (error instanceof ProjectionValidationError) return undefined;
+    throw error;
   }
 }
