@@ -27,7 +27,7 @@
     "@_89/fold-epistemic": "workspace:*",
     "@_89/fold-sdk": "workspace:*",
     "@_89/fold-storage": "workspace:*",
-    "pg": "^8.16.3"
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "@_89/fold-transcript": "workspace:*",
