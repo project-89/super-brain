@@ -25,6 +25,6 @@
     "@_89/fold": "workspace:*"
   },
   "devDependencies": {
-    "yaml": "^2.8.1"
+    "yaml": "^2.9.1"
   }
 }
